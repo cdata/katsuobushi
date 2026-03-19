@@ -56,6 +56,19 @@
 { pkgs }:
 let
 
+  # escapeForDoubleQuotes :: string -> string
+  #
+  # Escapes characters that have special meaning inside a bash double-quoted
+  # string (backslash, double-quote, backtick, dollar sign). This allows
+  # arbitrary text — such as ASCII art — to be safely embedded in an
+  # `echo "..."` expression without triggering unintended shell interpretation.
+  escapeForDoubleQuotes =
+    str:
+    builtins.replaceStrings
+      [ "\\" "\"" "`" "$" ]
+      [ "\\\\" "\\\"" "\\`" "\\$" ]
+      str;
+
   # makeMenu :: { commands, title, graphic?, colorizer? } -> { header, menuText, commands }
   #
   # Accepts:
@@ -167,7 +180,8 @@ let
       '';
 
       # Prefix the graphic with a trailing newline if present, otherwise empty.
-      graphicSection = if graphic != "" then graphic + "\n" else "";
+      # The graphic is escaped for safe inclusion inside echo "...".
+      graphicSection = if graphic != "" then escapeForDoubleQuotes graphic + "\n" else "";
     in
     {
       # header: Full greeting — graphic, figlet title, and command table, all
