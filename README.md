@@ -1,4 +1,4 @@
-![hero](./hero-1b.webp)
+![hero](./hero.webp)
 
 # Katsuobushi
 
