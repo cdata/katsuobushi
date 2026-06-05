@@ -6,9 +6,9 @@
     flake-utils.url = "github:numtide/flake-utils";
     katsuobushi.url = "github:cdata/katsuobushi";
 
-    # Required by ./nix/rust.nix: crane drives the Rust builds, nix-filter
-    # scopes the source filter, and rust-overlay provides `pkgs.rust-bin`
-    # from which the helper resolves `rust-toolchain.toml`.
+    # Required by katsuobushi.lib.rust: crane drives the Rust builds,
+    # nix-filter scopes the source filter, and rust-overlay provides
+    # `pkgs.rust-bin` from which the helper resolves `rust-toolchain.toml`.
     crane.url = "github:ipetkov/crane";
     nix-filter.url = "github:numtide/nix-filter";
     rust-overlay = {
@@ -41,18 +41,24 @@
         # Import the katsuobushi menu helpers
         inherit (pkgs.katsuobushi) makeMenu makeDevShellHook;
 
-        # The helper expects a Cargo workspace with crates under `rust/`;
-        # adjust the `rustSource` filter inside `nix/rust.nix` if your layout
-        # differs.
-        rustHelpers = import ./nix/rust.nix {
+        # Rust build helpers, pulled from the katsuobushi flake so upstream
+        # fixes propagate here without a local copy to maintain. The helper
+        # expects a Cargo workspace with crates under `rust/`; if your layout
+        # differs, override the `rustSource` filter upstream in katsuobushi's
+        # `lib/rust.nix`.
+        rustHelpers = katsuobushi.lib.rust {
           inherit pkgs crane;
           filter = nix-filter.lib;
           workspaceRoot = ./.;
+          # Owner-qualified identifier; namespaces the out-of-tree cargo target
+          # dir (see `cargoTargetDir` in katsuobushi's lib/rust.nix). Change me.
+          projectId = "my-org/my-project";
           # Tools every Rust derivation needs at build time.
           buildInputs = with pkgs; [ pkg-config ];
         };
 
         inherit (rustHelpers)
+          rustEnvironmentHook
           rustToolchain
           ;
 
@@ -95,7 +101,7 @@
       {
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = menu.commands ++ [ rustToolchain ];
-          shellHook = makeDevShellHook menu;
+          shellHook = rustEnvironmentHook + makeDevShellHook menu;
         };
 
         # Wire built crates and cargo checks once your workspace exists:

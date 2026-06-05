@@ -14,6 +14,12 @@
   crane,
   workspaceRoot,
   buildInputs,
+  # A stable, globally-unique identifier for the project, supplied by the
+  # importer (e.g. "my-org/my-project"). Namespaces the out-of-tree Cargo
+  # target directory (`cargoTargetDir`) so unrelated projects that happen to
+  # share a workspace name don't collide in the user's global cache. Qualify
+  # it with the owner/origin to be safe.
+  projectId,
 }:
 
 let
@@ -43,6 +49,29 @@ let
 
   rustToolchain = pkgs.rust-bin.fromRustupToolchainFile (workspaceRoot + "/rust-toolchain.toml");
   craneLib = (crane.mkLib pkgs).overrideToolchain (_: rustToolchain);
+
+  # Out-of-tree `CARGO_TARGET_DIR` for host-side cargo. When the project has
+  # no git working tree — a non-colocated jj repo, or any jj workspace — every
+  # flake command copies the whole untracked tree into the store; keeping
+  # `target/` out of it avoids a multi-gigabyte copy. Harmless under plain
+  # git, where `target/` is already gitignored out of the copy. See
+  # NixOS/nix#15651: https://github.com/NixOS/nix/issues/15651
+  #
+  # Keyed by `projectId` (namespace) plus the runtime workspace basename and a
+  # short `$PWD` hash, so sibling workspaces and same-named checkouts don't
+  # collide. Uses `$PWD`, not `workspaceRoot` (which pure eval collapses to a
+  # churning `…-source` path); expanded by the shell via `rustEnvironmentHook`.
+  cargoTargetDir = ''''${XDG_CACHE_HOME:-$HOME/.cache}/cargo-target/${projectId}/$(basename "$PWD")-$(printf '%s' "$PWD" | sha256sum | cut -c1-12)'';
+
+  # A ready-to-splice dev-shell fragment that prepares the host Rust
+  # environment — currently steering cargo at the out-of-tree target dir
+  # above. Concatenate it into your devShell's `shellHook`. It must run in the
+  # shell rather than via mkShell's `env`, which bakes values literally and
+  # would not expand `$PWD`; cargo creates the dir on first build, so no mkdir
+  # is needed.
+  rustEnvironmentHook = ''
+    export CARGO_TARGET_DIR="${cargoTargetDir}"
+  '';
 
   # wasm-bindgen-cli must match the wasm-bindgen crate version used by the
   # workspace exactly, or the generated bindings will fail to load. The pin
@@ -226,6 +255,7 @@ in
     buildWasmCrate
     buildTrunkCrate
     buildTestArchive
+    rustEnvironmentHook
     rustToolchain
     cargoChecks
     wasm-bindgen-cli
