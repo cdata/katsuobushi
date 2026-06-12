@@ -25,7 +25,7 @@ Every PDD must include the following sections, in order:
 5. **Test Cases**: Each test case is prose describing a facet of
    the design that should be tested for acceptance and the criteria that
    would qualify it as acceptable.
-5. **References**: External links relevant to or cited by the
+6. **References**: External links relevant to or cited by the
    document. Always link to the most direct location of the referenced
    content.
 

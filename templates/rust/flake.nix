@@ -62,6 +62,13 @@
           rustToolchain
           ;
 
+        # Markdown design-doc helpers: a shared rumdl configuration driving
+        # the `format:design` menu command and the design check below.
+        markdown = katsuobushi.lib.markdown {
+          inherit pkgs;
+          workspaceRoot = ./.;
+        };
+
         # Example crate — uncomment once you have a Cargo workspace under
         # `rust/`. `pname` must match the crate's `[package].name`.
         #
@@ -95,18 +102,23 @@
               description = "Run the test suite";
               command = "echo TODO: add your test command here";
             };
-          };
+          }
+          // markdown.menuCommands;
         };
       in
       {
         devShells.default = pkgs.mkShell {
-          nativeBuildInputs = menu.commands ++ [ rustToolchain ];
+          nativeBuildInputs = menu.commands ++ [
+            markdown.rumdl
+            rustToolchain
+          ];
           shellHook = rustEnvironmentHook + makeDevShellHook menu;
         };
 
-        # Wire built crates and cargo checks once your workspace exists:
+        # Merge cargo checks once your workspace exists:
+        #   checks = cargoChecks // markdownHelpers.checks;
         #   packages.default = my-crate;
-        #   checks = cargoChecks;
+        checks = markdown.checks;
       }
     );
 }

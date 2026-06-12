@@ -16,6 +16,12 @@
       # template's flake.nix for the full call).
       lib.rust = import ./lib/rust.nix;
 
+      # Markdown design-doc helpers: a shared rumdl configuration driving
+      # both a dev-shell formatter command and a flake check. Like lib.rust,
+      # it's a function called with the consumer's `pkgs` (see the rust
+      # template's flake.nix for the full call).
+      lib.markdown = import ./lib/markdown.nix;
+
       templates = {
         default = {
           path = ./templates/default;
