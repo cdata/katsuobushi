@@ -7,7 +7,7 @@
 #
 # Usage (in a consuming flake):
 #
-#   markdownHelpers = katsuobushi.lib.markdown {
+#   markdown = katsuobushi.lib.markdown {
 #     inherit pkgs;
 #     workspaceRoot = ./.;
 #     # docsDir = "design";                  # default
@@ -73,7 +73,7 @@ in
 
   # Flake checks that fail when the documents drift from the enforced
   # format. Merge into the flake's `checks` output (e.g.
-  # `checks = cargoChecks // markdownHelpers.checks;`).
+  # `checks = cargoChecks // markdown.checks;`).
   checks = {
     "${docsDir}" = pkgs.runCommand "lint-${docsDir}" { } ''
       set -e

@@ -116,7 +116,7 @@
         };
 
         # Merge cargo checks once your workspace exists:
-        #   checks = cargoChecks // markdownHelpers.checks;
+        #   checks = cargoChecks // markdown.checks;
         #   packages.default = my-crate;
         checks = markdown.checks;
       }
