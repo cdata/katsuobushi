@@ -20,21 +20,19 @@
   # share a workspace name don't collide in the user's global cache. Qualify
   # it with the owner/origin to be safe.
   projectId,
+  # Cargo dependencies that are Git repositories, supplied by the importer.
+  # Each project pins its own upstreams, so this table lives in the consuming
+  # flake rather than here. When it is empty (the default), crane falls back
+  # to `builtins.fetchGit` (impure, network-required at eval). To pin a
+  # dependency for fully offline builds, add an entry whose key is the exact
+  # `source` string from `Cargo.lock` (including the `git+` prefix and the
+  # trailing `#<resolved-rev>`) and whose value is the SRI-encoded sha256 of
+  # the checked-out tree. To bootstrap a new entry, use `pkgs.lib.fakeHash`
+  # and let the failing build report the real hash.
+  cargoGitDependencies ? { },
 }:
 
 let
-  # Cargo dependencies that are Git repositories. When this table is empty,
-  # crane falls back to `builtins.fetchGit` (impure, network-required at
-  # eval). To pin a dependency for fully offline builds, add an entry whose
-  # key is the exact `source` string from `Cargo.lock` (including the `git+`
-  # prefix and the trailing `#<resolved-rev>`) and whose value is the
-  # SRI-encoded sha256 of the checked-out tree. To bootstrap a new entry,
-  # use `pkgs.lib.fakeHash` and let the failing build report the real hash.
-  cargoGitDependencies = {
-    "git+https://github.com/dialog-db/dialog-db.git?rev=af442cac90d72c9da8be9c71799f497bddc62f0b#af442cac90d72c9da8be9c71799f497bddc62f0b" =
-      "sha256-wOHAALeYydBd05RQw0+Ge3rJF+HVuW8EFoPMzYOLpVs=";
-  };
-
   # Filter source to only Rust-relevant files.
   rustSource = filter {
     root = workspaceRoot;

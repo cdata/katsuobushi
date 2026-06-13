@@ -55,6 +55,17 @@
           projectId = "my-org/my-project";
           # Tools every Rust derivation needs at build time.
           buildInputs = with pkgs; [ pkg-config ];
+          # Fixed-output hashes for git dependencies pinned in Cargo.lock, so
+          # builds are reproducible and offline. Leave empty and crane falls
+          # back to an impure `fetchGit`. The key is the exact `source` string
+          # from Cargo.lock; bootstrap the value with `pkgs.lib.fakeHash` and
+          # let the failing build report the real hash. Example:
+          #
+          #   cargoGitDependencies = {
+          #     "git+https://github.com/owner/repo.git?rev=<rev>#<rev>" =
+          #       "sha256-...";
+          #   };
+          cargoGitDependencies = { };
         };
 
         inherit (rustHelpers)
