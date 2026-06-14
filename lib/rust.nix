@@ -13,7 +13,14 @@
   filter,
   crane,
   workspaceRoot,
+  # Build-time tools made available to every derivation (e.g. `pkg-config`,
+  # `wrapGAppsHook`). These go into each derivation's `nativeBuildInputs`.
   buildInputs,
+  # Target libraries every derivation links against (e.g. WebKitGTK and the
+  # GTK family for a Tauri app). These go into each derivation's `buildInputs`
+  # so that — under `strictDeps` — a `*-sys` crate's build script resolves them
+  # on the target pkg-config path. Defaults to empty for tool-only projects.
+  libraries ? [ ],
   # A stable, globally-unique identifier for the project, supplied by the
   # importer (e.g. "my-org/my-project"). Namespaces the out-of-tree Cargo
   # target directory (`cargoTargetDir`) so unrelated projects that happen to
@@ -116,7 +123,7 @@ let
     src = rustSource;
     strictDeps = true;
     inherit nativeBuildInputs;
-    buildInputs = [ ];
+    buildInputs = libraries;
 
     # Git dependencies with hashes for offline evaluation. Crane will
     # automatically find Cargo.lock from src.
