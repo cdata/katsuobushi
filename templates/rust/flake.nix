@@ -44,8 +44,8 @@
         # Rust build helpers, pulled from the katsuobushi flake so upstream
         # fixes propagate here without a local copy to maintain. The helper
         # expects a Cargo workspace with crates under `rust/`; if your layout
-        # differs, override the `rustSource` filter upstream in katsuobushi's
-        # `lib/rust.nix`.
+        # differs, pass `sourceInclude` (see below) to point the source filter
+        # elsewhere.
         rustHelpers = katsuobushi.lib.rust {
           inherit pkgs crane;
           filter = nix-filter.lib;
@@ -54,7 +54,16 @@
           # dir (see `cargoTargetDir` in katsuobushi's lib/rust.nix). Change me.
           projectId = "my-org/my-project";
           # Tools every Rust derivation needs at build time.
-          buildInputs = with pkgs; [ pkg-config ];
+          nativeBuildInputs = with pkgs; [ pkg-config ];
+          # Libraries every derivation links against (e.g. for a Tauri app):
+          #   buildInputs = with pkgs; [ webkitgtk_4_1 ];
+          # Workspace-relative paths kept by the source filter. Defaults to a
+          # layout with crates under `rust/`; override when yours live elsewhere:
+          #   sourceInclude = [ ".cargo" "Cargo.lock" "Cargo.toml" "rust-toolchain.toml" "crates" ];
+          # wasm-bindgen-cli is built to match the `wasm-bindgen` version in your
+          # Cargo.lock automatically. If that version isn't one this lib ships
+          # hashes for, the build will tell you to add an entry here:
+          #   wasmBindgenHashes."0.2.99" = { hash = pkgs.lib.fakeHash; cargoHash = pkgs.lib.fakeHash; };
           # Fixed-output hashes for git dependencies pinned in Cargo.lock, so
           # builds are reproducible and offline. Leave empty and crane falls
           # back to an impure `fetchGit`. The key is the exact `source` string
@@ -69,6 +78,8 @@
         };
 
         inherit (rustHelpers)
+          buildCrate
+          cargoChecks
           rustEnvironmentHook
           rustToolchain
           ;
