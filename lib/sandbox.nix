@@ -237,16 +237,12 @@ let
   '';
 
   # homeFiles always includes the generated manifest as an internal immutable
-  # entry at ~/README.md, plus a guest ~/.claude/CLAUDE.md that imports it so
-  # every in-VM agent session auto-loads it. The project's own
-  # CLAUDE.md/AGENTS.md still layer normally on top inside the workspace.
-  claudeImport = pkgs.writeText "katsuobushi-CLAUDE.md" ''
-    # Sandbox environment
-
-    This machine is a Katsuobushi sandbox. Read `@${agentHome}/README.md` for the
-    full description of what is available here, how to return work, and what the
-    network allows.
-  '';
+  # entry at ~/README.md. We deliberately do NOT own ~/.claude/CLAUDE.md: that
+  # file is reserved for the consumer (e.g. a universal AGENTS.md mapped via
+  # homeFiles), so the lib must never squat it. The manifest is surfaced to the
+  # in-VM agent by other means — the interactive login shell cats it (see
+  # loginShellInit), and agent mode injects a pointer to it via
+  # `--append-system-prompt-file` at launch.
 
   # Pre-seed Claude Code's per-user state so a brand-new ephemeral home does not
   # trap an interactive session behind the first-run gates. Empirically (the
@@ -296,10 +292,6 @@ let
     // {
       "README.md" = {
         source = manifest;
-        mode = "immutable";
-      };
-      ".claude/CLAUDE.md" = {
-        source = claudeImport;
         mode = "immutable";
       };
     };
