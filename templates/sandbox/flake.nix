@@ -123,9 +123,12 @@
             #   SOME_TOKEN = { fromFile = "/run/secrets/some-token"; };
           };
 
-          # The Claude Code harness to install in the guest. Defaults to
-          # nixpkgs' `claude-code`; track the newer llm-agents build instead:
-          claudeCodePackage = llm-agents.packages.${system}.claude-code;
+          # Packages to put on the guest's PATH — this is where the agent harness
+          # goes; the lib has no built-in harness, so you supply it like any other
+          # package. Here we install Claude Code; swap it for whichever agent you
+          # run. nixpkgs has `pkgs.claude-code` (unfree); we use the newer build
+          # from numtide/llm-agents.nix (pre-built, no allowUnfree needed):
+          packages = [ llm-agents.packages.${system}.claude-code ];
 
           # --- Resources ---
           vcpu = 4;

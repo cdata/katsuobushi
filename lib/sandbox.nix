@@ -85,12 +85,13 @@ defaults:
   mem ? 8192, # MiB. NB: qemu hangs at exactly 2048 (microvm.nix#171).
   storeOverlaySize ? "8G", # tmpfs writable /nix/store overlay; heavy builds need more.
 
-  # The Claude Code package to install in the guest. Defaults to nixpkgs'
-  # `claude-code` if present (it is unfree — the consumer's `pkgs` must allow
-  # it), else null, in which case the manifest still describes the workflow and
-  # the consumer can supply a package. Resolved from the *consumer's* pkgs so an
-  # `allowUnfree` config carries through.
-  claudeCodePackage ? (pkgs.claude-code or null),
+  # Packages to put on the guest's PATH. This is where the agent harness goes —
+  # it is just another package, not a built-in concept, so the consumer supplies
+  # it (and any extra tooling) here. For Claude Code, pass nixpkgs' `claude-code`
+  # (unfree — the consumer's `pkgs` must allow it) or a flake's build of it; see
+  # templates/sandbox. For arbitrary NixOS config beyond packages, use
+  # `guestModules`.
+  packages ? [ ],
 
   # Escape hatch: extra NixOS modules merged into the guest (4 / §5).
   guestModules ? [ ],
@@ -588,16 +589,16 @@ let
       '';
 
       environment.systemPackages =
-        with pkgs;
-        [
+        (with pkgs; [
           git
           coreutils
           gnutar
           gzip
           rsync
           cacert
-        ]
-        ++ lib.optional (claudeCodePackage != null) claudeCodePackage;
+        ])
+        # Consumer-supplied packages, including the agent harness (4 / §5).
+        ++ packages;
 
       # CA bundle so HTTPS-through-proxy validates.
       security.pki.certificateFiles = [ "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
