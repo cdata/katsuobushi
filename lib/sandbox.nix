@@ -39,7 +39,11 @@ defaults:
   baseAllowedOrigins ? [
     # Anthropic inference. CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 (set in the
     # guest env) keeps Claude Code's telemetry/feature-flag/autoupdate hosts off
-    # the allowlist — the single biggest lever for a small baseline.
+    # the allowlist — the single biggest lever for a small baseline. NB: agent
+    # mode UNSETS that var (the channels feature is gated behind a flag fetch it
+    # suppresses), so a dormant agent will *attempt* those ancillary hosts; the
+    # proxy still denies any not on this list, and channels were validated to
+    # work with this lean baseline unchanged.
     "api.anthropic.com"
     # OAuth/subscription auth validation. Claude Code contacts this even with
     # nonessential traffic disabled; without it auth fails with ERR_BAD_REQUEST.
@@ -98,6 +102,11 @@ defaults:
 
   # Infra dependency, defaulting to the version Katsuobushi pins.
   microvm ? defaults.microvm,
+  # The lib.rust helper and Katsuobushi's own workspace source, used to build
+  # the in-tree host↔guest sandbox controller crate that powers agent mode. Both are
+  # partial-applied by the Katsuobushi flake; a consumer never sets them.
+  rust ? defaults.rust,
+  controlSrc ? defaults.controlSrc,
 }:
 
 let
@@ -130,6 +139,66 @@ let
   slirpDns = "10.0.2.3";
 
   secretNames = builtins.attrNames secrets;
+
+  # ---- In-tree sandbox controller crate (agent mode) ----------------------
+  # Built reproducibly via lib.rust/crane from Katsuobushi's own workspace
+  # source. The server + `report` binaries are baked into the guest; the host
+  # client backs the `sandbox:prompt` command. See design/sandbox-agent-mode.md.
+  controlRust = rust {
+    inherit pkgs;
+    workspaceRoot = controlSrc;
+    projectId = "cdata/katsuobushi";
+  };
+  # One crate, two binaries: the guest controller server and the host client.
+  controlPkg = controlRust.buildCrate {
+    pname = "katsuobushi-sandbox-control";
+    cargoExtraArgs = "--package katsuobushi-sandbox-control";
+  };
+
+  # vsock + control-socket constants. The guest server listens on AF_VSOCK; the
+  # `report` command and server rendezvous on a guest-local unix socket under a
+  # per-agent dir in the RAM-backed /run. The host vsock port is fixed (the
+  # per-instance discriminator is the CID, emitted at launch).
+  controlSocketDir = "/run/katsuobushi/control";
+  reportSocket = "${controlSocketDir}/report.sock";
+  controlServerBin = "${controlPkg}/bin/katsuobushi-sandbox-control";
+  controlHostBin = "${controlPkg}/bin/katsuobushi-sandbox-prompt";
+
+  # The agent's `report` command — a shell app, not a Rust binary. It just
+  # writes one JSON line (the ReportLine wire shape) to the server's guest-local
+  # unix socket; jq guarantees correct escaping of arbitrary status text, socat
+  # carries the line. Opaque to the agent (design §5.6).
+  reportApp = pkgs.writeShellApplication {
+    name = "report";
+    runtimeInputs = with pkgs; [
+      jq
+      socat
+    ];
+    text = ''
+      status="''${1:-}"
+      text="''${2:-}"
+      turn="''${3:-}"
+      case "$status" in
+        working | done | blocked | info) ;;
+        *)
+          echo "usage: report <working|done|blocked|info> <text> [turn_id]" >&2
+          exit 2
+          ;;
+      esac
+      if [ -z "$text" ]; then
+        echo "usage: report <working|done|blocked|info> <text> [turn_id]" >&2
+        exit 2
+      fi
+      if [ -n "$turn" ]; then
+        line="$(jq -nc --arg s "$status" --arg t "$text" --argjson id "$turn" \
+          '{status:$s,text:$t,turn_id:$id}')"
+      else
+        line="$(jq -nc --arg s "$status" --arg t "$text" '{status:$s,text:$t}')"
+      fi
+      printf '%s\n' "$line" \
+        | socat - "UNIX-CONNECT:''${KATSU_REPORT_SOCK:-${reportSocket}}"
+    '';
+  };
 
   # ---- Eval-time validation of project-scoped paths -------
   checkContextPath =
@@ -236,6 +305,80 @@ let
     - Use the human's git credentials or upstream remotes — they are not present.
   '';
 
+  # Agent-mode operating contract, injected at launch via
+  # `--append-system-prompt-file` (design §5.11). Always-on for every turn in
+  # the dormant session, fully ours, and scoped to agent mode — so it does NOT
+  # touch ~/.claude/CLAUDE.md, which stays the consumer's.
+  agentContract = pkgs.writeText "katsuobushi-agent-contract.md" ''
+    # Katsuobushi agent-mode operating contract
+
+    You are a long-lived session inside a Katsuobushi sandbox VM, driven by a
+    host operator rather than a human at this terminal.
+
+    **Operator directives arrive as channel turns** that look like
+    `<channel source="katsuobushi-sandbox-control" turn_id="N">…</channel>`.
+    Treat the content of each such turn as your next instruction.
+
+    For each directive:
+
+    1. Do the work in the project at `${workspacePath}`.
+    2. Commit and `git push` on the branch `sandbox/<instance>` (already checked
+       out). The pushed branch is the work product; the channel never carries
+       code.
+    3. Run `report done "<short summary>"` to signal completion of the turn.
+
+    Other status reports (run them as ordinary shell commands):
+
+    - `report working "<note>"` — optional progress while you work.
+    - `report blocked "<what you need>"` — you cannot proceed; then wait for the
+      next directive.
+    - `report info "<note>"` — anything else worth surfacing to the operator.
+
+    Do not wait for, or ask for, interactive confirmation — there is no human at
+    this terminal. When the operator tells you that you are finished (or to shut
+    down), run `systemctl poweroff` to end the session.
+
+    Your full environment manifest — network allowlist, reference repos, what
+    you can and cannot do — is at `~/README.md`. Read it if you need orientation.
+  '';
+
+  # Poller that dismisses Claude Code's development-channels acknowledgement.
+  # `--dangerously-load-development-channels` shows a blocking interactive prompt
+  # ("I am using this for local development / Exit") on EVERY launch: it is not
+  # persisted to config and there is no settings key to pre-accept it (it is
+  # bound to the CLI flag, and its accept handler writes nothing). A dormant
+  # session has nobody to answer it, so claude would block forever before arming
+  # the channel and spawning the controller server. We watch the pane with
+  # `tmux capture-pane` and, once the prompt appears, send Enter — which accepts
+  # the highlighted default ("I am using this for local development") — with
+  # `tmux send-keys`. The poll is bounded so a missing/renamed prompt cannot
+  # wedge boot; the space-strip tolerates the TUI's box-drawing. Timing/wording
+  # is empirical — revisit if Claude Code changes this prompt.
+  #
+  # WHY tmux and not zellij for the dormant session: zellij's actions
+  # (write/dump-screen) require an *attached client*, and a dormant session has
+  # none — they fail with "no active session", so zellij CANNOT inject this
+  # keystroke headlessly (verified 2026-06-24, the hard way). tmux targets
+  # sessions by name and its send-keys/capture-pane work on a detached session
+  # with no client — exactly the design's named fallback (§5.2). The tradeoff is
+  # losing zellij's nicer attach UX.
+  agentChannelAck = pkgs.writeShellScript "katsuobushi-channel-ack" ''
+    export PATH=${
+      lib.makeBinPath [
+        pkgs.coreutils
+        pkgs.gnugrep
+        pkgs.tmux
+      ]
+    }
+    for _ in $(seq 1 40); do
+      sleep 2
+      if tmux capture-pane -t katsuobushi -p 2>/dev/null | tr -d ' ' | grep -qi 'forlocaldevelopment'; then
+        tmux send-keys -t katsuobushi Enter
+        break
+      fi
+    done
+  '';
+
   # homeFiles always includes the generated manifest as an internal immutable
   # entry at ~/README.md. We deliberately do NOT own ~/.claude/CLAUDE.md: that
   # file is reserved for the consumer (e.g. a universal AGENTS.md mapped via
@@ -254,10 +397,26 @@ let
   # Seeding `hasCompletedOnboarding` + a theme + pre-trusting the workspace and
   # home paths takes the session straight to an authenticated prompt. This is a
   # seed (writable) file: Claude rewrites ~/.claude.json at runtime.
+  #
+  # We also register the sandbox controller server here, at **user scope** (top-level
+  # `mcpServers`). This is deliberate: Claude Code's "New MCP server found in
+  # this project — Use this MCP server?" consent gate fires only for *project*
+  # `.mcp.json` servers, and that dialog does not relay — a dormant headless
+  # agent has nobody to accept it. A user-scoped server is pre-trusted, so the
+  # channel registers unattended. `--dangerously-load-development-channels
+  # server:katsuobushi-sandbox-control` (passed only in agent mode) resolves to
+  # this entry by name.
   claudeConfigSeed = pkgs.writeText "claude.json" (
     builtins.toJSON {
       hasCompletedOnboarding = true;
       theme = "dark";
+      mcpServers = {
+        katsuobushi-sandbox-control = {
+          command = controlServerBin;
+          args = [ ];
+          env.KATSU_REPORT_SOCK = reportSocket;
+        };
+      };
       projects = {
         ${workspacePath} = {
           hasTrustDialogAccepted = true;
@@ -367,6 +526,13 @@ let
     args="$args -fsdev local,id=katsushare,path=''${KATSU_STATE_DIR},security_model=none"
     args="$args -device virtio-9p-pci,fsdev=katsushare,mount_tag=${shareTag}"
 
+    # Agent mode: a vhost-vsock device with the per-instance CID the runner
+    # allocated, for the host↔guest controller channel (design §5.4). Emitted only when
+    # a CID is present; interactive instances get no vsock device at all.
+    if [ -n "''${KATSU_VSOCK_CID:-}" ]; then
+      args="$args -device vhost-vsock-pci,guest-cid=''${KATSU_VSOCK_CID}"
+    fi
+
     # Declared secrets via fw_cfg, reading from tmpfs files the wrapper staged.
     ${lib.concatMapStrings (name: ''
       args="$args -fw_cfg name=opt/io.systemd.credentials/${name},file=''${KATSU_CRED_${name}}"
@@ -431,6 +597,12 @@ let
           "x-systemd.after=systemd-modules-load.service"
         ];
       };
+
+      # virtio-vsock guest transport, for the host↔guest controller channel in agent
+      # mode (design §5.4). The matching `vhost-vsock-pci` device is emitted at
+      # launch (extraArgsScript) only when a CID is allocated; loading the
+      # module unconditionally is harmless when no device is present.
+      boot.kernelModules = [ "vmw_vsock_virtio_transport" ];
 
       networking.hostName = "katsuobushi";
       # Ephemeral guest; pin a stateVersion so the eval is reproducible.
@@ -525,8 +697,43 @@ let
         http_proxy = "http://127.0.0.1:${toString proxyPort}";
         all_proxy = "http://127.0.0.1:${toString proxyPort}";
         # No connection to api.anthropic.com beyond inference: keeps Claude
-        # Code's ancillary hosts off the allowlist.
+        # Code's ancillary hosts off the allowlist. NB: agent mode UNSETS this
+        # for the dormant claude (see the agent-mode unit) because Claude Code gates the
+        # experimental channels feature behind a feature-flag fetch this var
+        # suppresses — with it set, channels report "not currently available"
+        # and host->guest prompt injection never reaches claude. Interactive
+        # sessions keep this lean, telemetry-off posture.
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
+        # Tell Claude Code it is sandboxed. It refuses --dangerously-skip-
+        # permissions ("bypass mode") unless it believes it is in a sandbox
+        # (IS_SANDBOX=1, or bubblewrap) — which is accurate here (a real VM) —
+        # and this keeps bypass mode available for agent mode.
+        IS_SANDBOX = "1";
+        # Where the controller server listens and the `report` command connects
+        # (agent mode). Set globally so both — the server claude spawns, and the
+        # report command the agent runs — agree without per-invocation wiring.
+        KATSU_REPORT_SOCK = reportSocket;
+      };
+
+      # Claude Code "managed settings" — the org-policy settings tier, highest
+      # precedence. Two sandbox-forced settings live here (rather than in user
+      # settings) so a consumer's own ~/.claude/settings.json mapped via
+      # homeFiles cannot accidentally override them, and because managed settings
+      # is an accepted source for both keys:
+      #   * channelsEnabled — the experimental channels feature is also gated by
+      #     org policy ("channels not enabled by org policy"); force it on so the
+      #     dormant agent can receive host-injected channel turns.
+      #   * skipDangerousModePermissionPrompt — Claude Code shows a blocking
+      #     "Bypass Permissions mode" acknowledgement at *interactive* startup
+      #     (the old `claude -p` path skipped it). A dormant session has nobody
+      #     to accept it, so claude takes the default ("No, exit") and quits —
+      #     which is exactly what made the agent's tmux session exit.
+      #     This key skips that prompt. NB: the legacy ~/.claude.json
+      #     `bypassPermissionsModeAccepted` key does NOT work — Claude migrates
+      #     and strips it on startup. (Both validated 2026-06-23.)
+      environment.etc."claude-code/managed-settings.json".text = builtins.toJSON {
+        channelsEnabled = true;
+        skipDangerousModePermissionPrompt = true;
       };
 
       # nix-daemon downloads via the proxy too, so substituters are reachable
@@ -591,17 +798,49 @@ let
           gzip
           rsync
           cacert
+          # Agent-mode PTY host for the dormant Claude session (design §5.2).
+          # A human can `tmux attach -t katsuobushi` over ssh to watch it work.
+          # tmux (not zellij) because its send-keys/capture-pane drive a detached
+          # session with no attached client — needed to dismiss Claude Code's
+          # dev-channels prompt headlessly (see agentChannelAck).
+          tmux
         ])
+        ++ [
+          # Agent mode: the `report` command on the agent's PATH (opaque to it).
+          # The controller server binary is not on PATH — claude spawns it by absolute
+          # store path from ~/.claude.json, and that reference pulls it into the
+          # guest closure (see claudeConfigSeed).
+          reportApp
+        ]
         # Consumer-supplied packages, including the agent harness.
         ++ packages;
 
       # CA bundle so HTTPS-through-proxy validates.
       security.pki.certificateFiles = [ "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
 
+      # Agent-mode self-shutdown: a scoped polkit rule lets the otherwise
+      # unprivileged agent power off ITS OWN VM — and nothing else — via
+      # `systemctl poweroff` (design §5.10). poweroff is orthogonal to the
+      # egress firewall the unprivileged-agent design protects, so this does not
+      # weaken the threat model: worst case a prompt-injected agent self-DoSes
+      # its own sandbox.
+      security.polkit.enable = true;
+      security.polkit.extraConfig = ''
+        polkit.addRule(function(action, subject) {
+          if (action.id == "org.freedesktop.login1.power-off" &&
+              subject.user == "${agentUser}") {
+            return polkit.Result.YES;
+          }
+        });
+      '';
+
       # /workspace owned by the agent.
       systemd.tmpfiles.rules = [
         "d ${workspaceParent} 0755 ${agentUser} users - -"
         "d /run/katsuobushi 0755 root root - -"
+        # Agent-owned: the controller server (spawned by claude as the agent) binds the
+        # report socket here, and the `report` command connects to it.
+        "d ${controlSocketDir} 0700 ${agentUser} users - -"
       ]
       # seed homeFiles: copy from store into home, agent may edit.
       ++ map (e: "C ${agentHome}/${e.dest} 0644 ${agentUser} users - ${e.src}") seedHomeFiles
@@ -745,13 +984,17 @@ let
         '';
       };
 
-      # ---- Autonomous run mode ----
-      # Always present; no-ops in interactive mode. In autonomous mode it runs
-      # `claude -p "<task>"` as the agent (loading the proxy/secret profile),
-      # pushes the branch, and powers off unless asked to linger. Runs as root
-      # only to orchestrate su/poweroff; claude runs as the unprivileged agent.
+      # ---- Agent run mode ----
+      # Always present; no-ops unless launched in agent mode. It starts a
+      # *dormant interactive* Claude session inside a detached tmux session as
+      # the unprivileged agent (design §5.2), with the controller channel server
+      # armed so the host can push prompts into the session over vsock. The
+      # session lingers; it ends when the agent runs `systemctl poweroff` (told
+      # it is finished) or the host stops the VM. Replaces the old `claude -p`
+      # autonomous path, which was doomed by the -p→bare billing shift (design
+      # §1, §5.1).
       systemd.services.katsuobushi-agent = {
-        description = "Katsuobushi autonomous agent run";
+        description = "Katsuobushi agent-mode session (dormant Claude under tmux)";
         wantedBy = [ "multi-user.target" ];
         after = [
           "katsuobushi-workspace.service"
@@ -760,10 +1003,8 @@ let
         ];
         wants = [ "network-online.target" ];
         path = with pkgs; [
-          git
           coreutils
           util-linux
-          systemd
         ];
         serviceConfig = {
           Type = "oneshot";
@@ -771,30 +1012,39 @@ let
           StandardOutput = "journal+console";
           StandardError = "journal+console";
         };
+        # Create the dormant session detached via `tmux new-session -d`, so a
+        # real PTY exists with nobody attached (the TUI stays healthy) and a
+        # human can `tmux attach -t katsuobushi` over ssh to watch the agent work
+        # live. `tmux new-session -d` daemonizes its server cleanly with no
+        # controlling terminal. The command runs under a login shell (bash -lc)
+        # so the proxy/secret profile and harness PATH apply, and `unset
+        # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` for the dormant claude only
+        # (the global env keeps interactive sessions lean) — load-bearing because
+        # Claude Code gates the experimental channels feature behind a feature-
+        # flag fetch that var suppresses, so with it set channels report "not
+        # currently available" and the host->guest injection silently never
+        # reaches claude. `exec` lets claude own the pane.
+        # --dangerously-load-development-channels arms the controller channel
+        # (the server is registered user-scope in ~/.claude.json, so no MCP
+        # consent gate); --dangerously-skip-permissions auto-approves (the VM is
+        # the blast-radius boundary); the operating contract is appended to the
+        # system prompt.
+        #
+        # After launching, a detached poller (agentChannelAck) accepts the
+        # development-channels prompt; see that script for the full why (and why
+        # this is tmux, not zellij). It is setsid-detached so this oneshot
+        # returns promptly and systemd does not reap it, and runs as the agent
+        # (it owns the tmux session).
         script = ''
           set -u
           mode="$(cat ${shareMount}/mode 2>/dev/null || echo interactive)"
-          if [ "$mode" != "autonomous" ]; then
+          if [ "$mode" != "agent" ]; then
             exit 0
           fi
-          instance="$(cat ${shareMount}/instance 2>/dev/null || echo unknown)"
-          task="$(cat ${shareMount}/task 2>/dev/null || true)"
-          # Run claude as the agent with a login shell so the proxy/secret
-          # profile is applied. Not --bare (it ignores CLAUDE_CODE_OAUTH_TOKEN).
-          # --dangerously-skip-permissions auto-approves tool calls — headless
-          # -p cannot answer prompts, and the VM is the blast-radius boundary
-          # (the whole point of the sandbox). bash is given by absolute path:
-          # runuser execs via the service PATH, which does not contain bash. The
-          # run's output is on the (tee'd) console; its product is the pushed
-          # branch — no separate status file is kept.
-          runuser -u ${agentUser} -- ${pkgs.bash}/bin/bash -lc "cd ${workspacePath} && claude --dangerously-skip-permissions -p \"$task\"" || true
-
-          # Push whatever the agent committed back to the host.
-          runuser -u ${agentUser} -- ${pkgs.bash}/bin/bash -lc "cd ${workspacePath} && git push origin HEAD:sandbox/$instance" || true
-
-          if [ "$(cat ${shareMount}/keepalive 2>/dev/null || echo no)" != "yes" ]; then
-            systemctl poweroff
-          fi
+          runuser -u ${agentUser} -- ${pkgs.tmux}/bin/tmux new-session -d -s katsuobushi -x 220 -y 50 \
+            ${pkgs.bash}/bin/bash -lc 'unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC; cd ${workspacePath} && exec claude --dangerously-skip-permissions --dangerously-load-development-channels server:katsuobushi-sandbox-control --append-system-prompt-file ${agentContract}'
+          setsid runuser -u ${agentUser} -- ${agentChannelAck} >/dev/null 2>&1 &
+          # Future: idle backstop — reap a forgotten/wedged session (design §5.10).
         '';
       };
     };
@@ -814,9 +1064,11 @@ let
   # Resolves the instance, builds the per-instance bare mirror + working-tree
   # snapshot seed, stages context (symlink-safe) + non-secret runtime files,
   # reads each secret from the host into a tmpfs file (fail-fast), generates an
-  # ephemeral ssh keypair, boots, and either attaches over ssh (interactive) or
-  # waits for the autonomous run to finish. The pushed branch and console.log
-  # persist in the host state dir; the rest evaporates.
+  # ephemeral ssh keypair, and boots. In interactive mode it attaches over ssh
+  # and tears the VM down on exit; in agent mode it launches a lingering,
+  # detached VM, sends the optional initial --prompt over vsock, and returns
+  # (the VM is stopped by the agent's own poweroff or `sandbox:stop`). The
+  # pushed branch and console.log persist in the host state dir.
   sandboxRunner = pkgs.writeShellApplication {
     name = "sandbox";
     runtimeInputs = with pkgs; [
@@ -828,16 +1080,15 @@ let
     ];
     text = ''
       mode="interactive"
-      task=""
-      keepalive="no"
+      prompt=""
+      have_prompt="no"
       instance=""
       named="no"
 
       while [ "$#" -gt 0 ]; do
         case "$1" in
-          --task) mode="autonomous"; task="$2"; shift 2 ;;
-          --task-file) mode="autonomous"; task="$(cat "$2")"; shift 2 ;;
-          --keep-alive) keepalive="yes"; shift ;;
+          --agent) mode="agent"; shift ;;
+          --prompt) mode="agent"; prompt="$2"; have_prompt="yes"; shift 2 ;;
           --name) instance="$2"; named="yes"; shift 2 ;;
           *) echo "sandbox: unknown argument: $1" >&2; exit 2 ;;
         esac
@@ -861,8 +1112,32 @@ let
 
       printf '%s' "$instance" > "$state_root/instance"
       printf '%s' "$mode"     > "$state_root/mode"
-      printf '%s' "$keepalive" > "$state_root/keepalive"
-      [ -n "$task" ] && printf '%s' "$task" > "$state_root/task"
+
+      # Agent mode: allocate a per-instance vsock CID (host-global u32; 0-2 are
+      # reserved). A resumed named agent keeps its recorded CID; otherwise pick
+      # one not already claimed by a sibling instance (a rare race is caught at
+      # bind time). The CID is written to the state dir so sandbox:prompt finds
+      # it, and exported for extraArgsScript to emit the vhost-vsock device.
+      cid=""
+      if [ "$mode" = "agent" ]; then
+        proj_root="''${XDG_STATE_HOME:-$HOME/.local/state}/katsuobushi/${projectId}"
+        if [ -r "$state_root/vsock-cid" ]; then
+          cid="$(cat "$state_root/vsock-cid")"
+        else
+          used=" $(cat "$proj_root"/*/vsock-cid 2>/dev/null | tr '\n' ' ' || true) "
+          for _ in $(seq 1 100); do
+            c=$(( (RANDOM * 32768 + RANDOM) % 2147483640 + 3 ))
+            case "$used" in *" $c "*) continue ;; esac
+            cid="$c"; break
+          done
+          [ -n "$cid" ] || { echo "sandbox: could not allocate a vsock CID" >&2; exit 1; }
+        fi
+        printf '%s' "$cid" > "$state_root/vsock-cid"
+        export KATSU_VSOCK_CID="$cid"
+        if [ ! -e /dev/vhost-vsock ]; then
+          echo "sandbox: warning: /dev/vhost-vsock is absent; agent mode needs the host vhost_vsock module (try: sudo modprobe vhost_vsock)." >&2
+        fi
+      fi
 
       # Build (or reuse) the per-instance bare mirror; the guest clones it to the
       # workspace and pushes its branch back.
@@ -986,25 +1261,53 @@ let
       trap 'exit 129' HUP
 
       echo "sandbox: launching $mode instance '$instance' (logs: $state_root/console.log)"
+
+      if [ "$mode" = "agent" ]; then
+        # Lingering, detached VM: it outlives this runner process so the operator
+        # can poke it later. setsid puts qemu in its own session so it survives
+        # our exit; teardown is explicit — the agent's own `systemctl poweroff`,
+        # or `sandbox:stop`. We drop the cleanup trap and keep the runtime dir
+        # (it holds the QMP socket sandbox:stop needs).
+        setsid ${runner}/bin/microvm-run > "$state_root/console.log" 2>&1 < /dev/null &
+        vm=$!
+        trap - EXIT INT TERM HUP
+        disown "$vm" 2>/dev/null || true
+        echo "sandbox: agent instance '$instance' running (cid $cid)."
+
+        if [ "$have_prompt" = "yes" ]; then
+          echo "sandbox: waiting for the agent control channel..."
+          ready="no"
+          for _ in $(seq 1 180); do
+            if ${controlHostBin} --cid "$cid" --probe 2>/dev/null; then ready="yes"; break; fi
+            sleep 1
+          done
+          if [ "$ready" = "yes" ]; then
+            echo "sandbox: sending initial prompt"
+            ${controlHostBin} --cid "$cid" "$prompt" || true
+          else
+            echo "sandbox: control channel did not come up in time; send later with: sandbox:prompt $instance \"...\"" >&2
+          fi
+        fi
+
+        echo "sandbox: prompt it:  sandbox:prompt $instance \"<text>\""
+        echo "         watch it:   ssh -i $runtime_root/id -p $port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${agentUser}@127.0.0.1 -t 'tmux attach -t katsuobushi'"
+        echo "         stop it:    sandbox:stop $instance"
+        exit 0
+      fi
+
+      # Interactive: foreground ssh; the VM is torn down on exit (cleanup trap).
       ${runner}/bin/microvm-run > "$state_root/console.log" 2>&1 &
       vm=$!
-
-      if [ "$mode" = "autonomous" ]; then
-        # Stream the console while the VM runs; tail exits when the VM does.
-        tail -n +1 -f --pid="$vm" "$state_root/console.log" 2>/dev/null &
-        wait "$vm" 2>/dev/null || true
-      else
-        echo "sandbox: connecting to '$instance' on 127.0.0.1:$port"
-        # Wait for sshd to accept connections on the forwarded port.
-        for _ in $(seq 1 120); do
-          if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then break; fi
-          sleep 1
-        done
-        ssh -i "$runtime_root/id" -p "$port" \
-          -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-          -o LogLevel=ERROR \
-          ${agentUser}@127.0.0.1 || true
-      fi
+      echo "sandbox: connecting to '$instance' on 127.0.0.1:$port"
+      # Wait for sshd to accept connections on the forwarded port.
+      for _ in $(seq 1 120); do
+        if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then break; fi
+        sleep 1
+      done
+      ssh -i "$runtime_root/id" -p "$port" \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR \
+        ${agentUser}@127.0.0.1 || true
     '';
   };
 
@@ -1028,6 +1331,24 @@ let
     "sandbox:start" = {
       description = "Launch an agent sandbox VM (alias for nix run .#sandbox)";
       command = "${sandboxRunner}/bin/sandbox \"$@\"";
+    };
+    "sandbox:prompt" = {
+      description = "Send a prompt to a running agent instance: sandbox:prompt <instance> \"<text>\"";
+      command = ''
+        inst="''${1:-}"
+        shift || true
+        text="''${*:-}"
+        if [ -z "$inst" ] || [ -z "$text" ]; then
+          echo "usage: sandbox:prompt <instance> \"<text>\"" >&2
+          exit 2
+        fi
+        cidf="${stateGlob}/$inst/vsock-cid"
+        if [ ! -r "$cidf" ]; then
+          echo "sandbox:prompt: no control channel for '$inst' (is it an --agent instance, and running?)" >&2
+          exit 1
+        fi
+        ${controlHostBin} --cid "$(cat "$cidf")" "$text"
+      '';
     };
     "sandbox:status" = {
       description = "List instances, or detail one: sandbox:status [instance]";
@@ -1078,6 +1399,9 @@ let
                 fi
                 if git -C "$d/sync.git" rev-parse --verify "refs/heads/sandbox/$inst" >/dev/null 2>&1; then
                   echo "branch:     sandbox/$inst (fetch: sandbox:fetch $inst)"
+                fi
+                if [ -r "$d/vsock-cid" ]; then
+                  echo "agent:      cid $(cat "$d/vsock-cid") (prompt: sandbox:prompt $inst \"...\")"
                 fi
                 echo "console:    $d/console.log"
       '';

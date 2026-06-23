@@ -147,13 +147,14 @@
               command = ''echo "Hello from My Project!"'';
             };
           }
-          # Adds `sandbox` plus `sandbox-list` / `sandbox-status <inst>` /
-          # `sandbox-fetch <inst>` / `sandbox-stop <inst>` to the dev shell.
+          # Adds `sandbox:start` plus `sandbox:prompt <inst> "…"` /
+          # `sandbox:status [inst]` / `sandbox:fetch <inst>` / `sandbox:stop
+          # <inst>` to the dev shell.
           // sandbox.menuCommands;
         };
       in
       {
-        # `nix run .#sandbox [-- --task "..." | --task-file P | --keep-alive | --name N]`
+        # `nix run .#sandbox [-- --agent [--prompt "…"] | --name N]`
         apps.sandbox = sandbox.apps.sandbox;
 
         # CI catches a broken sandbox config by building the guest image.

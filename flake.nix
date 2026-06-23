@@ -24,9 +24,8 @@
       url = "github:microvm-nix/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # Latest-tracking Claude Code (newer than nixpkgs); used for this repo's own
-    # dogfood sandbox. Consumers of lib.sandbox can do the same and pass it as
-    # `claudeCodePackage` (see templates/sandbox).
+    # Used for the `sandbox` template
+    # SEE: `templates/sandbox/flake.nix`
     llm-agents.url = "github:numtide/llm-agents.nix";
   };
 
@@ -47,7 +46,15 @@
       # dogfooding dev shell (below) share one definition.
       rustLib = import ./lib/rust.nix { inherit crane nix-filter rust-overlay; };
       markdownLib = import ./lib/markdown.nix;
-      sandboxLib = import ./lib/sandbox.nix { inherit microvm; };
+      # sandbox carries the rust helper + this repo's workspace source so it can
+      # build the in-tree sandbox controller crate (agent mode) internally — the
+      # consumer never sees them. `./.` is katsuobushi's own root, pinned for
+      # consumers via the flake input, so the crates build from a fixed source.
+      sandboxLib = import ./lib/sandbox.nix {
+        inherit microvm;
+        rust = rustLib;
+        controlSrc = ./.;
+      };
 
       overlay = final: prev: {
         katsuobushi = import ./lib { pkgs = final; };
@@ -96,10 +103,11 @@
         };
       };
     }
-    # Per-system outputs: Katsuobushi dogfoods its own libraries. The dev shell
-    # is built with `makeMenu`/`makeDevShellHook`, formats its design docs with
+    # Katsuobushi dogfoods its own libraries. The dev shell is built with
+    # `makeMenu`/`makeDevShellHook`, formats its design docs with
     # `lib.markdown`, and ships a `lib.sandbox` configuration for working on
-    # Katsuobushi itself inside a VM.
+    # Katsuobushi itself inside a VM. `sandbox`-adjacent tools are built
+    # using `lib.rust`.
     // flake-utils.lib.eachDefaultSystem (
       system:
       let
@@ -145,6 +153,25 @@
           ];
         };
 
+        # In-tree Rust: the host↔guest sandbox controller crate for agent mode
+        # (see design/sandbox-agent-mode.md §6). Built via lib.rust (crane) so
+        # the build is reproducible and sandboxed, with deps vendored from the
+        # root Cargo.lock. tokio-vsock pins these to Linux, matching the
+        # sandbox's own platform gate, so the packages/checks are isLinux-only.
+        rust = rustLib {
+          inherit pkgs;
+          workspaceRoot = ./.;
+          projectId = "cdata/katsuobushi";
+        };
+        # One crate, two binaries: the guest controller server
+        # (katsuobushi-sandbox-control) and the host client
+        # (katsuobushi-sandbox-prompt). The guest `report` tool is a shell app
+        # built inside lib.sandbox, not a Rust crate.
+        controlCrates.katsuobushi-sandbox-control = rust.buildCrate {
+          pname = "katsuobushi-sandbox-control";
+          cargoExtraArgs = "--package katsuobushi-sandbox-control";
+        };
+
         menu = makeMenu {
           title = "Katsuobushi";
           graphic = ''
@@ -164,15 +191,28 @@
       {
         devShells.default = pkgs.mkShell {
           name = "katsuobushi";
-          nativeBuildInputs = menu.commands ++ [ markdown.rumdl ];
-          shellHook = makeDevShellHook menu;
+          nativeBuildInputs = menu.commands ++ [
+            markdown.rumdl
+            # Toolchain for working on the in-tree sandbox controller crate.
+            rust.rustToolchain
+            # Used by the sandbox lifecycle commands (QMP over the qemu monitor)
+            # and by the sandbox controller spike harness.
+            pkgs.socat
+          ];
+          shellHook = rust.rustEnvironmentHook + makeDevShellHook menu;
         };
       }
       // pkgs.lib.optionalAttrs isLinux {
-        # `nix run .#sandbox [-- --task "…" | --keep-alive | --name N]`
+        # `nix run .#sandbox [-- --agent [--prompt "…"] | --name N]`
         apps.sandbox = sandbox.apps.sandbox;
-        # CI builds the guest image so a broken sandbox config fails fast.
-        checks.sandbox = sandbox.checks.sandbox;
+        # The sandbox controller crate, built reproducibly via lib.rust/crane.
+        packages = controlCrates;
+        # CI builds the guest image, and clippy/rustfmt/workspace-dep hygiene
+        # on the controller crate, so a broken config or crate fails fast.
+        checks = {
+          sandbox = sandbox.checks.sandbox;
+        }
+        // rust.cargoChecks;
       }
     );
 }

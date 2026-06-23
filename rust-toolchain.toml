@@ -1,0 +1,5 @@
+# Pinned toolchain for the in-tree Rust workspace. `lib.rust` reads this file
+# (fromRustupToolchainFile) to provision the build and dev-shell toolchain.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
