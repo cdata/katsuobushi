@@ -3,16 +3,21 @@
 
   # Katsuobushi owns its infrastructure dependencies and passes them through to
   # consumers transitively, so a consuming flake declares Katsuobushi (plus its
-  # own nixpkgs) and inherits crane / nix-filter / rust-overlay without having to
-  # name them. Each infra input `follows` our nixpkgs so the dependency graph
-  # unifies on a single nixpkgs; a consumer overrides any of them with
-  # `inputs.katsuobushi.inputs.<name>.follows = "<name>";`. See MIGRATING.md.
+  # own nixpkgs) and inherits crane / nix-filter / rust-overlay / microvm without
+  # having to name them. Each infra input `follows` our nixpkgs so the dependency
+  # graph unifies on a single nixpkgs; a consumer overrides any of them with
+  # `inputs.katsuobushi.inputs.<name>.follows = "<name>";`. See MIGRATING.md and
+  # section 8 of design/sandbox.md for the rationale.
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     crane.url = "github:ipetkov/crane";
     nix-filter.url = "github:numtide/nix-filter";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    microvm = {
+      url = "github:microvm-nix/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -24,6 +29,7 @@
       crane,
       nix-filter,
       rust-overlay,
+      microvm,
     }:
     {
       overlays.default = final: prev: {
@@ -42,6 +48,11 @@
       # consumer's `pkgs`.
       lib.markdown = import ./lib/markdown.nix;
 
+      # Agent sandbox helpers: assembles a microvm.nix guest that boots into a
+      # working dev environment in which an agent harness can run with a bounded
+      # blast radius. See design/sandbox.md.
+      lib.sandbox = import ./lib/sandbox.nix { inherit microvm; };
+
       templates = {
         default = {
           path = ./templates/default;
@@ -51,6 +62,11 @@
         rust = {
           path = ./templates/rust;
           description = "A katsuobushi template for Rust projects";
+        };
+
+        sandbox = {
+          path = ./templates/sandbox;
+          description = "A katsuobushi template for an agent sandbox VM";
         };
       };
     };
