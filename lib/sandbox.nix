@@ -1,24 +1,24 @@
 # Katsuobushi agent sandbox.
 #
-# Assembles a `microvm.nix` guest (a real NixOS system booted under qemu with a
-# genuine kernel boundary) that comes up as a working local dev environment in
-# which an agent harness — Claude Code by default — can run with its blast
-# radius bounded by the VM rather than by permission prompts. See
-# `design/sandbox.md` for the complete design and the rationale behind every
-# decision referenced in comments below (e.g. "4.5" → decision 4.5).
+# Assembles a `microvm.nix` guest — a real NixOS system booted under qemu with a
+# genuine kernel boundary — that comes up as a working local dev environment in
+# which an agent harness can run with its blast radius bounded by the VM rather
+# than by host permission prompts. The harness and any tooling it needs are
+# supplied by the caller via `packages`; nothing here is tied to a specific
+# agent.
 #
-# Like the other Katsuobushi libs this module is partial-applied by the flake
-# with its pinned infra dependency (`{ microvm }`); the resulting function is
-# what a consumer calls as `katsuobushi.lib.sandbox { inherit pkgs; ... }`.
-# `microvm` is exposed as an optional argument so it stays overridable per-call.
+# Like the other Katsuobushi libraries this module is partial-applied by the
+# flake with its pinned `microvm` dependency; the resulting function is what a
+# consumer calls as `katsuobushi.lib.sandbox { inherit pkgs; ... }`. `microvm`
+# is exposed as an optional argument so it stays overridable per-call.
 #
 # The whole VM is hermetic: the proxy, firewall, allowlist, DNS policy, and
 # agent environment are baked into the guest image and enforced by guest init.
 # The host runs only one `qemu` process per instance — there is no shared
-# host-side daemon — which is what makes running many instances/projects trivial
-# (3.). Per-instance dynamic values (the bare-mirror path, the ssh port, secret
-# files) are emitted into the qemu invocation at launch via microvm.nix's
-# `extraArgsScript`, so nothing instance-specific is baked into the store.
+# host-side daemon — which is what makes running many instances (and many
+# projects, each with its own allowlist) trivial. Per-instance dynamic values
+# (the bare-mirror path, the ssh port, secret files) are emitted into the qemu
+# invocation at launch, so nothing instance-specific is baked into the store.
 defaults:
 {
   pkgs,
@@ -29,13 +29,13 @@ defaults:
   # well-known in-guest project path and the per-instance host state dirs.
   projectId,
 
-  # --- Network egress (4.5, 4.6) ---
+  # --- Network egress ---
   # Extra reachable origins, appended to `baseAllowedOrigins`. Hostnames only;
   # each becomes a squid `dstdomain`. No implicit wildcards — "github.com"
   # matches only that host; ".github.com" opts into the subtree.
   allowedOrigins ? [ ],
   # The lean baseline every sandbox gets. There is deliberately no per-entry
-  # subtraction (4.6); to "remove" a baseline host, override this list wholesale.
+  # subtraction; to "remove" a baseline host, override this list wholesale.
   baseAllowedOrigins ? [
     # Anthropic inference. CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 (set in the
     # guest env) keeps Claude Code's telemetry/feature-flag/autoupdate hosts off
@@ -46,7 +46,7 @@ defaults:
     "platform.claude.com"
     # Nix: substituters + the GitHub flake-input hosts. The minimum for in-guest
     # `nix develop` plus typical github flake inputs. Trim per-host if your flake
-    # has no github inputs (see design 4.6 — pin this set empirically).
+    # has no github inputs.
     "cache.nixos.org"
     "channels.nixos.org"
     "github.com"
@@ -54,27 +54,27 @@ defaults:
     "codeload.github.com"
   ],
 
-  # --- Reference repos (4.12): build-time pinned, writable copies ---
+  # --- Reference repos: build-time pinned, writable copies ---
   # List of { source, dest }. `source` is a store path / derivation (a flake
   # input with `flake = false`, or a `pkgs.fetchFromGitHub { ... }`). `dest` is
   # relative to the agent home; mirror the host Git-layout convention, e.g.
   # "Git/github.com/oxalica/rust-overlay".
   extraRepos ? [ ],
 
-  # --- Untracked workspace context (4.10): project-scoped, one-way host->guest.
+  # --- Untracked workspace context: project-scoped, one-way host->guest.
   # List of project-relative paths (e.g. ".claude", "notes") carried into the
   # workspace on top of the mirror clone. Absolute paths and ".." are rejected
   # at eval time; symlink escape is refused at copy time by the host runner.
   workspaceContext ? [ ],
 
-  # --- Home-file mappings (4.14): dest (in agent home) -> { source, path?, mode }
+  # --- Home-file mappings: dest (in agent home) -> { source, path?, mode }
   # `source` is a store path; `path` an optional subpath within it. Modes:
   #   "immutable" — read-only bind mount; fixed even against the agent.
   #   "seed"      — copied into home at boot; the agent may edit it.
   #   "link"      — store symlink; present but replaceable (cheapest).
   homeFiles ? { },
 
-  # --- Runtime secrets (4.17): NAME -> { fromEnv = "VAR"; } | { fromFile = "P"; }
+  # --- Runtime secrets: NAME -> { fromEnv = "VAR"; } | { fromFile = "P"; }
   # The declaration lives here; the value is read from the host by the runner at
   # launch and injected via fw_cfg (never in the store, argv, or on disk). The
   # runner fails fast if a declared secret is missing.
@@ -93,7 +93,7 @@ defaults:
   # `guestModules`.
   packages ? [ ],
 
-  # Escape hatch: extra NixOS modules merged into the guest (4 / §5).
+  # Escape hatch: extra NixOS modules merged into the guest.
   guestModules ? [ ],
 
   # Infra dependency, defaulting to the version Katsuobushi pins.
@@ -108,7 +108,7 @@ let
   projectName = baseNameOf projectId;
 
   # Effective, fully-resolved egress allowlist. The manifest always prints this
-  # so the agent and the human see exactly what is reachable (4.6 transparency).
+  # so the agent and the human see exactly what is reachable.
   effectiveAllowedOrigins = baseAllowedOrigins ++ allowedOrigins;
 
   # In-guest constants.
@@ -119,19 +119,19 @@ let
   proxyPort = 3128;
   proxyUid = 3128; # fixed so the nftables uid match is deterministic.
   guestMac = "02:00:00:00:00:02";
-  # The whole per-instance host state dir is exposed to the guest as one 9p
-  # share (4.8 — exactly one host directory of write access). It holds sync.git,
-  # context/, status.json, console.log, and the small non-secret runtime files
-  # (instance name, mode, task, authorized_keys). Secrets never go here.
+  # The whole per-instance host state dir is exposed to the guest as a single 9p
+  # share — exactly one host directory the guest can write to. It holds sync.git,
+  # context/, console.log, and the small non-secret runtime files (instance
+  # name, mode, task, authorized_keys). Secrets never go here.
   shareTag = "katsuobushi";
   shareMount = "/mnt/katsuobushi";
   # slirp user-mode networking puts the built-in DNS forwarder here. squid (and
-  # only squid) is allowed to use it; the agent gets no resolver at all (4.5).
+  # only squid) is allowed to use it; the agent gets no resolver at all.
   slirpDns = "10.0.2.3";
 
   secretNames = builtins.attrNames secrets;
 
-  # ---- Eval-time validation of project-scoped paths (4.10 enforcement) -------
+  # ---- Eval-time validation of project-scoped paths -------
   checkContextPath =
     p:
     if lib.hasPrefix "/" p then
@@ -158,7 +158,7 @@ let
       r;
   validatedRepos = map checkRepoDest extraRepos;
 
-  # ---- Discoverability manifest (4.15) --------------------------------------
+  # ---- Discoverability manifest --------------------------------------
   originBullets = lib.concatMapStrings (o: "- `${o}` (HTTPS)\n") effectiveAllowedOrigins;
   repoBullets =
     if validatedRepos == [ ] then
@@ -219,11 +219,11 @@ let
     project's build/test/format commands). You may extend the flake exactly as on
     the host; in-guest `nix` builds work against a writable store overlay.
 
-    ## Reporting status
+    ## Returning your work
 
-    For long/autonomous runs, write progress to `${shareMount}/status.json`, e.g.
-    `{"phase":"working","ready":false}`. A pushed `sandbox/<instance>` branch is
-    itself the strong "ready" signal.
+    Commit and `git push` on `sandbox/<instance>`. The pushed branch is the
+    work product and the signal that you are done — there is nothing else to
+    report; the human watches the branch (and this VM's console).
 
     ## Things you are *not* able to do here
 
@@ -238,7 +238,7 @@ let
 
   # homeFiles always includes the generated manifest as an internal immutable
   # entry at ~/README.md, plus a guest ~/.claude/CLAUDE.md that imports it so
-  # every in-VM agent session auto-loads it (4.15). The project's own
+  # every in-VM agent session auto-loads it. The project's own
   # CLAUDE.md/AGENTS.md still layer normally on top inside the workspace.
   claudeImport = pkgs.writeText "katsuobushi-CLAUDE.md" ''
     # Sandbox environment
@@ -290,16 +290,19 @@ let
     };
   };
 
-  effectiveHomeFiles = defaultHomeFiles // homeFiles // {
-    "README.md" = {
-      source = manifest;
-      mode = "immutable";
+  effectiveHomeFiles =
+    defaultHomeFiles
+    // homeFiles
+    // {
+      "README.md" = {
+        source = manifest;
+        mode = "immutable";
+      };
+      ".claude/CLAUDE.md" = {
+        source = claudeImport;
+        mode = "immutable";
+      };
     };
-    ".claude/CLAUDE.md" = {
-      source = claudeImport;
-      mode = "immutable";
-    };
-  };
 
   # Resolve a homeFiles entry to the concrete source file path in the store.
   homeFileSource =
@@ -316,7 +319,7 @@ let
   seedHomeFiles = builtins.filter (e: e.mode == "seed") homeFilesList;
   linkHomeFiles = builtins.filter (e: e.mode == "link") homeFilesList;
 
-  # ---- squid forward-proxy configuration (4.5) ------------------------------
+  # ---- squid forward-proxy configuration ------------------------------
   # `dstdomain` allowlist with `http_access deny all` as the backstop; squid
   # resolves names itself via the slirp DNS forwarder (the agent has none).
   squidConf = pkgs.writeText "squid.conf" ''
@@ -354,21 +357,21 @@ let
     shutdown_lifetime 1 seconds
   '';
 
-  # ---- Host runner: launch-time argument emission (4.17 channel A, §7) -------
+  # ---- Host runner: launch-time argument emission -------
   # microvm.nix runs this at launch and splices its single line of stdout into
   # the qemu invocation. It reads only env/paths prepared by the wrapper, so
-  # nothing instance-specific is in the store. (verifies design checklist #2)
+  # nothing instance-specific is in the store.
   extraArgsScript = pkgs.writeShellScript "katsuobushi-extra-args" ''
     set -eu
     args=""
 
     # User-mode (slirp) NIC with an ssh hostfwd bound to host loopback only
-    # (4.18). passt is unsupported by microvm.nix's qemu runner, so we use the
-    # guaranteed slirp fallback (4.4).
+    #. passt is unsupported by microvm.nix's qemu runner, so we use the
+    # guaranteed slirp fallback.
     args="$args -netdev user,id=net0,hostfwd=tcp:127.0.0.1:''${KATSU_SSH_PORT}-:22"
     args="$args -device virtio-net-pci,netdev=net0,mac=${guestMac},romfile="
 
-    # Per-instance state dir as one rw 9p share (4.8).
+    # Per-instance state dir as one rw 9p share.
     args="$args -fsdev local,id=katsushare,path=''${KATSU_STATE_DIR},security_model=none"
     args="$args -device virtio-9p-pci,fsdev=katsushare,mount_tag=${shareTag}"
 
@@ -398,7 +401,7 @@ let
         interfaces = [ ];
         extraArgsScript = "${extraArgsScript}";
         # Shared host /nix/store (ro) + a writable overlay so in-guest `nix
-        # develop` builds work (4.13).
+        # develop` builds work.
         shares = [
           {
             tag = "ro-store";
@@ -410,8 +413,8 @@ let
         writableStoreOverlay = "/nix/.rw-store";
       };
 
-      # RAM-backed writable store overlay, bounded by storeOverlaySize (4.13 /
-      # open risk: heavy builds can exhaust it — documented knob).
+      # RAM-backed writable store overlay, bounded by storeOverlaySize. Heavy
+      # in-guest `nix` builds can exhaust it; raise the size if needed.
       fileSystems."/nix/.rw-store" = {
         device = "rwstore";
         fsType = "tmpfs";
@@ -451,13 +454,13 @@ let
       # ---- Users (6.1) ----
       users.mutableUsers = false;
       # Intentional: there is no root/password login. The agent authenticates
-      # with the ephemeral key injected at launch (4.18); root is unreachable.
+      # with the ephemeral key injected at launch; root is unreachable.
       users.allowNoPasswordLogin = true;
       users.users.${agentUser} = {
         isNormalUser = true;
         home = agentHome;
         # No sudo / wheel: the agent runs strictly unprivileged so the in-guest
-        # firewall is a genuine boundary against it (4.3).
+        # firewall is a genuine boundary against it.
         extraGroups = [ ];
       };
       users.users.katsuproxy = {
@@ -530,7 +533,7 @@ let
         http_proxy = "http://127.0.0.1:${toString proxyPort}";
         all_proxy = "http://127.0.0.1:${toString proxyPort}";
         # No connection to api.anthropic.com beyond inference: keeps Claude
-        # Code's ancillary hosts off the allowlist (4.6).
+        # Code's ancillary hosts off the allowlist.
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
       };
 
@@ -550,7 +553,7 @@ let
       };
 
       # ---- ssh: key-only, agent only, reachable only via the loopback hostfwd
-      # (4.18). The pubkey arrives per-launch through the share.
+      #. The pubkey arrives per-launch through the share.
       services.openssh = {
         enable = true;
         settings = {
@@ -561,12 +564,12 @@ let
         };
       };
 
-      # ---- Login greeting + per-session secret export + env hygiene (4.18) ----
+      # ---- Login greeting + per-session secret export + env hygiene ----
       # Added to /etc/profile (NixOS does NOT source /etc/profile.d/*.sh, so this
       # is the hook that actually runs for ssh logins and the autonomous
       # `bash -lc` launcher). Exports each delivered secret as its env var,
-      # unsets any stray Anthropic key that would outrank the OAuth token (4.17
-      # precedence hygiene), and prints the manifest on an interactive terminal.
+      # unsets any stray Anthropic key that would outrank the OAuth token, and
+      # prints the manifest on an interactive terminal.
       environment.loginShellInit = ''
         # Anthropic env hygiene: only the OAuth token should authenticate.
         unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
@@ -597,23 +600,23 @@ let
           rsync
           cacert
         ])
-        # Consumer-supplied packages, including the agent harness (4 / §5).
+        # Consumer-supplied packages, including the agent harness.
         ++ packages;
 
       # CA bundle so HTTPS-through-proxy validates.
       security.pki.certificateFiles = [ "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
 
-      # /workspace owned by the agent (4 / §6.8).
+      # /workspace owned by the agent.
       systemd.tmpfiles.rules = [
         "d ${workspaceParent} 0755 ${agentUser} users - -"
         "d /run/katsuobushi 0755 root root - -"
       ]
-      # seed homeFiles: copy from store into home, agent may edit (4.14).
+      # seed homeFiles: copy from store into home, agent may edit.
       ++ map (e: "C ${agentHome}/${e.dest} 0644 ${agentUser} users - ${e.src}") seedHomeFiles
-      # link homeFiles: store symlink, replaceable (4.14).
+      # link homeFiles: store symlink, replaceable.
       ++ map (e: "L+ ${agentHome}/${e.dest} - - - - ${e.src}") linkHomeFiles;
 
-      # ---- Secret delivery (4.17) ----
+      # ---- Secret delivery ----
       # Pulls each fw_cfg system credential and writes it to a tmpfs file
       # readable only by the agent, so both the interactive login shell and the
       # autonomous launcher can export it. /run is RAM; nothing hits disk.
@@ -641,7 +644,7 @@ let
         '';
       };
 
-      # ---- Inject the per-launch ssh pubkey (4.18) ----
+      # ---- Inject the per-launch ssh pubkey ----
       # The wrapper drops the ephemeral pubkey into the share; install it into
       # the agent's authorized_keys before sshd accepts connections.
       systemd.services.katsuobushi-authkeys = {
@@ -661,7 +664,7 @@ let
         '';
       };
 
-      # ---- Immutable homeFiles: per-file read-only bind mounts (4.14) ----
+      # ---- Immutable homeFiles: per-file read-only bind mounts ----
       # A symlink would be removable by the agent (it owns its home); a per-file
       # RO bind mount cannot be overwritten or unmounted unprivileged. Done in a
       # root service (rather than `fileSystems`) so single-file mountpoints over
@@ -686,7 +689,7 @@ let
         '') immutableHomeFiles;
       };
 
-      # ---- Workspace materialization (4.11) ----
+      # ---- Workspace materialization ----
       # Clone the bare mirror (its only remote is the sync point — no host
       # credentials/upstreams leak), check out the seed branch, overlay the
       # untracked context, and lay down the writable reference-repo copies.
@@ -739,7 +742,7 @@ let
             rsync -a --exclude='.git' ${shareMount}/context/ ${workspacePath}/
           fi
 
-          # Writable reference-repo copies (4.12).
+          # Writable reference-repo copies.
           ${lib.concatMapStrings (r: ''
             mkdir -p "$(dirname ${agentHome}/${r.dest})"
             if [ ! -e ${agentHome}/${r.dest} ]; then
@@ -750,12 +753,11 @@ let
         '';
       };
 
-      # ---- Autonomous run mode (4.18) ----
+      # ---- Autonomous run mode ----
       # Always present; no-ops in interactive mode. In autonomous mode it runs
       # `claude -p "<task>"` as the agent (loading the proxy/secret profile),
-      # writes status phases, pushes the branch, and powers off unless asked to
-      # linger. Runs as root only to orchestrate su/poweroff; claude runs as the
-      # unprivileged agent.
+      # pushes the branch, and powers off unless asked to linger. Runs as root
+      # only to orchestrate su/poweroff; claude runs as the unprivileged agent.
       systemd.services.katsuobushi-agent = {
         description = "Katsuobushi autonomous agent run";
         wantedBy = [ "multi-user.target" ];
@@ -784,23 +786,19 @@ let
             exit 0
           fi
           instance="$(cat ${shareMount}/instance 2>/dev/null || echo unknown)"
-          status() { echo "{\"phase\":\"$1\",\"ready\":$2}" > ${shareMount}/status.json 2>/dev/null || true; }
-
-          status running false
           task="$(cat ${shareMount}/task 2>/dev/null || true)"
           # Run claude as the agent with a login shell so the proxy/secret
           # profile is applied. Not --bare (it ignores CLAUDE_CODE_OAUTH_TOKEN).
           # --dangerously-skip-permissions auto-approves tool calls — headless
           # -p cannot answer prompts, and the VM is the blast-radius boundary
           # (the whole point of the sandbox). bash is given by absolute path:
-          # runuser execs via the service PATH, which does not contain bash.
-          runuser -u ${agentUser} -- ${pkgs.bash}/bin/bash -lc "cd ${workspacePath} && claude --dangerously-skip-permissions -p \"$task\"" \
-            && rc=0 || rc=$?
+          # runuser execs via the service PATH, which does not contain bash. The
+          # run's output is on the (tee'd) console; its product is the pushed
+          # branch — no separate status file is kept.
+          runuser -u ${agentUser} -- ${pkgs.bash}/bin/bash -lc "cd ${workspacePath} && claude --dangerously-skip-permissions -p \"$task\"" || true
 
-          # Push whatever the agent committed back to the host (4.8 push-back).
+          # Push whatever the agent committed back to the host.
           runuser -u ${agentUser} -- ${pkgs.bash}/bin/bash -lc "cd ${workspacePath} && git push origin HEAD:sandbox/$instance" || true
-
-          if [ "$rc" -eq 0 ]; then status ready true; else status failed false; fi
 
           if [ "$(cat ${shareMount}/keepalive 2>/dev/null || echo no)" != "yes" ]; then
             systemctl poweroff
@@ -820,13 +818,13 @@ let
 
   runner = guestSystem.config.microvm.declaredRunner;
 
-  # ---- Host-side wrapper (the `nix run .#sandbox` app, §7) -------------------
+  # ---- Host-side wrapper (the `nix run .#sandbox` app) ----------------------
   # Resolves the instance, builds the per-instance bare mirror + working-tree
   # snapshot seed, stages context (symlink-safe) + non-secret runtime files,
   # reads each secret from the host into a tmpfs file (fail-fast), generates an
   # ephemeral ssh keypair, boots, and either attaches over ssh (interactive) or
-  # waits for the autonomous run to finish. The pushed branch, status.json, and
-  # console.log persist in the host state dir; the rest evaporates.
+  # waits for the autonomous run to finish. The pushed branch and console.log
+  # persist in the host state dir; the rest evaporates.
   sandboxRunner = pkgs.writeShellApplication {
     name = "sandbox";
     runtimeInputs = with pkgs; [
@@ -841,13 +839,14 @@ let
       task=""
       keepalive="no"
       instance=""
+      named="no"
 
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --task) mode="autonomous"; task="$2"; shift 2 ;;
           --task-file) mode="autonomous"; task="$(cat "$2")"; shift 2 ;;
           --keep-alive) keepalive="yes"; shift ;;
-          --name) instance="$2"; shift 2 ;;
+          --name) instance="$2"; named="yes"; shift 2 ;;
           *) echo "sandbox: unknown argument: $1" >&2; exit 2 ;;
         esac
       done
@@ -862,24 +861,40 @@ let
       mkdir -p "$state_root" "$runtime_root"
       chmod 700 "$runtime_root"
 
-      echo '{"phase":"booting","ready":false}' > "$state_root/status.json"
+      # A named instance is persistent: it survives teardown and can be restarted
+      # (resumed from its branch) by launching with the same --name. An unnamed
+      # instance is ephemeral and is removed once it stops. The marker records
+      # which, so stop/teardown know whether to prune.
+      if [ "$named" = "yes" ]; then touch "$state_root/.named"; else rm -f "$state_root/.named"; fi
+
       printf '%s' "$instance" > "$state_root/instance"
       printf '%s' "$mode"     > "$state_root/mode"
       printf '%s' "$keepalive" > "$state_root/keepalive"
       [ -n "$task" ] && printf '%s' "$task" > "$state_root/task"
 
-      # Per-instance bare mirror + working-tree snapshot seed (4.9). `git stash
-      # create` captures tracked+staged dirty state; fall back to HEAD when
-      # clean. Pushing the snapshot ref transfers its objects into the mirror.
+      # Build (or reuse) the per-instance bare mirror; the guest clones it to the
+      # workspace and pushes its branch back.
       if [ ! -d "$state_root/sync.git" ]; then
         git clone --bare "$project" "$state_root/sync.git" >/dev/null 2>&1
       fi
-      snap="$(git -C "$project" stash create 2>/dev/null || true)"
-      [ -z "$snap" ] && snap="$(git -C "$project" rev-parse HEAD)"
-      git -C "$project" push --quiet "$state_root/sync.git" "$snap:refs/heads/sandbox/$instance" --force
+      # Seed the instance branch. A fresh instance starts from a snapshot of the
+      # host's working tree (tracked + staged via `git stash create`, falling
+      # back to HEAD when clean). A named instance that already has a branch is
+      # resumed as-is, so restarting it continues the agent's accumulated work.
+      branch="refs/heads/sandbox/$instance"
+      existing="$(git -C "$state_root/sync.git" rev-parse --verify "$branch" 2>/dev/null || true)"
+      if [ "$named" = "yes" ] && [ -n "$existing" ]; then
+        echo "sandbox: resuming named instance '$instance' from its existing branch"
+        snap="$existing"
+      else
+        snap="$(git -C "$project" stash create 2>/dev/null || true)"
+        [ -z "$snap" ] && snap="$(git -C "$project" rev-parse HEAD)"
+        git -C "$project" push --quiet "$state_root/sync.git" "$snap:$branch" --force
+      fi
 
-      # Stage declared untracked context, refusing symlinks that escape the tree
-      # (4.10 — rsync --safe-links drops out-of-tree link targets).
+      # Stage declared untracked context. rsync --safe-links drops any symlink
+      # whose target escapes the project tree, so context can't smuggle in files
+      # from outside it.
       rm -rf "$state_root/context"
       mkdir -p "$state_root/context"
       ${lib.concatMapStrings (p: ''
@@ -919,7 +934,7 @@ let
         ) secrets
       )}
 
-      # Ephemeral ssh keypair (4.18); pubkey travels in the share, private key
+      # Ephemeral ssh keypair; pubkey travels in the share, private key
       # stays in the runtime tmpfs.
       if [ ! -f "$runtime_root/id" ]; then
         ssh-keygen -t ed25519 -N "" -f "$runtime_root/id" -q
@@ -944,15 +959,51 @@ let
 
       cd "$runtime_root"
 
+      # Tear the VM down on exit — normal exit, Ctrl-C, terminal close, or
+      # termination — then discard ephemeral instances so they don't accumulate.
+      # Named instances are persistent and kept (restart with the same --name).
+      # Everything under the runtime dir (ssh key, qemu socket) is always removed.
+      cleanup() {
+        # Make teardown atomic: don't re-enter, and ignore further signals so the
+        # removal below always completes even if the user keeps hitting Ctrl-C.
+        trap - EXIT
+        trap "" INT TERM HUP
+        if [ -n "''${vm:-}" ] && kill -0 "$vm" 2>/dev/null; then
+          # The guest is ephemeral (work is returned by pushing its branch), so
+          # there is nothing to flush — just stop qemu. SIGTERM exits it promptly;
+          # escalate to SIGKILL if it lingers.
+          kill "$vm" 2>/dev/null || true
+          for _ in 1 2 3 4 5; do kill -0 "$vm" 2>/dev/null || break; sleep 1; done
+          kill -9 "$vm" 2>/dev/null || true
+          wait "$vm" 2>/dev/null || true
+        fi
+        rm -rf "$runtime_root"
+        [ -d "$state_root" ] || return 0
+
+        if [ -e "$state_root/.named" ]; then
+          head_ref="$(git -C "$state_root/sync.git" rev-parse --verify "refs/heads/sandbox/$instance" 2>/dev/null || true)"
+          echo "sandbox: kept named instance '$instance' at $state_root"
+          [ -n "$head_ref" ] && echo "  fetch: sandbox:fetch $instance    restart: sandbox:start --name $instance"
+        else
+          rm -rf "$state_root"
+        fi
+      }
+      trap cleanup EXIT
+      trap 'exit 143' TERM
+      trap 'exit 130' INT
+      trap 'exit 129' HUP
+
+      echo "sandbox: launching $mode instance '$instance' (logs: $state_root/console.log)"
+      ${runner}/bin/microvm-run > "$state_root/console.log" 2>&1 &
+      vm=$!
+
       if [ "$mode" = "autonomous" ]; then
-        echo "sandbox: launching autonomous instance '$instance' (logs: $state_root/console.log)"
-        ${runner}/bin/microvm-run 2>&1 | tee "$state_root/console.log"
-        echo "sandbox: instance '$instance' finished. Fetch with: git fetch \"$state_root/sync.git\" \"sandbox/$instance\""
+        # Stream the console while the VM runs; tail exits when the VM does.
+        tail -n +1 -f --pid="$vm" "$state_root/console.log" 2>/dev/null &
+        wait "$vm" 2>/dev/null || true
       else
-        echo "sandbox: launching interactive instance '$instance' on 127.0.0.1:$port"
-        ${runner}/bin/microvm-run > "$state_root/console.log" 2>&1 &
-        vm=$!
-        # Wait for sshd.
+        echo "sandbox: connecting to '$instance' on 127.0.0.1:$port"
+        # Wait for sshd to accept connections on the forwarded port.
         for _ in $(seq 1 120); do
           if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then break; fi
           sleep 1
@@ -961,53 +1012,118 @@ let
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
           -o LogLevel=ERROR \
           ${agentUser}@127.0.0.1 || true
-        ${runner}/bin/microvm-shutdown 2>/dev/null || kill "$vm" 2>/dev/null || true
-        wait "$vm" 2>/dev/null || true
       fi
     '';
   };
 
-  # ---- Lifecycle menu commands (§5) -----------------------------------------
+  # ---- Lifecycle menu commands ----------------------------------------------
   # Small helpers over the per-instance state dirs, ready to merge into makeMenu.
+  # Durable state (the bare mirror, console log) lives under stateGlob; ephemeral
+  # runtime material (the qemu control socket, ssh key) under runtimeGlob.
   stateGlob = "\${XDG_STATE_HOME:-$HOME/.local/state}/katsuobushi/${projectId}";
+  runtimeGlob = "\${XDG_RUNTIME_DIR:-/tmp}/katsuobushi/${projectId}";
+  # Liveness is read from the source of truth — the running qemu itself — not
+  # from any file. An instance is running iff its qemu monitor (QMP) answers:
+  # connecting to the control socket always yields qemu's greeting while the VM
+  # is alive, and fails once it is gone. (Connecting is used rather than issuing
+  # a query because the multi-message QMP query exchange is racy over a one-shot
+  # socket connection.) Succeeds iff instance $1 is running.
+  isRunning = ''
+    _sock="${runtimeGlob}/$1/katsuobushi.sock"
+    [ -S "$_sock" ] && ${pkgs.socat}/bin/socat -T1 - "UNIX-CONNECT:$_sock" </dev/null >/dev/null 2>&1
+  '';
   menuCommands = {
     "sandbox:start" = {
-      description = "Launch an agent sandbox VM (nix run .#sandbox)";
+      description = "Launch an agent sandbox VM (alias for nix run .#sandbox)";
       command = "${sandboxRunner}/bin/sandbox \"$@\"";
     };
-    "sandbox:list" = {
-      description = "List sandbox instances for this project";
+    "sandbox:status" = {
+      description = "List instances, or detail one: sandbox:status [instance]";
       command = ''
-        root="${stateGlob}"
-        [ -d "$root" ] || { echo "no instances"; exit 0; }
-        for d in "$root"/*/; do
-          [ -d "$d" ] || continue
-          printf '%s\t%s\n' "$(basename "$d")" "$(cat "$d/status.json" 2>/dev/null || echo '{}')"
-        done
+                running() {
+                  ${isRunning}
+                }
+                root="${stateGlob}"
+                inst="''${1:-}"
+
+                # No instance given: summarize every instance with its live VM state and
+                # whether it persists across stops.
+                if [ -z "$inst" ]; then
+                  rows=""
+                  running_n=0
+                  if [ -d "$root" ]; then
+                    for d in "$root"/*/; do
+                      [ -d "$d" ] || continue
+                      i="$(basename "$d")"
+                      if running "$i"; then s="running"; running_n=$((running_n + 1)); else s="stopped"; fi
+                      if [ -e "$d/.named" ]; then p="named"; else p="ephemeral"; fi
+                      rows="$rows$(printf '%s\t%s\t%s\n' "$i" "$s" "$p")
+        "
+                    done
+                  fi
+                  if [ "$running_n" -eq 0 ]; then
+                    echo "No active sandboxes"
+                  fi
+                  # Still list any instances (stopped leftovers, persistent named ones) so
+                  # they can be inspected, restarted, or removed.
+                  if [ -n "$rows" ]; then
+                    [ "$running_n" -eq 0 ] && echo
+                    { printf 'INSTANCE\tSTATE\tPERSIST\n'; printf '%s' "$rows"; } | column -t
+                  fi
+                  exit 0
+                fi
+
+                # One instance: details, derived live where possible.
+                d="$root/$inst"
+                [ -d "$d" ] || { echo "no such instance: $inst" >&2; exit 1; }
+                if running "$inst"; then state="running"; else state="stopped"; fi
+                if [ -e "$d/.named" ]; then persist="named (persistent)"; else persist="ephemeral"; fi
+                echo "instance:   $inst"
+                echo "state:      $state"
+                echo "persistent: $persist"
+                if [ "$state" = "running" ] && [ -f "$d/ssh-port" ]; then
+                  echo "ssh:        ssh -i ${runtimeGlob}/$inst/id -p $(cat "$d/ssh-port") -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${agentUser}@127.0.0.1"
+                fi
+                if git -C "$d/sync.git" rev-parse --verify "refs/heads/sandbox/$inst" >/dev/null 2>&1; then
+                  echo "branch:     sandbox/$inst (fetch: sandbox:fetch $inst)"
+                fi
+                echo "console:    $d/console.log"
       '';
     };
-    "sandbox:status" = {
-      description = "Show status.json for an instance: sandbox-status <instance>";
-      command = ''cat "${stateGlob}/$1/status.json"'';
-    };
     "sandbox:fetch" = {
-      description = "Fetch an instance's branch into this repo: sandbox-fetch <instance>";
+      description = "Fetch an instance's branch into this repo: sandbox:fetch <instance>";
       command = ''
-        git fetch "${stateGlob}/$1/sync.git" "sandbox/$1:sandbox/$1"
-        echo "fetched sandbox/$1"
+        inst="''${1:-}"
+        [ -n "$inst" ] || { echo "usage: sandbox:fetch <instance>" >&2; exit 2; }
+        git fetch "${stateGlob}/$inst/sync.git" "sandbox/$inst:sandbox/$inst"
+        echo "fetched sandbox/$inst"
       '';
     };
     "sandbox:stop" = {
-      description = "Stop a running instance: sandbox-stop <instance>";
+      description = "Stop an instance: sandbox:stop [--remove] <instance>";
       command = ''
-        rt="''${XDG_RUNTIME_DIR:-/tmp}/katsuobushi/${projectId}/$1"
-        sock="$rt/katsuobushi.sock"
+        remove="no"
+        if [ "''${1:-}" = "--remove" ]; then remove="yes"; shift; fi
+        inst="''${1:-}"
+        # Guard hard: an empty instance would expand the paths below to the whole
+        # project state dir and remove every instance.
+        [ -n "$inst" ] || { echo "usage: sandbox:stop [--remove] <instance>" >&2; exit 2; }
+        sock="${runtimeGlob}/$inst/katsuobushi.sock"
         if [ -S "$sock" ]; then
-          # QMP requires capability negotiation before any command.
+          # QMP requires capability negotiation before any command is accepted.
           { echo '{"execute":"qmp_capabilities"}'; echo '{"execute":"quit"}'; sleep 1; } \
             | ${pkgs.socat}/bin/socat - "UNIX-CONNECT:$sock" >/dev/null 2>&1 || true
         fi
-        echo "requested stop for $1"
+        # The launching process tears down its own instance on exit, but a stop
+        # requested from elsewhere (or after that process is gone) must do it
+        # too. Unnamed instances are ephemeral and always removed; named ones are
+        # kept (restartable) unless --remove is given to discard them.
+        if [ "$remove" = "yes" ] || [ ! -e "${stateGlob}/$inst/.named" ]; then
+          rm -rf "${stateGlob}/$inst" "${runtimeGlob}/$inst"
+          echo "stopped and removed $inst"
+        else
+          echo "stopped $inst (named; kept — restart: sandbox:start --name $inst, discard: sandbox:stop --remove $inst)"
+        fi
       '';
     };
   };
@@ -1022,9 +1138,9 @@ in
 
   inherit menuCommands;
 
-  # Building the guest image so CI catches a broken sandbox config (§5).
+  # Building the guest image so CI catches a broken sandbox config.
   checks.sandbox = runner;
 
-  # The assembled guest system, exposed for advanced/inspection use (§5).
+  # The assembled guest system, exposed for advanced/inspection use.
   nixosConfiguration = guestSystem;
 }

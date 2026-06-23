@@ -163,6 +163,7 @@
       in
       {
         devShells.default = pkgs.mkShell {
+          name = "katsuobushi";
           nativeBuildInputs = menu.commands ++ [ markdown.rumdl ];
           shellHook = makeDevShellHook menu;
         };
