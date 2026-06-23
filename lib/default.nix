@@ -155,6 +155,15 @@ let
         in
         task.package;
 
+      # escapeForSingleQuotes :: string -> string
+      #
+      # Escapes single quotes for safe inclusion inside a bash single-quoted
+      # string, using the standard '\'' idiom (close, escaped-quote, reopen).
+      # Without this, a command name or description containing an apostrophe
+      # (e.g. "the instance's branch") would prematurely close the quote in the
+      # menu's `echo '...'` and produce a shell syntax error.
+      escapeForSingleQuotes = builtins.replaceStrings [ "'" ] [ "'\\''" ];
+
       # intoLines :: string -> string -> string
       #
       # Fold accumulator that builds a chain of echo statements separated by
@@ -165,7 +174,7 @@ let
         let
           description = (builtins.getAttr name commands).description;
         in
-        acc + " && echo '${name};${description}'";
+        acc + " && echo '${escapeForSingleQuotes name};${escapeForSingleQuotes description}'";
 
       # The list of derivations — one shell application per command.
       scripts = map intoPackages names;
