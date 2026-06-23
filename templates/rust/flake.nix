@@ -1,20 +1,16 @@
 {
   description = "My project";
 
+  # Katsuobushi carries the Rust build infra (crane, nix-filter, rust-overlay)
+  # as transitive inputs, so this flake declares only nixpkgs, flake-utils, and
+  # katsuobushi. `nixpkgs.follows` unifies the dependency graph on your nixpkgs.
+  # To override an inherited infra dep, add e.g.
+  #   katsuobushi.inputs.crane.follows = "crane";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     katsuobushi.url = "github:cdata/katsuobushi";
-
-    # Required by katsuobushi.lib.rust: crane drives the Rust builds,
-    # nix-filter scopes the source filter, and rust-overlay provides
-    # `pkgs.rust-bin` from which the helper resolves `rust-toolchain.toml`.
-    crane.url = "github:ipetkov/crane";
-    nix-filter.url = "github:numtide/nix-filter";
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    katsuobushi.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -23,32 +19,30 @@
       nixpkgs,
       flake-utils,
       katsuobushi,
-      crane,
-      nix-filter,
-      rust-overlay,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
+        # Plain nixpkgs with only the katsuobushi overlay (for the menu helpers).
+        # The Rust helper applies rust-overlay internally, so you no longer add
+        # `(import rust-overlay)` here.
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [
-            (import rust-overlay)
-            katsuobushi.overlays.default
-          ];
+          overlays = [ katsuobushi.overlays.default ];
         };
 
         # Import the katsuobushi menu helpers
         inherit (pkgs.katsuobushi) makeMenu makeDevShellHook;
 
         # Rust build helpers, pulled from the katsuobushi flake so upstream
-        # fixes propagate here without a local copy to maintain. The helper
-        # expects a Cargo workspace with crates under `rust/`; if your layout
-        # differs, pass `sourceInclude` (see below) to point the source filter
-        # elsewhere.
+        # fixes propagate here without a local copy to maintain. crane,
+        # nix-filter, and rust-overlay are inherited from katsuobushi; override
+        # one per-call only if you need a different pin (e.g. `crane = ...;`).
+        # The helper expects a Cargo workspace with crates under `rust/`; if your
+        # layout differs, pass `sourceInclude` (see below) to point the source
+        # filter elsewhere.
         rustHelpers = katsuobushi.lib.rust {
-          inherit pkgs crane;
-          filter = nix-filter.lib;
+          inherit pkgs;
           workspaceRoot = ./.;
           # Owner-qualified identifier; namespaces the out-of-tree cargo target
           # dir (see `cargoTargetDir` in katsuobushi's lib/rust.nix). Change me.

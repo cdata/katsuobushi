@@ -8,11 +8,24 @@
 # Adapted from dialog-db's nix/rust.nix
 # (https://github.com/dialog-db/dialog-db/blob/main/nix/rust.nix), via
 # wasm-component-model-polyfill's port of the same.
+#
+# This module is partial-applied by the Katsuobushi flake with the pinned infra
+# dependencies (`{ crane, nix-filter, rust-overlay }`); the resulting function is
+# what consumers call as `katsuobushi.lib.rust { inherit pkgs; ... }`. Each infra
+# dep is exposed as an optional argument defaulting to the pinned version, so a
+# consumer can still override one per-call (e.g. `crane = myCrane;`) or flake-wide
+# via `inputs.katsuobushi.inputs.crane.follows`. The consumer passes plain `pkgs`;
+# the rust-overlay is applied internally (see `pkgsWithRust`), so they no longer
+# add it to their own overlays.
+defaults:
 {
   pkgs,
-  filter,
-  crane,
   workspaceRoot,
+  # Infra dependencies, defaulting to the versions Katsuobushi pins. Override
+  # per-call only when you need a different pin than the toolkit ships.
+  crane ? defaults.crane,
+  filter ? defaults.nix-filter.lib,
+  rust-overlay ? defaults.rust-overlay,
   # Build-time tools made available to every derivation (e.g. `pkg-config`,
   # `wrapGAppsHook`). These go into each derivation's `nativeBuildInputs`.
   nativeBuildInputs ? [ ],
@@ -59,13 +72,20 @@
 }:
 
 let
+  # Apply rust-overlay internally so the consumer passes plain `pkgs` without
+  # adding `(import rust-overlay)` to their own overlays. An overlay is
+  # `final: prev:`, so extending `pkgs` with it yields `pkgs.rust-bin`. This is a
+  # superset of `pkgs`, safe to use everywhere a toolchain-aware package is
+  # wanted; we use it specifically for `rust-bin` below.
+  pkgsWithRust = pkgs.extend (import rust-overlay);
+
   # Filter source to only Rust-relevant files.
   rustSource = filter {
     root = workspaceRoot;
     include = sourceInclude;
   };
 
-  rustToolchain = pkgs.rust-bin.fromRustupToolchainFile (workspaceRoot + "/rust-toolchain.toml");
+  rustToolchain = pkgsWithRust.rust-bin.fromRustupToolchainFile (workspaceRoot + "/rust-toolchain.toml");
   craneLib = (crane.mkLib pkgs).overrideToolchain (_: rustToolchain);
 
   # The project's bare name, used as the `pname` prefix for the shared
