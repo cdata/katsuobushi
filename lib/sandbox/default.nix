@@ -1447,42 +1447,56 @@ let
 
                 # No instance given: first run the environment sanity check — this
                 # doubles as the prerequisite test, so a clean run (no MISSING rows,
-                # zero exit) means a launch has what it needs. Then summarize every
-                # instance with its live VM state and whether it persists across stops.
+                # zero exit) means a launch has what it needs. We build the report in
+                # a subshell so we can suppress it entirely when everything is fine:
+                # the env block (including the "ok" context rows) is printed only when
+                # there is at least one problem to act on. The subshell's exit status
+                # carries the problem count back out. Then summarize every instance
+                # with its live VM state and whether it persists across stops.
                 if [ -z "$inst" ]; then
+                  # Capture the report in a subshell, carrying the problem count out
+                  # via its exit status. The `|| errs=$?` is load-bearing: these menu
+                  # commands run under `writeShellApplication`'s `set -euo pipefail`
+                  # with `inherit_errexit`, where a command substitution that exits
+                  # non-zero aborts the whole assignment — so without the `||` a
+                  # missing secret would kill the command before it could report the
+                  # problem or list instances.
                   errs=0
-                  echo "environment:"
-                  ${statusSecretChecks}
-                  if [ -e /dev/vhost-vsock ]; then
-                    printf '  %-${toString envLabelWidth}s  %s\n' "vhost-vsock" "ok"
-                  else
-                    printf '  %-${toString envLabelWidth}s  %s\n' "vhost-vsock" "MISSING - agent mode needs it (sudo modprobe vhost_vsock)"
-                    errs=$((errs + 1))
-                  fi
+                  env_report="$(
+                    errs=0
+                    ${statusSecretChecks}
+                    if [ -e /dev/vhost-vsock ]; then
+                      printf '  %-${toString envLabelWidth}s  %s\n' "vhost-vsock" "ok"
+                    else
+                      printf '  %-${toString envLabelWidth}s  %s\n' "vhost-vsock" "MISSING - agent mode needs it (sudo modprobe vhost_vsock)"
+                      errs=$((errs + 1))
+                    fi
+                    exit "$errs"
+                  )" || errs=$?
                   if [ "$errs" -gt 0 ]; then
+                    echo "environment:"
+                    printf '%s\n' "$env_report"
                     echo "  ($errs problem(s) above - resolve before launching)" >&2
+                    echo
                   fi
-                  echo
 
                   rows=""
-                  running_n=0
                   if [ -d "$root" ]; then
                     for d in "$root"/*/; do
                       [ -d "$d" ] || continue
                       i="$(basename "$d")"
-                      if running "$i"; then s="running"; running_n=$((running_n + 1)); else s="stopped"; fi
+                      if running "$i"; then s="running"; else s="stopped"; fi
                       if [ -e "$d/.named" ]; then p="named"; else p="ephemeral"; fi
                       rows="$rows$(printf '%s\t%s\t%s\n' "$i" "$s" "$p")
         "
                     done
                   fi
-                  if [ "$running_n" -eq 0 ]; then
+                  # "No active sandboxes" means the list is empty - nothing to inspect,
+                  # restart, or remove. If there are any instances (running, or stopped
+                  # leftovers / persistent named ones), list them all instead.
+                  if [ -z "$rows" ]; then
                     echo "No active sandboxes"
-                  fi
-                  # Still list any instances (stopped leftovers, persistent named ones) so
-                  # they can be inspected, restarted, or removed.
-                  if [ -n "$rows" ]; then
-                    [ "$running_n" -eq 0 ] && echo
+                  else
                     { printf 'INSTANCE\tSTATE\tPERSIST\n'; printf '%s' "$rows"; } | column -t
                   fi
                   # Non-zero iff the environment preflight found a problem, so the

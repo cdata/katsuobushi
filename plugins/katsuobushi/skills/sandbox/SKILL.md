@@ -131,7 +131,7 @@ declares; `system` comes from `flake-utils`. The internal `microvm` / `rust` /
 The fastest starting point is
 `nix flake init -t github:cdata/katsuobushi#sandbox`.
 
-## Launching (agent mode)
+## Launch a sandboxed agent
 
 ```sh
 # Boot a lingering agent VM; returns immediately once it's up.
@@ -153,7 +153,7 @@ Give a directive that says how to finish, e.g.: _"Do X. Commit and push on the
 branch. Run `report done \"<summary>\"` when complete;
 `report blocked \"<what you need>\"` if you get stuck."_
 
-## Driving it (multi-turn)
+## Driving the agent
 
 ```sh
 sandbox:prompt <name> "<the next directive>"
@@ -172,17 +172,75 @@ status:
 When the work is finished, tell the agent it's done — it powers the VM off
 itself — or stop it from the host (below).
 
-## Collecting work
+## Collecting & integrating work
 
-Work returns as ordinary git — the agent commits on `sandbox/<name>` and pushes
-to a per-instance mirror. Pull it into the repo:
+Work returns as ordinary git: the agent commits on `sandbox/<name>` and pushes
+to a per-instance mirror. The channel carries control/status only — the branch
+is the artifact.
 
 ```sh
-sandbox:fetch <name>            # fetches branch sandbox/<name>
+sandbox:fetch <name>            # git fetch <mirror> sandbox/<name>:sandbox/<name>
 ```
 
-The channel never carries code; the branch is the artifact. Review it as a
-normal branch (diff, test) before merging.
+`sandbox:fetch` brings the branch into your repo but **never merges**.
+Integration is yours to drive, and the goal is to land the work as
+automatically as a built-in sub-agent would — pausing only on a genuine
+dead-end. A sandbox is meant to be a *more secure* substitute for sub-agent
+spawning, so the back-half should feel just as hands-off.
+
+### Change integration
+
+When an agent reports `done`, integrate **without asking**. The sandbox already
+bounded the *execution*; the safety net for the *diff* is that everything you
+land stays revertable — the `sandbox/<name>` ref is preserved — not a
+pre-merge prompt.
+
+Speak the user's VCS tool: `.jj/` present → use `jj`; else `.git`
+→ `git`; if neither or it's ambiguous, ask. The sync layer is always git (the
+mirror + `sandbox:fetch`), but the host-side landing is done in their tool.
+
+**Land a single branch via rebase workflow:**
+
+1. `sandbox:fetch <name>`.
+2. **Snapshot the host first.** If the working copy is dirty, capture it as a
+   `wip: …` commit (jj: the working copy already *is* a commit; git: commit the
+   dirty tree) — never a stash. Concurrent host edits must survive the landing.
+3. **Rebase** the sandbox commits onto the current HEAD (`jj rebase` /
+   `git rebase`).
+4. **Clean →** advance the branch, then: `sandbox:stop <name>` (ephemeral is
+   removed, named is kept/restartable), keep the `sandbox/<name>` ref as the
+   revert artifact, and surface the agent's `done` summary plus a diffstat of
+   what landed — that digest is the orchestrator's "return value".
+5. **Doesn't land cleanly →** treat the reconciliation as ordinary delegated
+   work, not a special case (below).
+
+### Conflict reconciliation
+
+Reconciling a conflict is nothing special — it's ordinary work you delegate to a
+sandbox, exactly like the original task. Spawn one, brief it well (the original
+directive, the prior agent's `done` summary, which files conflict, and the goal:
+"rebase this onto HEAD, resolve preserving both intents, commit and push"), then
+collect and land its branch by **this same procedure** — recursively, if its own
+result conflicts.
+
+Every normal delegation behavior applies unchanged: it works the task, `report`s
+`done` or `blocked`, you answer a `blocked` by relaying it to the user and
+sending the reply with `sandbox:prompt`, and you involve the user directly only
+when the agent truly can't proceed. There is no conflict-specific role, ceiling,
+or path.
+
+One general gotcha — true of any delegated follow-up, not just conflicts: spawn
+a **fresh** instance so its mirror clones the repo *as it is now*; it then sees
+both the current HEAD and the fetched branch. A resumed named instance keeps its
+mirror frozen at *its* launch and can't see a newer HEAD.
+
+### Parallel fan-out
+
+Launch several `--name`d agents at once; each is an independent VM with its own
+branch. **Integrate serially:** land one finished branch at a time; HEAD
+advances and the next rebases onto it (later branches may conflict against the
+accumulated work and need a follow-up sandbox, exactly as above). To keep most landings fast-forwards, scope each
+fanned-out task to disjoint files when you write the directives.
 
 ## Observing & lifecycle
 
