@@ -29,7 +29,8 @@ defaults:
   # well-known in-guest project path and the per-instance host state dirs.
   projectId,
 
-  # --- Network egress ---
+  # Network egress
+  #
   # Extra reachable origins, appended to `baseAllowedOrigins`. Hostnames only;
   # each becomes a squid `dstdomain`. No implicit wildcards — "github.com"
   # matches only that host; ".github.com" opts into the subtree.
@@ -58,33 +59,37 @@ defaults:
     "codeload.github.com"
   ],
 
-  # --- Reference repos: build-time pinned, writable copies ---
+  # Reference repos: build-time pinned, writable copies
+  #
   # List of { source, dest }. `source` is a store path / derivation (a flake
   # input with `flake = false`, or a `pkgs.fetchFromGitHub { ... }`). `dest` is
   # relative to the agent home; mirror the host Git-layout convention, e.g.
   # "Git/github.com/oxalica/rust-overlay".
   extraRepos ? [ ],
 
-  # --- Untracked workspace context: project-scoped, one-way host->guest.
+  # Untracked workspace context: project-scoped, one-way host->guest.
+  #
   # List of project-relative paths (e.g. ".claude", "notes") carried into the
   # workspace on top of the mirror clone. Absolute paths and ".." are rejected
   # at eval time; symlink escape is refused at copy time by the host runner.
   workspaceContext ? [ ],
 
-  # --- Home-file mappings: dest (in agent home) -> { source, path?, mode }
+  # Home-file mappings: dest (in agent home) -> { source, path?, mode }
+  #
   # `source` is a store path; `path` an optional subpath within it. Modes:
   #   "immutable" — read-only bind mount; fixed even against the agent.
   #   "seed"      — copied into home at boot; the agent may edit it.
   #   "link"      — store symlink; present but replaceable (cheapest).
   homeFiles ? { },
 
-  # --- Runtime secrets: NAME -> { fromEnv = "VAR"; } | { fromFile = "P"; }
+  # Runtime secrets: NAME -> { fromEnv = "VAR"; } | { fromFile = "P"; }
+  #
   # The declaration lives here; the value is read from the host by the runner at
   # launch and injected via fw_cfg (never in the store, argv, or on disk). The
   # runner fails fast if a declared secret is missing.
   secrets ? { },
 
-  # --- Resources ---
+  # Resources
   vcpu ? 4,
   mem ? 8192, # MiB. NB: qemu hangs at exactly 2048 (microvm.nix#171).
   storeOverlaySize ? "8G", # tmpfs writable /nix/store overlay; heavy builds need more.
@@ -140,7 +145,8 @@ let
 
   secretNames = builtins.attrNames secrets;
 
-  # ---- In-tree sandbox controller crate (agent mode) ----------------------
+  # In-tree sandbox controller crate (agent mode)
+  #
   # Built reproducibly via lib.rust/crane from Katsuobushi's own workspace
   # source. The server + `report` binaries are baked into the guest; the host
   # client backs the `sandbox:prompt` command. See design/sandbox-agent-mode.md.
@@ -200,7 +206,7 @@ let
     '';
   };
 
-  # ---- Eval-time validation of project-scoped paths -------
+  # Eval-time validation of project-scoped paths
   checkContextPath =
     p:
     if lib.hasPrefix "/" p then
@@ -227,7 +233,7 @@ let
       r;
   validatedRepos = map checkRepoDest extraRepos;
 
-  # ---- Discoverability manifest --------------------------------------
+  # Discoverability manifest
   originBullets = lib.concatMapStrings (o: "- `${o}` (HTTPS)\n") effectiveAllowedOrigins;
   repoBullets =
     if validatedRepos == [ ] then
@@ -470,7 +476,8 @@ let
   seedHomeFiles = builtins.filter (e: e.mode == "seed") homeFilesList;
   linkHomeFiles = builtins.filter (e: e.mode == "link") homeFilesList;
 
-  # ---- squid forward-proxy configuration ------------------------------
+  # Squid forward-proxy configuration
+  #
   # `dstdomain` allowlist with `http_access deny all` as the backstop; squid
   # resolves names itself via the slirp DNS forwarder (the agent has none).
   squidConf = pkgs.writeText "squid.conf" ''
@@ -508,7 +515,8 @@ let
     shutdown_lifetime 1 seconds
   '';
 
-  # ---- Host runner: launch-time argument emission -------
+  # Host runner: launch-time argument emission
+  #
   # microvm.nix runs this at launch and splices its single line of stdout into
   # the qemu invocation. It reads only env/paths prepared by the wrapper, so
   # nothing instance-specific is in the store.
@@ -541,7 +549,7 @@ let
     printf '%s' "$args"
   '';
 
-  # ---- The guest NixOS system -----------------------------------------------
+  # The guest NixOS system
   guestModule =
     {
       config,
@@ -615,7 +623,7 @@ let
         dhcpV4Config.UseDNS = false;
       };
 
-      # ---- Users (6.1) ----
+      # Users (6.1)
       users.mutableUsers = false;
       # Intentional: there is no root/password login. The agent authenticates
       # with the ephemeral key injected at launch; root is unreachable.
@@ -634,7 +642,8 @@ let
       };
       users.groups.katsuproxy.gid = proxyUid;
 
-      # ---- Firewall: nftables default-deny egress (6.3) ----
+      # Firewall: nftables default-deny egress (6.3)
+      #
       # The agent's only path out is squid on loopback; only the squid user may
       # talk to the network. DHCP is allowed so the NIC can get an address.
       networking.nftables.enable = true;
@@ -667,7 +676,7 @@ let
       # The stock NixOS firewall is redundant with our explicit ruleset.
       networking.firewall.enable = false;
 
-      # ---- squid proxy (6.4) ----
+      # Squid proxy (6.4)
       systemd.services.katsuproxy = {
         description = "Katsuobushi egress allowlist proxy (squid)";
         wantedBy = [ "multi-user.target" ];
@@ -686,7 +695,8 @@ let
         };
       };
 
-      # ---- Agent environment (6.10) ----
+      # Agent environment (6.10)
+      #
       # System-wide proxy + Claude Code hygiene. The OAuth token is *not* here;
       # it is delivered as a runtime secret (see katsuobushi-credentials below).
       environment.variables = {
@@ -751,7 +761,8 @@ let
         trusted-users = [ agentUser ];
       };
 
-      # ---- ssh: key-only, agent only, reachable only via the loopback hostfwd
+      # SSH: key-only, agent only, reachable only via the loopback hostfwd
+      #
       #. The pubkey arrives per-launch through the share.
       services.openssh = {
         enable = true;
@@ -763,7 +774,8 @@ let
         };
       };
 
-      # ---- Login greeting + per-session secret export + env hygiene ----
+      # Login greeting + per-session secret export + env hygiene
+      #
       # Added to /etc/profile (NixOS does NOT source /etc/profile.d/*.sh, so this
       # is the hook that actually runs for ssh logins and the autonomous
       # `bash -lc` launcher). Exports each delivered secret as its env var,
@@ -847,7 +859,8 @@ let
       # link homeFiles: store symlink, replaceable.
       ++ map (e: "L+ ${agentHome}/${e.dest} - - - - ${e.src}") linkHomeFiles;
 
-      # ---- Secret delivery ----
+      # Secret delivery
+      #
       # Pulls each fw_cfg system credential and writes it to a tmpfs file
       # readable only by the agent, so both the interactive login shell and the
       # autonomous launcher can export it. /run is RAM; nothing hits disk.
@@ -875,7 +888,8 @@ let
         '';
       };
 
-      # ---- Inject the per-launch ssh pubkey ----
+      # Inject the per-launch ssh pubkey
+      #
       # The wrapper drops the ephemeral pubkey into the share; install it into
       # the agent's authorized_keys before sshd accepts connections.
       systemd.services.katsuobushi-authkeys = {
@@ -895,7 +909,8 @@ let
         '';
       };
 
-      # ---- Immutable homeFiles: per-file read-only bind mounts ----
+      # Immutable homeFiles: per-file read-only bind mounts
+      #
       # A symlink would be removable by the agent (it owns its home); a per-file
       # RO bind mount cannot be overwritten or unmounted unprivileged. Done in a
       # root service (rather than `fileSystems`) so single-file mountpoints over
@@ -920,7 +935,8 @@ let
         '') immutableHomeFiles;
       };
 
-      # ---- Workspace materialization ----
+      # Workspace materialization
+      #
       # Clone the bare mirror (its only remote is the sync point — no host
       # credentials/upstreams leak), check out the seed branch, overlay the
       # untracked context, and lay down the writable reference-repo copies.
@@ -984,7 +1000,8 @@ let
         '';
       };
 
-      # ---- Agent run mode ----
+      # Agent run mode
+      #
       # Always present; no-ops unless launched in agent mode. It starts a
       # *dormant interactive* Claude session inside a detached tmux session as
       # the unprivileged agent (design §5.2), with the controller channel server
@@ -1060,7 +1077,8 @@ let
 
   runner = guestSystem.config.microvm.declaredRunner;
 
-  # ---- Host-side wrapper (the `nix run .#sandbox` app) ----------------------
+  # Host-side wrapper (the `nix run .#sandbox` app)
+  #
   # Resolves the instance, builds the per-instance bare mirror + working-tree
   # snapshot seed, stages context (symlink-safe) + non-secret runtime files,
   # reads each secret from the host into a tmpfs file (fail-fast), generates an
@@ -1311,7 +1329,8 @@ let
     '';
   };
 
-  # ---- Lifecycle menu commands ----------------------------------------------
+  # Lifecycle menu commands
+  #
   # Small helpers over the per-instance state dirs, ready to merge into makeMenu.
   # Durable state (the bare mirror, console log) lives under stateGlob; ephemeral
   # runtime material (the qemu control socket, ssh key) under runtimeGlob.

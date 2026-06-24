@@ -16,7 +16,8 @@
     # need `allowUnfree`.
     llm-agents.url = "github:numtide/llm-agents.nix";
 
-    # --- Project-data sources for the sandbox (optional) ---
+    # Project-data sources for the sandbox (optional)
+    #
     # A reference repo to clone read-only-provenance into the VM. `flake = false`
     # means "just fetch the tree"; it is pinned in this flake's flake.lock and
     # updated with `nix flake update`.
@@ -61,7 +62,8 @@
           # host state dirs (~/.local/state/katsuobushi/<projectId>/<instance>).
           projectId = "my-org/my-project";
 
-          # --- Network egress (appended to the lean Anthropic+Nix baseline) ---
+          # Network egress (appended to the lean Anthropic+Nix baseline)
+          #
           # Hostnames only; no implicit wildcards. Port 443 (HTTPS) is assumed.
           allowedOrigins = [
             "crates.io"
@@ -70,7 +72,8 @@
           # The only "removal" mechanism is a wholesale override of the baseline:
           #   baseAllowedOrigins = [ "api.anthropic.com" "cache.nixos.org" ];
 
-          # --- Reference repos: build-time pinned, writable copies in the VM ---
+          # Reference repos: build-time pinned, writable copies in the VM
+          #
           # `source` is any store path (a `flake = false` input, or a fetcher
           # like `pkgs.fetchFromGitHub { ... }`). `dest` mirrors the host
           # ~/Git/<host>/<owner>/<repo> convention so the agent finds them where
@@ -83,7 +86,8 @@
             }
           ];
 
-          # --- Untracked context: project-scoped, one-way host -> guest ---
+          # Untracked context: project-scoped, one-way host -> guest
+          #
           # Extra paths (relative to the project root) carried into the workspace
           # on top of the mirror clone. Absolute paths and ".." are rejected at
           # eval time; symlinks escaping the tree are dropped at copy time.
@@ -101,7 +105,7 @@
             "notes"
           ];
 
-          # --- git-source -> guest-home file mappings ---
+          # Git-source -> guest-home file mappings
           homeFiles = {
             # Map a universal AGENTS.md into the agent's CLAUDE.md, read-only
             # even against the agent (RO bind mount).
@@ -112,7 +116,8 @@
             };
           };
 
-          # --- Runtime secrets: read from the host at launch; never in Nix ---
+          # Runtime secrets: read from the host at launch; never in Nix
+          #
           # Generate the token on the host with `claude setup-token` and export
           # it before `nix run .#sandbox`. The runner fails fast if it is missing.
           secrets = {
@@ -130,12 +135,13 @@
           # from numtide/llm-agents.nix (pre-built, no allowUnfree needed):
           packages = [ llm-agents.packages.${system}.claude-code ];
 
-          # --- Resources ---
+          # Resources
           vcpu = 4;
           mem = 8192; # MiB (avoid exactly 2048 — qemu hangs)
           storeOverlaySize = "8G"; # tmpfs writable /nix/store overlay
 
-          # --- Escape hatch: extra NixOS modules merged into the guest ---
+          # Escape hatch: extra NixOS modules merged into the guest
+          #
           # guestModules = [ ./guest-extra.nix ];
         };
 

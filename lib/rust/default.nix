@@ -140,12 +140,12 @@ let
       wasmBindgenPackages = builtins.filter (p: p.name == "wasm-bindgen") (cargoLock.package or [ ]);
       version =
         if wasmBindgenPackages == [ ] then
-          throw "lib/rust.nix: building wasm-bindgen-cli requires a `wasm-bindgen` entry in Cargo.lock, but none was found."
+          throw "lib/rust/default.nix: building wasm-bindgen-cli requires a `wasm-bindgen` entry in Cargo.lock, but none was found."
         else
           (builtins.head wasmBindgenPackages).version;
       hashes =
         wasmBindgenHashesResolved.${version} or (throw ''
-          lib/rust.nix: Cargo.lock pins wasm-bindgen ${version}, but no wasm-bindgen-cli hashes are known for it. Add an override:
+          lib/rust/default.nix: Cargo.lock pins wasm-bindgen ${version}, but no wasm-bindgen-cli hashes are known for it. Add an override:
 
             wasmBindgenHashes."${version}" = {
               hash = pkgs.lib.fakeHash;

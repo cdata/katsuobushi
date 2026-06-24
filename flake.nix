@@ -44,20 +44,22 @@
       # The library functions, partial-applied with the pinned infra deps. Bound
       # here so both the consumer-facing `lib.*` outputs and this repo's own
       # dogfooding dev shell (below) share one definition.
-      rustLib = import ./lib/rust.nix { inherit crane nix-filter rust-overlay; };
-      markdownLib = import ./lib/markdown.nix;
+      rustLib = import ./lib/rust { inherit crane nix-filter rust-overlay; };
+      markdownLib = import ./lib/markdown;
       # sandbox carries the rust helper + this repo's workspace source so it can
       # build the in-tree sandbox controller crate (agent mode) internally — the
       # consumer never sees them. `./.` is katsuobushi's own root, pinned for
       # consumers via the flake input, so the crates build from a fixed source.
-      sandboxLib = import ./lib/sandbox.nix {
+      sandboxLib = import ./lib/sandbox {
         inherit microvm;
         rust = rustLib;
         controlSrc = ./.;
       };
 
+      # The menu helpers are the overlay's `pkgs.katsuobushi`; point straight at
+      # the library (no `lib/default.nix` barrel — every library is `lib/<name>`).
       overlay = final: prev: {
-        katsuobushi = import ./lib { pkgs = final; };
+        katsuobushi = import ./lib/menu { pkgs = final; };
       };
 
       # The guest is a Linux microvm, so the sandbox app/check are Linux-only.
@@ -76,7 +78,7 @@
       # per-call.
       lib.rust = rustLib;
 
-      # Markdown design-doc helpers: a shared rumdl configuration driving both a
+      # Markdown helpers: a shared Prettier configuration driving both a
       # dev-shell formatter command and a flake check. Called with the
       # consumer's `pkgs`.
       lib.markdown = markdownLib;
@@ -122,14 +124,16 @@
 
         inherit (pkgs.katsuobushi) makeMenu makeDevShellHook;
 
-        # Format Katsuobushi's own (gitignored, local-only) design docs. We turn
-        # off respect-gitignore so the command actually reaches them; there is
-        # deliberately no matching flake `check`, since `design/` is untracked
-        # and so cannot be carried into the Nix store.
+        # Format + lint the tracked, shippable Markdown: the root README and each
+        # library's README. Unlike the design docs above, these are tracked — so
+        # this invocation also carries a flake `check`.
         markdown = markdownLib {
           inherit pkgs;
           workspaceRoot = ./.;
-          settings.global.respect-gitignore = false;
+          include = [
+            "README.md"
+            "lib/*/README.md"
+          ];
         };
 
         # The Katsuobushi sandbox, configured for this repo. The lean
@@ -177,22 +181,17 @@
           graphic = ''
             .  o   ..    ><(((°>
           '';
-          commands =
-            markdown.menuCommands
-            // (pkgs.lib.optionalAttrs isLinux sandbox.menuCommands)
-            // {
-              check = {
-                description = "Run the flake checks";
-                command = "nix flake check";
-              };
-            };
+          # Each library configuration contributes its own namespaced commands
+          # (e.g. format:design / lint:design, format:markdown / lint:markdown);
+          # there is no global aggregate command.
+          commands = markdown.menuCommands // (pkgs.lib.optionalAttrs isLinux sandbox.menuCommands);
         };
       in
       {
         devShells.default = pkgs.mkShell {
           name = "katsuobushi";
           nativeBuildInputs = menu.commands ++ [
-            markdown.rumdl
+            markdown.prettier
             # Toolchain for working on the in-tree sandbox controller crate.
             rust.rustToolchain
             # Used by the sandbox lifecycle commands (QMP over the qemu monitor)
@@ -212,7 +211,8 @@
         checks = {
           sandbox = sandbox.checks.sandbox;
         }
-        // rust.cargoChecks;
+        // rust.cargoChecks
+        // markdown.checks;
       }
     );
 }

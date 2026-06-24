@@ -1,0 +1,13 @@
+{
+  "name": "katsuobushi",
+  "owner": {
+    "name": "cdata"
+  },
+  "plugins": [
+    {
+      "name": "katsuobushi",
+      "source": "./plugins/katsuobushi",
+      "description": "Agent skills for the Katsuobushi Nix toolkit — currently: driving the ephemeral sandbox VM."
+    }
+  ]
+}

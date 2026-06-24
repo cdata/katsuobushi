@@ -45,7 +45,7 @@
           inherit pkgs;
           workspaceRoot = ./.;
           # Owner-qualified identifier; namespaces the out-of-tree cargo target
-          # dir (see `cargoTargetDir` in katsuobushi's lib/rust.nix). Change me.
+          # dir (see `cargoTargetDir` in katsuobushi's lib/rust/default.nix). Change me.
           projectId = "my-org/my-project";
           # Tools every Rust derivation needs at build time.
           nativeBuildInputs = with pkgs; [ pkg-config ];
@@ -78,11 +78,13 @@
           rustToolchain
           ;
 
-        # Markdown design-doc helpers: a shared rumdl configuration driving
-        # the `format:design` menu command and the design check below.
+        # Markdown helpers: a shared Prettier configuration driving the
+        # `format:markdown` / `lint:markdown` menu commands and the check below.
+        # Formats every tracked `.md` file by default; scope with `include`.
         markdown = katsuobushi.lib.markdown {
           inherit pkgs;
           workspaceRoot = ./.;
+          # include = [ "README.md" "design" ];
         };
 
         # Example crate — uncomment once you have a Cargo workspace under
@@ -125,7 +127,7 @@
       {
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = menu.commands ++ [
-            markdown.rumdl
+            markdown.prettier
             rustToolchain
           ];
           shellHook = rustEnvironmentHook + makeDevShellHook menu;
