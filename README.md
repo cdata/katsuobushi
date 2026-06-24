@@ -3,7 +3,7 @@
     <br>
     <br>
     <p>
-A collection of libraries and workflows for Nix Flake-based projects.
+Libraries and templates for Nix Flake-based projects.
 
 I tend to set up my projects with the same workflows again and again. This
 repository assembles the things I always find useful.
@@ -14,12 +14,20 @@ I hope that you will enjoy it. </p>
 
 ## Inventory
 
+### Libraries
+
+Katsuobushi libraries are broken out by domain and can be used a la carte:
+
 | Library                              | Description                                                                        |
 | ------------------------------------ | ---------------------------------------------------------------------------------- |
-| [`menu`](lib/menu/README.md)         | General a colorful and useful command menu for a project's devshell                |
+| [`menu`](lib/menu/README.md)         | Generate a colorful and useful command menu for a project's devshell               |
 | [`rust`](lib/rust/README.md)         | Convenience wrapper over [Crane] to reduce boilerplate in Rust project derivations |
 | [`markdown`](lib/markdown/README.md) | Formatting and lint for Markdown documentation (via [Prettier])                    |
 | [`sandbox`](lib/sandbox/README.md)   | Ephemeral, project-specific, VM-sandboxed workspaces (Linux-only, via [`qemu`])    |
+
+### Templates
+
+Several Nix Flake templates are available for quick project scaffolding:
 
 | Template  | Description                                          | Usage                                                |
 | --------- | ---------------------------------------------------- | ---------------------------------------------------- |
@@ -27,19 +35,22 @@ I hope that you will enjoy it. </p>
 | `sandbox` | General flake with a menu and pre-configured sandbox | `nix flake init -t github:cdata/katsuobushi#sandbox` |
 | `rust`    | Flake for Rust projects w/ maximum umami             | `nix flake init -t github:cdata/katsuobushi#rust`    |
 
-## Agent skills
+### Skills
 
-Katsuobushi is also a [Claude Code plugin marketplace][plugins]. Installing the
-`katsuobushi` plugin teaches your agent to drive the sandbox for you — say _"use
-the sandbox to…"_ and it knows the launch/prompt/fetch workflow.
+Skills help agents to use Katsuobushi libraries with minimal additional
+instructions:
+
+| Skill     | Description                                          |
+| --------- | ---------------------------------------------------- |
+| `sandbox` | Configuration and usage of the `sandbox` Nix library |
+
+Track the [plugin marketplace][plugins] with your agent harness and install the
+`katsuobushi` plugin to get started e.g.,
 
 ```text
 /plugin marketplace add cdata/katsuobushi
 /plugin install katsuobushi@katsuobushi
 ```
-
-It currently provides the `sandbox` skill (host-side orchestration of agent-mode
-sandboxes); see [`lib/sandbox/README.md`](lib/sandbox/README.md).
 
 [Crane]: https://crane.dev
 [Prettier]: https://prettier.io

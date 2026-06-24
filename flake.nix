@@ -132,6 +132,7 @@
           workspaceRoot = ./.;
           include = [
             "README.md"
+            "MIGRATING.md"
             "lib/*/README.md"
           ];
         };

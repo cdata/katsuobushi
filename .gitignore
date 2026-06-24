@@ -2,7 +2,6 @@ result
 result-*
 .direnv
 design
-MIGRATING.md
 # Cargo build output. lib.rust steers cargo at an out-of-tree CARGO_TARGET_DIR
 # in the dev shell, but an ad-hoc `cargo build` lands here.
 /target
