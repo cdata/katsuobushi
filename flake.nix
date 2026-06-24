@@ -149,7 +149,7 @@
             ".claude"
             "design"
           ];
-          secrets.CLAUDE_CODE_OAUTH_TOKEN.fromEnv = "CLAUDE_CODE_OAUTH_TOKEN";
+          secrets.CLAUDE_CODE_OAUTH_TOKEN.fromEnv = "HARNESS_OAUTH_TOKEN";
           # The agent harness is just a package. We use the latest Claude Code
           # from numtide/llm-agents.nix (newer than nixpkgs, and pre-built so no
           # allowUnfree needed).

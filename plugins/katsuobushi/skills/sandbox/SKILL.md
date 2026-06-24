@@ -27,16 +27,24 @@ delegated work.
 
 ## Prerequisites
 
-- The `sandbox:*` commands come from the project's Nix dev shell (the project
-  must consume `katsuobushi.lib.sandbox`). If they aren't on `PATH`, run inside
-  `nix develop`, or use `nix run .#sandbox -- …` for launching. Run
-  `sandbox:status` to confirm the tooling is present.
-- A subscription token must be exported before launching: the user runs
-  `export CLAUDE_CODE_OAUTH_TOKEN="$(claude setup-token)"`. The runner fails fast
-  without it. **You usually cannot set this yourself** — ask the user to export
-  it (or to launch the VM), then take over driving.
-- Agent mode needs host vsock (`/dev/vhost-vsock`); the runner warns if missing
-  (`sudo modprobe vhost_vsock`).
+**Run `sandbox:status` first — it is the preflight.** Before it lists instances
+it prints an `environment:` block and exits non-zero if anything is missing, so
+a single command tells you whether the host is ready. No project-specific
+knowledge required — read what to fix off its output:
+
+- If the command itself is **not found**, the `sandbox:*` tooling isn't on
+  `PATH` — run inside `nix develop`, or launch via `nix run .#sandbox -- …`.
+- Every `environment:` row should read `ok`. A `MISSING` row names exactly what
+  to act on:
+  - The **OAuth token** row names the *host* environment variable this project
+    maps the guest's `CLAUDE_CODE_OAUTH_TOKEN` from. It is often
+    `CLAUDE_CODE_OAUTH_TOKEN`, but can be any name (e.g. `HARNESS_OAUTH_TOKEN`) —
+    don't assume it; read it off the status output. **You usually cannot export
+    it yourself** — ask the user to export the named variable (via
+    `claude setup-token`) and re-run `sandbox:status`, or to launch the VM, then
+    take over driving.
+  - A `vhost-vsock` `MISSING` row means agent mode's host↔guest channel is
+    unavailable — the user loads it with `sudo modprobe vhost_vsock`.
 
 ## Configuring a project's sandbox
 
@@ -69,6 +77,11 @@ sandbox = katsuobushi.lib.sandbox {
   ];
 
   # Runtime secrets: read from the host at launch; never in the store
+  #
+  # The guest always sees CLAUDE_CODE_OAUTH_TOKEN; `fromEnv` picks which *host*
+  # var supplies it. An agent harness scrubs CLAUDE_CODE_OAUTH_TOKEN from its
+  # children, so when one launches the sandbox, source it from a differently-
+  # named var (e.g. "HARNESS_OAUTH_TOKEN"). `sandbox:status` reports which.
   secrets = {
     CLAUDE_CODE_OAUTH_TOKEN.fromEnv = "CLAUDE_CODE_OAUTH_TOKEN";
     # SOME_API_KEY.fromFile = "/run/secrets/some-api-key";

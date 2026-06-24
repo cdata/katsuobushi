@@ -10,6 +10,34 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.1.1
+
+A small release: no library argument or output signatures changed, so a normal
+upgrade needs no edits. The one behavioral change worth knowing is below; the
+rest is additive or a bug fix (see [`CHANGELOG.md`](CHANGELOG.md)).
+
+### `lib.sandbox`: `sandbox:status` now exits non-zero on a failed preflight — action only if you script its exit code
+
+A bare `sandbox:status` now runs an environment preflight before listing
+instances (it prints an `environment:` block verifying each declared secret at
+its host source and checking for `/dev/vhost-vsock`) and **exits with the count
+of missing prerequisites** instead of always exiting `0`. The instance listing
+is unchanged.
+
+This is a feature — the exit status is now a usable launch gate — but if you
+have a script or CI step that runs a bare `sandbox:status` and treats a non-zero
+exit as failure, it will now fail when a prerequisite is missing rather than
+silently succeeding. Pass an explicit instance name (`sandbox:status <inst>`) to
+get just that instance's details without the preflight gate.
+
+### `lib.sandbox`: guest push to the 9p mirror now works — no action needed
+
+The per-instance bare mirror is now shared into the guest with
+`security_model=mapped-xattr` (was `none`), so the unprivileged in-guest agent
+owns the files it creates and `git push` back to the host succeeds. Previously
+the push failed and no work crossed the sandbox boundary. This is a pure fix; no
+consumer change is required.
+
 ## 0.1.0
 
 The first tagged release. The notes below matter to anyone who was tracking

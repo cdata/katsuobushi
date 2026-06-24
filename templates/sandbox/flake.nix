@@ -119,7 +119,14 @@
           # Runtime secrets: read from the host at launch; never in Nix
           #
           # Generate the token on the host with `claude setup-token` and export
-          # it before `nix run .#sandbox`. The runner fails fast if it is missing.
+          # it before `nix run .#sandbox`. The runner fails fast if it is missing,
+          # and `sandbox:status` reports which host variable feeds each secret.
+          #
+          # The guest always sees CLAUDE_CODE_OAUTH_TOKEN; `fromEnv` picks which
+          # *host* variable supplies it. If an agent harness will launch the
+          # sandbox, source it from a differently-named var — a harness scrubs
+          # CLAUDE_CODE_OAUTH_TOKEN from its children, e.g.:
+          #   CLAUDE_CODE_OAUTH_TOKEN.fromEnv = "HARNESS_OAUTH_TOKEN";
           secrets = {
             CLAUDE_CODE_OAUTH_TOKEN = {
               fromEnv = "CLAUDE_CODE_OAUTH_TOKEN";

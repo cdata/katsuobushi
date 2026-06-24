@@ -29,8 +29,8 @@ There are two ways to drive it:
 - **Linux with KVM** (`/dev/kvm`). The guest is a Linux microvm, so the sandbox
   app and checks are Linux-only.
 - **Agent mode also needs vsock**: the host `vhost_vsock` kernel module
-  (`/dev/vhost-vsock`). Load it with `sudo modprobe vhost_vsock` if absent; the
-  runner warns when it is missing.
+  (`/dev/vhost-vsock`). Load it with `sudo modprobe vhost_vsock` if absent;
+  `sandbox:status` flags it and the runner warns at launch when it is missing.
 - Nix with flakes.
 
 ## Quick start
@@ -106,6 +106,11 @@ sandbox = katsuobushi.lib.sandbox {
   ];
 
   # Runtime secrets: read from the host at launch; never in the store
+  #
+  # The guest always sees CLAUDE_CODE_OAUTH_TOKEN; `fromEnv` chooses which *host*
+  # variable supplies it. If an agent harness will launch the sandbox, source it
+  # from a differently-named var — it scrubs CLAUDE_CODE_OAUTH_TOKEN from its
+  # children (see "Auth"). `sandbox:status` reports which host var feeds each.
   secrets = {
     CLAUDE_CODE_OAUTH_TOKEN.fromEnv = "CLAUDE_CODE_OAUTH_TOKEN";
     # SOME_API_KEY.fromFile = "/run/secrets/some-api-key";
@@ -161,16 +166,46 @@ declare; `system` comes from `flake-utils`. The internal `microvm` / `rust` /
 
 ## Auth
 
-The agent harness authenticates with a **subscription OAuth token**, supplied as
-a runtime secret. Generate it once on the host and export it before launching;
-the runner reads it from the environment and fails fast if it is missing:
+The agent harness inside the guest authenticates with a **subscription OAuth
+token**, delivered as a runtime secret. The guest always reads it from
+`CLAUDE_CODE_OAUTH_TOKEN`, but the **host** environment variable it is sourced
+from is whatever your `secrets` config names via `fromEnv` — the two need not
+share a name. With the template's default mapping
+(`CLAUDE_CODE_OAUTH_TOKEN.fromEnv = "CLAUDE_CODE_OAUTH_TOKEN"`):
 
 ```sh
 export CLAUDE_CODE_OAUTH_TOKEN="$(claude setup-token)"
 ```
 
-The token is injected into the guest via `fw_cfg` into a RAM-backed file — never
-written to the Nix store, argv, or disk.
+> **Launching from inside an agent harness?** A harness like Claude Code scrubs
+> `CLAUDE_CODE_OAUTH_TOKEN` from its own child environment before it finishes
+> starting up, so an orchestrating agent cannot pass the token straight through
+> under that name. Map the guest secret from a **differently-named** host
+> variable instead, e.g.
+> `secrets.CLAUDE_CODE_OAUTH_TOKEN.fromEnv = "HARNESS_OAUTH_TOKEN"`, and export
+> `HARNESS_OAUTH_TOKEN` on the host.
+
+You never have to guess the name: `sandbox:status` reports exactly which host
+variable feeds each secret and flags any that is missing (see
+[Checking your setup](#checking-your-setup)). The runner also fails fast at
+launch if it is unset. The token is injected into the guest via `fw_cfg` into a
+RAM-backed file — never written to the Nix store, argv, or disk.
+
+## Checking your setup
+
+A bare `sandbox:status` doubles as a preflight: before it lists instances it
+prints an `environment:` block that verifies **each declared secret at its host
+source** (the `fromEnv` variable is set, or the `fromFile` path is readable) and
+checks for `/dev/vhost-vsock`. A clean run — every row `ok`, exit status `0` —
+means a launch has what it needs; any `MISSING` row names exactly what to fix,
+and the command exits non-zero. That makes "is this host ready?" a single check
+with no project-specific knowledge required:
+
+```text
+environment:
+  CLAUDE_CODE_OAUTH_TOKEN  ok (host env HARNESS_OAUTH_TOKEN is set)
+  vhost-vsock              ok
+```
 
 ## Interactive mode
 

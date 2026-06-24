@@ -1372,6 +1372,47 @@ let
     _sock="${runtimeGlob}/$1/katsuobushi.sock"
     [ -S "$_sock" ] && ${pkgs.socat}/bin/socat -T1 - "UNIX-CONNECT:$_sock" </dev/null >/dev/null 2>&1
   '';
+  # Width of the label column in the `sandbox:status` environment report, sized
+  # to the widest of the declared secret names and the static "vhost-vsock" row.
+  envLabels = builtins.attrNames secrets ++ [ "vhost-vsock" ];
+  envLabelWidth = builtins.foldl' (m: s: if builtins.stringLength s > m then builtins.stringLength s else m) 0 envLabels;
+  # Per-secret host-side preflight, interpolated into `sandbox:status`. Each
+  # declared secret is checked at its *host* source — the env var is set, or the
+  # file is readable — so a bare `sandbox:status` doubles as the prerequisite
+  # test: it names the exact host env var feeding each guest secret and flags any
+  # that is missing, instead of letting a launch fail late. The mapping is
+  # project-specific (the guest always sees `CLAUDE_CODE_OAUTH_TOKEN`, but the
+  # host var it is read from is whatever the project's `secrets` set via
+  # `fromEnv`), which is why this is generated from `secrets` rather than
+  # hardcoded. `errs` is provided by the command that interpolates it.
+  statusSecretChecks = lib.concatStrings (
+    lib.mapAttrsToList (
+      name: spec:
+      if spec ? fromEnv then
+        ''
+          if [ -n "''${${spec.fromEnv}:-}" ]; then
+            printf '  %-${toString envLabelWidth}s  %s\n' "${name}" "ok (host env ${spec.fromEnv} is set)"
+          else
+            printf '  %-${toString envLabelWidth}s  %s\n' "${name}" "MISSING - export ${spec.fromEnv} on the host${
+              lib.optionalString (name == "CLAUDE_CODE_OAUTH_TOKEN")
+                " (run 'claude setup-token' and export its output as ${spec.fromEnv})"
+            }"
+            errs=$((errs + 1))
+          fi
+        ''
+      else if spec ? fromFile then
+        ''
+          if [ -r "${spec.fromFile}" ]; then
+            printf '  %-${toString envLabelWidth}s  %s\n' "${name}" "ok (host file ${spec.fromFile})"
+          else
+            printf '  %-${toString envLabelWidth}s  %s\n' "${name}" "MISSING - host file ${spec.fromFile} not readable"
+            errs=$((errs + 1))
+          fi
+        ''
+      else
+        throw "katsuobushi.lib.sandbox: secret ${name} needs fromEnv or fromFile."
+    ) secrets
+  );
   menuCommands = {
     "sandbox:start" = {
       description = "Launch an agent sandbox VM (alias for nix run .#sandbox)";
@@ -1404,9 +1445,25 @@ let
                 root="${stateGlob}"
                 inst="''${1:-}"
 
-                # No instance given: summarize every instance with its live VM state and
-                # whether it persists across stops.
+                # No instance given: first run the environment sanity check — this
+                # doubles as the prerequisite test, so a clean run (no MISSING rows,
+                # zero exit) means a launch has what it needs. Then summarize every
+                # instance with its live VM state and whether it persists across stops.
                 if [ -z "$inst" ]; then
+                  errs=0
+                  echo "environment:"
+                  ${statusSecretChecks}
+                  if [ -e /dev/vhost-vsock ]; then
+                    printf '  %-${toString envLabelWidth}s  %s\n' "vhost-vsock" "ok"
+                  else
+                    printf '  %-${toString envLabelWidth}s  %s\n' "vhost-vsock" "MISSING - agent mode needs it (sudo modprobe vhost_vsock)"
+                    errs=$((errs + 1))
+                  fi
+                  if [ "$errs" -gt 0 ]; then
+                    echo "  ($errs problem(s) above - resolve before launching)" >&2
+                  fi
+                  echo
+
                   rows=""
                   running_n=0
                   if [ -d "$root" ]; then
@@ -1428,7 +1485,9 @@ let
                     [ "$running_n" -eq 0 ] && echo
                     { printf 'INSTANCE\tSTATE\tPERSIST\n'; printf '%s' "$rows"; } | column -t
                   fi
-                  exit 0
+                  # Non-zero iff the environment preflight found a problem, so the
+                  # exit status alone is a usable prerequisite gate.
+                  exit "$errs"
                 fi
 
                 # One instance: details, derived live where possible.
