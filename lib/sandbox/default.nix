@@ -1113,7 +1113,21 @@ let
       done
 
       if [ -z "$instance" ]; then
+        # Unnamed: ephemeral; a timestamp + pid is unique enough on its own.
         instance="$(date +%Y%m%d-%H%M%S)-$$"
+      elif [[ ! "$instance" =~ -[0-9a-f]{8}$ ]]; then
+        # Named: append random entropy so a friendly --name mints a *fresh*,
+        # collision-free instance every launch — its own branch, session, and
+        # state dir — rather than silently resuming an older same-named branch
+        # (an easy and surprising footgun). A name that ALREADY carries our
+        # 8-hex suffix (i.e. a full instance name copied back from a prior
+        # launch's output) is taken verbatim, which is how you deliberately
+        # resume one specific instance.
+        requested="$instance"
+        instance="$instance-$(od -An -N4 -tx1 /dev/urandom | tr -d ' ')"
+        # Surface the full name up front: every other command (prompt/status/
+        # fetch/stop) and a later resume all key off it, not the bare --name.
+        echo "sandbox: instance name '$requested' -> '$instance' (use the full name to drive or resume it)"
       fi
 
       project="$(git rev-parse --show-toplevel)"
@@ -1132,9 +1146,11 @@ let
       chmod 700 "''${XDG_STATE_HOME:-$HOME/.local/state}/katsuobushi"
 
       # A named instance is persistent: it survives teardown and can be restarted
-      # (resumed from its branch) by launching with the same --name. An unnamed
-      # instance is ephemeral and is removed once it stops. The marker records
-      # which, so stop/teardown know whether to prune.
+      # (resumed from its branch) by launching with its full suffixed name (the
+      # one printed at launch and by stop) — re-using the bare --name instead
+      # mints a new instance. An unnamed instance is ephemeral and is removed
+      # once it stops. The marker records which, so stop/teardown know whether
+      # to prune.
       if [ "$named" = "yes" ]; then touch "$state_root/.named"; else rm -f "$state_root/.named"; fi
 
       printf '%s' "$instance" > "$state_root/instance"
@@ -1272,7 +1288,7 @@ let
 
       # Tear the VM down on exit — normal exit, Ctrl-C, terminal close, or
       # termination — then discard ephemeral instances so they don't accumulate.
-      # Named instances are persistent and kept (restart with the same --name).
+      # Named instances are persistent and kept (restart with the full suffixed name).
       # Everything under the runtime dir (ssh key, qemu socket) is always removed.
       cleanup() {
         # Make teardown atomic: don't re-enter, and ignore further signals so the

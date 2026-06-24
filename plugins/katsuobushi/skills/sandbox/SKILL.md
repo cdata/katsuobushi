@@ -256,8 +256,12 @@ The serial console is teed to `console.log` in the instance's state dir — read
 it to diagnose a stuck boot.
 
 Unnamed instances are ephemeral (removed on stop). `--name` makes an instance
-persistent: it keeps its branch and can be restarted by launching with the same
-name, resuming the agent's accumulated work.
+persistent: it keeps its branch. A provided `--name` is suffixed with random
+entropy at launch (e.g. `--name build` → `build-a3f9c2d1`) so each launch is a
+fresh, collision-free instance — never a silent resume of an older same-named
+branch. Drive the instance (prompt/status/fetch/stop) by the full suffixed name
+that launch prints; relaunch with that full name to resume the agent's
+accumulated work.
 
 ## Notes
 

@@ -286,8 +286,12 @@ is the artifact.
 | `sandbox:stop [--remove] <instance>`                | Stop a VM (and remove a named instance's state with `--remove`).                                   |
 
 Unnamed instances are **ephemeral** (removed on stop); `--name` makes an
-instance **persistent** — it keeps its branch and can be restarted (resuming the
-agent's accumulated work) by launching with the same name.
+instance **persistent** — it keeps its branch. To keep names collision-free, a
+provided `--name foo` is suffixed with random entropy at launch (e.g.
+`foo-a3f9c2d1`), so every launch is a fresh instance rather than a silent resume
+of an older same-named branch. The full suffixed name is printed at launch (and
+by `sandbox:stop`); pass *that* full name to restart and resume the agent's
+accumulated work.
 
 ## What the boundary enforces
 
