@@ -134,6 +134,7 @@
             "README.md"
             "MIGRATING.md"
             "lib/*/README.md"
+            "plugins/**/*.md"
           ];
         };
 

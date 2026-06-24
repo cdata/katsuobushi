@@ -1,6 +1,14 @@
 ---
 name: sandbox
-description: Run agent work inside an ephemeral, network-restricted Katsuobushi sandbox VM with a bounded blast radius, and orchestrate it from the host. Use this skill when the user wants to "use the sandbox to…", delegate a task to a sandbox or VM, run risky / long-running / parallel work in isolation, spin up an agent-mode sandbox, push prompts to a running sandbox instance, check on or fetch a sandbox's work, or stop one — i.e. anything involving the sandbox:start / sandbox:prompt / sandbox:status / sandbox:fetch / sandbox:stop commands or `nix run .#sandbox`.
+description:
+  Run agent work inside an ephemeral, network-restricted Katsuobushi sandbox VM
+  with a bounded blast radius, and orchestrate it from the host. Use this skill
+  when the user wants to "use the sandbox to…", delegate a task to a sandbox or
+  VM, run risky / long-running / parallel work in isolation, spin up an
+  agent-mode sandbox, push prompts to a running sandbox instance, check on or
+  fetch a sandbox's work, or stop one — i.e. anything involving the
+  sandbox:start / sandbox:prompt / sandbox:status / sandbox:fetch / sandbox:stop
+  commands or `nix run .#sandbox`.
 ---
 
 # Driving a Katsuobushi sandbox
@@ -11,48 +19,44 @@ default-deny network behind an HTTPS allowlist, no host access, unprivileged.
 Work returns as a pushed git branch.
 
 You are the **host orchestrator**. You launch a sandbox, push it prompts over a
-private host↔guest channel (the *sandbox controller*), read its status reports,
+private host↔guest channel (the _sandbox controller_), read its status reports,
 and collect its branch. The full human guide is at
 <https://github.com/cdata/katsuobushi/blob/main/lib/sandbox/README.md>.
 
 ## When to use this
 
-Delegate to a sandbox when work should be **isolated** or run **unattended /
-in parallel**: risky refactors, running untrusted or experimental code, letting
-an agent grind on a task with auto-approved tool use, or fanning out several
-tasks at once. Each sandbox is an independent VM with its own branch.
+Delegate to a sandbox when work should be **isolated** or run **unattended / in
+parallel**: risky refactors, running untrusted or experimental code, letting an
+agent grind on a task with auto-approved tool use, or fanning out several tasks
+at once. Each sandbox is an independent VM with its own branch.
 
 Do **not** reach for it for quick edits in the current repo — it's for bounded,
 delegated work.
 
 ## Prerequisites
 
-**Run `sandbox:status` first — it is the preflight.** Before it lists instances
-it prints an `environment:` block and exits non-zero if anything is missing, so
-a single command tells you whether the host is ready. No project-specific
-knowledge required — read what to fix off its output:
+**Run `sandbox:status` to get your bearings** before you do anything else.
 
-- If the command itself is **not found**, the `sandbox:*` tooling isn't on
-  `PATH` — run inside `nix develop`, or launch via `nix run .#sandbox -- …`.
-- Every `environment:` row should read `ok`. A `MISSING` row names exactly what
-  to act on:
-  - The **OAuth token** row names the *host* environment variable this project
-    maps the guest's `CLAUDE_CODE_OAUTH_TOKEN` from. It is often
-    `CLAUDE_CODE_OAUTH_TOKEN`, but can be any name (e.g. `HARNESS_OAUTH_TOKEN`) —
-    don't assume it; read it off the status output. **You usually cannot export
-    it yourself** — ask the user to export the named variable (via
-    `claude setup-token`) and re-run `sandbox:status`, or to launch the VM, then
-    take over driving.
-  - A `vhost-vsock` `MISSING` row means agent mode's host↔guest channel is
-    unavailable — the user loads it with `sudo modprobe vhost_vsock`.
+It may reveal the following problems:
+
+- Missing command; if `sandbox:status` is not available, then you probably need
+  to drop into the Nix dev shell. `nix develop -c sandbox:status` should work if
+  you are in a folder with a viable dev shell.
+- Missing environment variables; if any are detected as missing, share which
+  ones with the user and ask them to export them by name (give them a helpful
+  example).
+- Missing `vhost-vsock`; if `qemu` is not compiled with this feature, or if the
+  kernel module is not available you won't be able to communicate with the
+  sandboxed agent; the user may need to load it with `sudo modprobe vhost_vsock`
+  (although this probably isnt the "fix" on a NixOS system).
 
 ## Configuring a project's sandbox
 
-If a project doesn't yet expose the `sandbox:*` commands, wire the library into
-its flake. The call lives in the per-system outputs (alongside `apps.sandbox` /
-`checks.sandbox` and the dev-shell menu; see `templates/sandbox/flake.nix` in
-the katsuobushi repo for the full flake). A comprehensive call exercising every
-consumer-facing argument:
+If a project doesn't yet expose the `sandbox:*` commands, offer to wire the
+library into the local flake. The call lives in the per-system outputs
+(alongside `apps.sandbox` / `checks.sandbox` and the dev-shell menu; see
+`templates/sandbox/flake.nix` in the katsuobushi repo for the full flake). A
+comprehensive call exercising every consumer-facing argument:
 
 ```nix
 sandbox = katsuobushi.lib.sandbox {
@@ -117,37 +121,37 @@ sandbox = katsuobushi.lib.sandbox {
   storeOverlaySize = "8G";             # tmpfs writable /nix/store overlay
 
   # Escape hatch: extra NixOS modules merged into the guest
-  #
-  # guestModules = [ ./guest-extra.nix ];
+  guestModules = [ ./guest-extra.nix ];
 };
 ```
 
 `llm-agents` / `rust-overlay-src` / `nixos-config` are flake inputs the project
 declares; `system` comes from `flake-utils`. The internal `microvm` / `rust` /
 `controlSrc` arguments are supplied by Katsuobushi — consumers don't set them.
-The fastest starting point is `nix flake init -t github:cdata/katsuobushi#sandbox`.
+The fastest starting point is
+`nix flake init -t github:cdata/katsuobushi#sandbox`.
 
 ## Launching (agent mode)
 
 ```sh
 # Boot a lingering agent VM; returns immediately once it's up.
-nix run .#sandbox -- --agent --name <name>
+sandbox:start --agent --name "<name>"
 
 # …or boot AND send the first directive, streaming reports until done/blocked:
-nix run .#sandbox -- --agent --name <name> --prompt "<directive>"
-```
+sandbox:start --agent --name "<name>" --prompt "<directive>"
 
-(Inside the project's dev shell, `sandbox:start --agent …` is the equivalent
-alias for `nix run .#sandbox -- --agent …`.)
+# Alternatively for debugging you can invoke the sandbox binary directly e.g.,
+# nix run .#sandbox -- --agent --name <name>
+```
 
 Agent-mode VMs **linger** (they outlive the launch command). A dormant Claude
 session runs inside the VM with the controller armed. After a no-`--prompt`
 launch, the VM still needs ~30–60s to finish booting and arm the channel before
 it will answer — if `sandbox:prompt` can't connect, wait and retry.
 
-Give a directive that says how to finish, e.g.:
-*"Do X. Commit and push on the branch. Run `report done \"<summary>\"` when
-complete; `report blocked \"<what you need>\"` if you get stuck."*
+Give a directive that says how to finish, e.g.: _"Do X. Commit and push on the
+branch. Run `report done \"<summary>\"` when complete;
+`report blocked \"<what you need>\"` if you get stuck."_
 
 ## Driving it (multi-turn)
 
@@ -174,7 +178,7 @@ Work returns as ordinary git — the agent commits on `sandbox/<name>` and pushe
 to a per-instance mirror. Pull it into the repo:
 
 ```sh
-sandbox:fetch <name>          # fetches branch sandbox/<name>
+sandbox:fetch <name>            # fetches branch sandbox/<name>
 ```
 
 The channel never carries code; the branch is the artifact. Review it as a
@@ -183,8 +187,8 @@ normal branch (diff, test) before merging.
 ## Observing & lifecycle
 
 ```sh
-sandbox:status                # list instances; running/stopped, agent CID, branch
-sandbox:status <name>         # detail, incl. the ssh command to watch live
+sandbox:status                  # list instances; running/stopped, agent CID, branch
+sandbox:status <name>           # detail, incl. the ssh command to watch live
 sandbox:stop [--remove] <name>  # stop (and remove a named instance with --remove)
 ```
 
