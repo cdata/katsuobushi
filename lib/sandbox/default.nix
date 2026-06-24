@@ -531,7 +531,7 @@ let
     args="$args -device virtio-net-pci,netdev=net0,mac=${guestMac},romfile="
 
     # Per-instance state dir as one rw 9p share.
-    args="$args -fsdev local,id=katsushare,path=''${KATSU_STATE_DIR},security_model=none"
+    args="$args -fsdev local,id=katsushare,path=''${KATSU_STATE_DIR},security_model=mapped-xattr"
     args="$args -device virtio-9p-pci,fsdev=katsushare,mount_tag=${shareTag}"
 
     # Agent mode: a vhost-vsock device with the per-instance CID the runner
@@ -1121,6 +1121,15 @@ let
       runtime_root="''${XDG_RUNTIME_DIR:-/tmp}/katsuobushi/${projectId}/$instance"
       mkdir -p "$state_root" "$runtime_root"
       chmod 700 "$runtime_root"
+      # state_root is the root of the 9p share, so the guest must be able to
+      # traverse it — we must NOT clamp it (the guest sees it root-owned, so a
+      # 0700 there would lock the unprivileged agent out of its own workspace).
+      # The bare mirror inside is opened world-writable below so the guest can
+      # push to it (see there). To keep that world-writable repo unreachable by
+      # any *other* host user, clamp a host-side PARENT instead: the guest never
+      # traverses it (qemu already holds the share open as us), but other local
+      # users are blocked from descending to it.
+      chmod 700 "''${XDG_STATE_HOME:-$HOME/.local/state}/katsuobushi"
 
       # A named instance is persistent: it survives teardown and can be restarted
       # (resumed from its branch) by launching with the same --name. An unnamed
@@ -1162,6 +1171,19 @@ let
       if [ ! -d "$state_root/sync.git" ]; then
         git clone --bare "$project" "$state_root/sync.git" >/dev/null 2>&1
       fi
+      # The guest pushes back to this mirror over the 9p share. The share uses
+      # security_model=mapped-xattr: files the guest CREATES are recorded (via
+      # host xattrs) as owned by the in-guest agent, so the agent owns its own
+      # receive-pack quarantine dir, new objects, and ref locks and can write
+      # them. (Plain security_model=none instead flattens *everything* — including
+      # what the guest just created — to root-owned, which the unprivileged agent
+      # then cannot write; that was the bug.) Pre-existing files from the
+      # host-side clone/seed have no such xattr, so the guest sees their real
+      # mode; the recursive chmod below widens those directories so the agent can
+      # create entries *inside* them (e.g. drop a new pack into objects/, or a
+      # *.lock into refs/heads/sandbox/). Deliberately NOT core.sharedRepository:
+      # that makes git chmod() files after creating them, which EPERMs on the
+      # share's pre-existing root-owned files and fails the push.
       # Seed the instance branch. A fresh instance starts from a snapshot of the
       # host's working tree (tracked + staged via `git stash create`, falling
       # back to HEAD when clean). A named instance that already has a branch is
@@ -1176,6 +1198,10 @@ let
         [ -z "$snap" ] && snap="$(git -C "$project" rev-parse HEAD)"
         git -C "$project" push --quiet "$state_root/sync.git" "$snap:$branch" --force
       fi
+      # Open the whole mirror to "other" writes so the guest can push (see above).
+      # Run every launch — idempotent, and it re-opens anything a host-side fetch
+      # or a resumed instance may have created with tighter perms.
+      chmod -R a+rwX "$state_root/sync.git"
 
       # Stage declared untracked context. rsync --safe-links drops any symlink
       # whose target escapes the project tree, so context can't smuggle in files
