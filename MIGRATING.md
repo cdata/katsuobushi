@@ -10,6 +10,10 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.1.2
+
+No action required.
+
 ## 0.1.1
 
 A small release: no library argument or output signatures changed, so a normal

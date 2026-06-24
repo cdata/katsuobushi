@@ -5,6 +5,18 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.1.2] — 2026-06-24
+
+A docs-only release; nothing to migrate (see [`MIGRATING.md`](MIGRATING.md#012)).
+
+### Changed
+
+- **`sandbox` skill docs reworked** — clearer `sandbox:status` guidance, a note
+  that `sandbox:*` are dev-shell menu commands (`nix develop -c sandbox:status`
+  from outside the shell), and Prettier reflow.
+- **Markdown linting now covers `plugins/**/*.md`.** Repo-internal; no consumer
+  impact.
+
 ## [0.1.1] — 2026-06-24
 
 ### Added
