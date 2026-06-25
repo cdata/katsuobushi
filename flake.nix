@@ -180,9 +180,8 @@
 
         menu = makeMenu {
           title = "Katsuobushi";
-          graphic = ''
-            .  o   ..    ><(((°>
-          '';
+          graphicFile = ./hero.ansi;
+          colorizeGraphic = false;
           # Each library configuration contributes its own namespaced commands
           # (e.g. format:design / lint:design, format:markdown / lint:markdown);
           # there is no global aggregate command.

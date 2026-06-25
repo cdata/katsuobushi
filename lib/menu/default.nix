@@ -69,7 +69,7 @@ let
       [ "\\\\" "\\\"" "\\`" "\\$" ]
       str;
 
-  # makeMenu :: { commands, title, graphic?, colorizer? } -> { header, menuText, commands }
+  # makeMenu :: { commands, title, graphic?, graphicFile?, colorizer?, colorizeGraphic? } -> { header, menuText, commands }
   #
   # Accepts:
   #   commands  — An attribute set of command definitions. Each key becomes the
@@ -79,9 +79,23 @@ let
   #                 env         : attrset — (Optional) Environment variables
   #                                         injected via runtimeEnv.
   #   title     — The project/devshell title, rendered large via figlet.
-  #   graphic   — (Optional, default "") ASCII art displayed above the title.
+  #   graphic   — (Optional, default "") ASCII art displayed above the title,
+  #               inlined as a string. Best for plain text; if the art contains
+  #               raw ANSI escape (ESC, U+001B) bytes, use graphicFile instead —
+  #               inlining control characters makes them part of the shellHook,
+  #               which `nix develop` rejects when it serializes the environment
+  #               to JSON.
+  #   graphicFile — (Optional, default null) A path whose contents are catted at
+  #               runtime to produce the banner. Takes precedence over graphic.
+  #               Because the bytes live in a store file and only the store path
+  #               appears in the shellHook, this safely handles pre-colorized
+  #               ANSI art (e.g. terminal pixel art). Pair with
+  #               colorizeGraphic = false so the embedded colors are preserved.
   #   colorizer — (Optional, default lolcat) Shell command used to colorize
   #               menu output. Receives text on stdin.
+  #   colorizeGraphic — (Optional, default true) When false, the ASCII art
+  #               banner is printed raw and only the title and command table are
+  #               run through the colorizer. Has no effect when no graphic is set.
   #
   # Returns an attrset with:
   #   header   — Shell snippet that prints the full greeting (graphic + title +
@@ -96,7 +110,9 @@ let
       commands,
       title,
       graphic ? "",
+      graphicFile ? null,
       colorizer ? "${pkgs.lolcat}/bin/lolcat",
+      colorizeGraphic ? true,
     }:
     let
       # Sorted list of command names (attrNames returns them alphabetically).
@@ -191,17 +207,50 @@ let
       # Prefix the graphic with a trailing newline if present, otherwise empty.
       # The graphic is escaped for safe inclusion inside echo "...".
       graphicSection = if graphic != "" then escapeForDoubleQuotes graphic + "\n" else "";
-    in
-    {
-      # header: Full greeting — graphic, figlet title, and command table, all
-      # colorized through a single lolcat invocation for a continuous rainbow.
-      header = ''
-        echo "${graphicSection}
-        $(${pkgs.figlet}/bin/figlet -t "${title}")
+
+      # Whether any banner is configured at all.
+      hasGraphic = graphicFile != null || graphic != "";
+
+      # Shell snippet that writes the banner (uncolorized) to stdout. A
+      # graphicFile is catted from its store path at runtime, so its raw bytes
+      # (including ANSI escapes) never enter the shellHook string; an inlined
+      # graphic is echoed from the escaped, JSON-safe string. Each form ends
+      # with a blank line separating the banner from the title.
+      emitGraphic =
+        if graphicFile != null then
+          ''cat ${graphicFile}; echo ""''
+        else if graphic != "" then
+          ''echo "${graphicSection}"''
+        else
+          "";
+
+      # Shell snippet that echoes the figlet title and command table.
+      emitBody = ''
+        echo "$(${pkgs.figlet}/bin/figlet -t "${title}")
 
         $(${menu})
-        " | ${colorizer};
-      '';
+        "'';
+    in
+    {
+      # header: Full greeting — graphic, figlet title, and command table.
+      # Normally the banner, title, and table stream through a single colorizer
+      # invocation for a continuous rainbow. When colorizeGraphic is false and a
+      # banner is set, the banner is written raw (preserving any colors it
+      # already carries) and only the title and command table are colorized.
+      header =
+        if hasGraphic && !colorizeGraphic then
+          ''
+            ${emitGraphic}
+            ${emitBody} | ${colorizer};
+          ''
+        else if hasGraphic then
+          ''
+            { ${emitGraphic}; ${emitBody}; } | ${colorizer};
+          ''
+        else
+          ''
+            ${emitBody} | ${colorizer};
+          '';
 
       # menuText: Just the command table, colorized. Handy for showing the menu
       # again without reprinting the entire greeting.

@@ -1391,7 +1391,9 @@ let
   # Width of the label column in the `sandbox:status` environment report, sized
   # to the widest of the declared secret names and the static "vhost-vsock" row.
   envLabels = builtins.attrNames secrets ++ [ "vhost-vsock" ];
-  envLabelWidth = builtins.foldl' (m: s: if builtins.stringLength s > m then builtins.stringLength s else m) 0 envLabels;
+  envLabelWidth = builtins.foldl' (
+    m: s: if builtins.stringLength s > m then builtins.stringLength s else m
+  ) 0 envLabels;
   # Per-secret host-side preflight, interpolated into `sandbox:status`. Each
   # declared secret is checked at its *host* source — the env var is set, or the
   # file is readable — so a bare `sandbox:status` doubles as the prerequisite
@@ -1410,8 +1412,9 @@ let
             printf '  %-${toString envLabelWidth}s  %s\n' "${name}" "ok (host env ${spec.fromEnv} is set)"
           else
             printf '  %-${toString envLabelWidth}s  %s\n' "${name}" "MISSING - export ${spec.fromEnv} on the host${
-              lib.optionalString (name == "CLAUDE_CODE_OAUTH_TOKEN")
-                " (run 'claude setup-token' and export its output as ${spec.fromEnv})"
+              lib.optionalString (
+                name == "CLAUDE_CODE_OAUTH_TOKEN"
+              ) " (run 'claude setup-token' and export its output as ${spec.fromEnv})"
             }"
             errs=$((errs + 1))
           fi
@@ -1431,11 +1434,11 @@ let
   );
   menuCommands = {
     "sandbox:start" = {
-      description = "Launch an agent sandbox VM (alias for nix run .#sandbox)";
+      description = "Launch an agent sandbox";
       command = "${sandboxRunner}/bin/sandbox \"$@\"";
     };
     "sandbox:prompt" = {
-      description = "Send a prompt to a running agent instance: sandbox:prompt <instance> \"<text>\"";
+      description = "Send a prompt to a running agent instance";
       command = ''
         inst="''${1:-}"
         shift || true
@@ -1453,7 +1456,7 @@ let
       '';
     };
     "sandbox:status" = {
-      description = "List instances, or detail one: sandbox:status [instance]";
+      description = "List instances, or detail a single instance";
       command = ''
                 running() {
                   ${isRunning}
@@ -1541,7 +1544,7 @@ let
       '';
     };
     "sandbox:fetch" = {
-      description = "Fetch an instance's branch into this repo: sandbox:fetch <instance>";
+      description = "Fetch a sandbox's branch into this repo";
       command = ''
         inst="''${1:-}"
         [ -n "$inst" ] || { echo "usage: sandbox:fetch <instance>" >&2; exit 2; }
@@ -1550,7 +1553,7 @@ let
       '';
     };
     "sandbox:stop" = {
-      description = "Stop an instance: sandbox:stop [--remove] <instance>";
+      description = "Suspend or remove an instance";
       command = ''
         remove="no"
         if [ "''${1:-}" = "--remove" ]; then remove="yes"; shift; fi
