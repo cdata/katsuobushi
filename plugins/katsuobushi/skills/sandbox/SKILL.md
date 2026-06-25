@@ -205,14 +205,19 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
 2. **Snapshot the host first.** If the working copy is dirty, capture it as a
    `wip: …` commit (jj: the working copy already _is_ a commit; git: commit the
    dirty tree) — never a stash. Concurrent host edits must survive the landing.
-3. **Rebase** the sandbox commits onto the current HEAD (`jj rebase` /
-   `git rebase`).
-4. **Clean →** advance the branch, then **remove the sandbox** — its unit of
-   work is complete and accepted, so it's spent: `sandbox:stop --remove <name>`
-   (an ephemeral instance is removed by a plain `sandbox:stop`; `--remove` is
-   what also tears down a named one). Keep the `sandbox/<name>` ref as the
-   revert artifact, and surface the agent's `done` summary plus a diffstat of
-   what landed — that digest is the orchestrator's "return value".
+3. **Rebase** the sandbox commits onto the current tip of your work (`jj rebase`
+   / `git rebase`).
+4. **Clean → land it, then remove the sandbox.** In `jj`, advance the
+   working-copy pointer `@` onto the rebased commits (`jj new <tip>`) and leave
+   bookmark placement to the user — anchoring accepted work on `@` keeps it
+   durable across the git imports the sandbox commands trigger. In `git`,
+   fast-forward your branch onto the landed commits. Either way, confirm the
+   files materialize in the working copy, then run
+   `sandbox:stop --remove <name>` — the instance's unit of work is accepted, so
+   it's spent (a plain `sandbox:stop` removes an ephemeral instance; `--remove`
+   also tears down a named one). Keep the `sandbox/<name>` ref as the revert
+   artifact, and surface the agent's `done` summary plus a diffstat of what
+   landed — that digest is the orchestrator's "return value".
 5. **Doesn't land cleanly →** treat the reconciliation as ordinary delegated
    work, not a special case (below).
 
@@ -238,12 +243,21 @@ mirror frozen at _its_ launch and can't see a newer HEAD.
 
 ### Parallel fan-out
 
-Launch several `--name`d agents at once; each is an independent VM with its own
-branch. **Integrate serially:** land one finished branch at a time; HEAD
-advances and the next rebases onto it (later branches may conflict against the
-accumulated work and need a follow-up sandbox, exactly as above). To keep most
-landings fast-forwards, scope each fanned-out task to disjoint files when you
-write the directives.
+Fan several tasks out by giving each its own sub-agent: in a single batch, spawn
+one sub-agent per task and have each launch its `--name`d VM, drive it to
+`done`, and return its branch name plus the agent's `done` summary. The launches
+then run concurrently through the same parallel-sub-agent loop you already use
+for non-sandboxed work, and each VM's drive loop stays in its own context. Each
+sandbox is an independent VM with its own branch. Drive a lone sandbox directly
+— the extra sub-agent layer earns its keep once you fan out.
+
+Keep integration in the orchestrator and run it serially: as each sub-agent
+returns, land that one branch so the working tip advances and the next rebases
+onto it. Single-threading the one shared working copy this way keeps the
+landings clean, and a sub-agent that hits a `blocked` relays it back so you can
+surface it to the user. Scope each fanned-out task to disjoint files when you
+write the directives and most landings stay fast-forwards. (A later branch may
+still land on accumulated work and need a follow-up sandbox, exactly as above.)
 
 ## Observing & lifecycle
 

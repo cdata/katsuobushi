@@ -290,7 +290,7 @@ instance **persistent** — it keeps its branch. To keep names collision-free, a
 provided `--name foo` is suffixed with random entropy at launch (e.g.
 `foo-a3f9c2d1`), so every launch is a fresh instance rather than a silent resume
 of an older same-named branch. The full suffixed name is printed at launch (and
-by `sandbox:stop`); pass *that* full name to restart and resume the agent's
+by `sandbox:stop`); pass _that_ full name to restart and resume the agent's
 accumulated work.
 
 ## What the boundary enforces
