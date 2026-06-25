@@ -5,6 +5,46 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.1.5] — 2026-06-24
+
+A docs-only release; nothing to migrate (see [`MIGRATING.md`](MIGRATING.md#015)).
+
+### Changed
+
+- **`sandbox` skill: remove an instance once its work is accepted.** The skill
+  now directs tearing the sandbox down with `sandbox:stop --remove <name>` as
+  soon as its unit of work is complete and accepted — both in the branch-landing
+  workflow and in the lifecycle section — since the `sandbox/<name>` ref is the
+  durable artifact, not the VM. No library change.
+
+## [0.1.4] — 2026-06-24
+
+### Changed
+
+- **`lib.sandbox`: a provided `--name` is suffixed with random entropy.** At
+  launch, `--name foo` now mints an instance named `foo-<8 hex>` (e.g.
+  `foo-a3f9c2d1`), so every launch is a fresh, collision-free instance instead
+  of a silent resume of an older same-named branch. The full suffixed name is
+  printed at launch and by `sandbox:stop`; drive (`prompt`/`status`/`fetch`/
+  `stop`) and resume with that full name. A name that already carries the 8-hex
+  suffix is left as-is, so passing the printed name back is safe. See
+  [`MIGRATING.md`](MIGRATING.md#014).
+
+## [0.1.3] — 2026-06-24
+
+A docs-and-internals release; nothing to migrate (see
+[`MIGRATING.md`](MIGRATING.md#013)).
+
+### Changed
+
+- **`sandbox` skill docs substantially revised** — added the branch-landing /
+  integration workflow, conflict-reconciliation-as-delegation guidance, and
+  parallel fan-out notes.
+- **`lib.sandbox`: `sandbox:status` preflight internals refactored.** The
+  preflight now builds its report in a subshell and carries the problem count
+  out via the subshell's exit status (the `|| errs=$?` is load-bearing under
+  `inherit_errexit`). Observable behavior is unchanged from 0.1.1.
+
 ## [0.1.2] — 2026-06-24
 
 A docs-only release; nothing to migrate (see [`MIGRATING.md`](MIGRATING.md#012)).

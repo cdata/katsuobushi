@@ -1,7 +1,5 @@
 # Migrating Katsuobushi
 
-Breaking and behavioral changes to the Katsuobushi libraries, **newest first**.
-
 Katsuobushi is versioned with Git tags (SemVer); pin a release as
 `github:cdata/katsuobushi/v0.1.0`. While in `0.x`, any release may break.
 
@@ -9,6 +7,33 @@ Each version heading below covers the changes **from the version immediately
 beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
+
+## 0.1.5
+
+No action required.
+
+## 0.1.4
+
+### `lib.sandbox`: named instances are suffixed with random entropy — action only if you script instance names
+
+A provided `--name foo` now boots an instance named `foo-<8 hex>` (e.g.
+`foo-a3f9c2d1`) rather than `foo`. This makes every launch a fresh,
+collision-free instance instead of a silent resume of an older same-named branch
+— an easy footgun before. Two consequences:
+
+- **Drive and resume by the full suffixed name.** Every other command
+  (`sandbox:prompt` / `status` / `fetch` / `stop`) and a later resume key off
+  the full name, not the bare `--name`. The full name is printed at launch and
+  by `sandbox:stop`. If you have a script that assumes the instance name equals
+  the `--name` you passed, capture and reuse the printed name instead.
+- **Re-passing the bare `--name foo` mints a NEW instance**, it no longer
+  resumes the old branch. To resume, relaunch with the full suffixed name. A
+  name that already carries the 8-hex suffix is not re-suffixed, so passing a
+  printed name back is safe and idempotent.
+
+## 0.1.3
+
+No action required.
 
 ## 0.1.2
 

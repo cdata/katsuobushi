@@ -183,32 +183,34 @@ sandbox:fetch <name>            # git fetch <mirror> sandbox/<name>:sandbox/<nam
 ```
 
 `sandbox:fetch` brings the branch into your repo but **never merges**.
-Integration is yours to drive, and the goal is to land the work as
-automatically as a built-in sub-agent would — pausing only on a genuine
-dead-end. A sandbox is meant to be a *more secure* substitute for sub-agent
-spawning, so the back-half should feel just as hands-off.
+Integration is yours to drive, and the goal is to land the work as automatically
+as a built-in sub-agent would — pausing only on a genuine dead-end. A sandbox is
+meant to be a _more secure_ substitute for sub-agent spawning, so the back-half
+should feel just as hands-off.
 
 ### Change integration
 
 When an agent reports `done`, integrate **without asking**. The sandbox already
-bounded the *execution*; the safety net for the *diff* is that everything you
-land stays revertable — the `sandbox/<name>` ref is preserved — not a
-pre-merge prompt.
+bounded the _execution_; the safety net for the _diff_ is that everything you
+land stays revertable — the `sandbox/<name>` ref is preserved — not a pre-merge
+prompt.
 
-Speak the user's VCS tool: `.jj/` present → use `jj`; else `.git`
-→ `git`; if neither or it's ambiguous, ask. The sync layer is always git (the
-mirror + `sandbox:fetch`), but the host-side landing is done in their tool.
+Speak the user's VCS tool: `.jj/` present → use `jj`; else `.git` → `git`; if
+neither or it's ambiguous, ask. The sync layer is always git (the mirror +
+`sandbox:fetch`), but the host-side landing is done in their tool.
 
 **Land a single branch via rebase workflow:**
 
 1. `sandbox:fetch <name>`.
 2. **Snapshot the host first.** If the working copy is dirty, capture it as a
-   `wip: …` commit (jj: the working copy already *is* a commit; git: commit the
+   `wip: …` commit (jj: the working copy already _is_ a commit; git: commit the
    dirty tree) — never a stash. Concurrent host edits must survive the landing.
 3. **Rebase** the sandbox commits onto the current HEAD (`jj rebase` /
    `git rebase`).
-4. **Clean →** advance the branch, then: `sandbox:stop <name>` (ephemeral is
-   removed, named is kept/restartable), keep the `sandbox/<name>` ref as the
+4. **Clean →** advance the branch, then **remove the sandbox** — its unit of
+   work is complete and accepted, so it's spent: `sandbox:stop --remove <name>`
+   (an ephemeral instance is removed by a plain `sandbox:stop`; `--remove` is
+   what also tears down a named one). Keep the `sandbox/<name>` ref as the
    revert artifact, and surface the agent's `done` summary plus a diffstat of
    what landed — that digest is the orchestrator's "return value".
 5. **Doesn't land cleanly →** treat the reconciliation as ordinary delegated
@@ -230,17 +232,18 @@ when the agent truly can't proceed. There is no conflict-specific role, ceiling,
 or path.
 
 One general gotcha — true of any delegated follow-up, not just conflicts: spawn
-a **fresh** instance so its mirror clones the repo *as it is now*; it then sees
+a **fresh** instance so its mirror clones the repo _as it is now_; it then sees
 both the current HEAD and the fetched branch. A resumed named instance keeps its
-mirror frozen at *its* launch and can't see a newer HEAD.
+mirror frozen at _its_ launch and can't see a newer HEAD.
 
 ### Parallel fan-out
 
 Launch several `--name`d agents at once; each is an independent VM with its own
 branch. **Integrate serially:** land one finished branch at a time; HEAD
 advances and the next rebases onto it (later branches may conflict against the
-accumulated work and need a follow-up sandbox, exactly as above). To keep most landings fast-forwards, scope each
-fanned-out task to disjoint files when you write the directives.
+accumulated work and need a follow-up sandbox, exactly as above). To keep most
+landings fast-forwards, scope each fanned-out task to disjoint files when you
+write the directives.
 
 ## Observing & lifecycle
 
@@ -262,6 +265,12 @@ fresh, collision-free instance — never a silent resume of an older same-named
 branch. Drive the instance (prompt/status/fetch/stop) by the full suffixed name
 that launch prints; relaunch with that full name to resume the agent's
 accumulated work.
+
+A persistent instance is kept only while its work is still in flight. Once that
+unit of work is **complete and accepted** — its branch landed, or otherwise
+signed off — the instance is spent: remove it with
+`sandbox:stop --remove <name>`. Don't leave accepted sandboxes lingering; the
+`sandbox/<name>` ref is the durable artifact, not the VM.
 
 ## Notes
 
