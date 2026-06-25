@@ -5,6 +5,57 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.1.7] — 2026-06-25
+
+A docs-and-features release; nothing to migrate (see
+[`MIGRATING.md`](MIGRATING.md#017)).
+
+### Added
+
+- **`lib.menu.makeMenu`: `colorizeGraphic` option.** A new optional argument
+  (default `true`, preserving current behavior) controls whether the ASCII art
+  banner is run through the colorizer. Set `colorizeGraphic = false` to print
+  the banner raw while still colorizing the title and command table. Has no
+  effect when no banner is set.
+- **`lib.menu.makeMenu`: `graphicFile` option.** A new optional argument
+  (default `null`) supplies the banner from a file path that is `cat`ed at
+  runtime rather than inlined as a string. This keeps raw bytes — notably ANSI
+  escape (`U+001B`) sequences in pre-colorized terminal art — out of the
+  `shellHook`, which `nix develop` would otherwise reject when serializing the
+  shell environment to JSON. Takes precedence over `graphic`; pair with
+  `colorizeGraphic = false` to preserve the art's embedded colors. Katsuobushi's
+  own banner now ships as pre-colorized pixel art (`hero.ansi`) through this
+  path.
+
+### Changed
+
+- **`lib.sandbox`: `sandbox:*` menu descriptions trimmed to short summaries.**
+  The dev-shell menu entries for `sandbox:start` / `prompt` / `status` /
+  `fetch` / `stop` dropped their inline usage hints (e.g. `sandbox:fetch
+  <instance>`), leaving a one-line summary; full usage lives in the `sandbox`
+  skill. Command names and behavior are unchanged.
+- **`lib.sandbox`: `sandbox:status` preflight names the OAuth token fix.** When
+  `CLAUDE_CODE_OAUTH_TOKEN`'s host source is missing, the `environment:` report
+  now appends a `run 'claude setup-token'` hint alongside the variable to
+  export.
+
+## [0.1.6] — 2026-06-25
+
+A skill-and-docs release; nothing to migrate (see
+[`MIGRATING.md`](MIGRATING.md#016)).
+
+### Changed
+
+- **`sandbox` skill: fan out via sub-agents; refined jj landing guidance.** The
+  skill now drives parallel fan-out by giving each task its own sub-agent —
+  each launches and drives its own `--name`d VM to `done` and returns its
+  branch plus the agent's `done` summary — while integration stays serial in
+  the orchestrator. The jj landing step now anchors accepted work on the
+  working-copy commit `@` (`jj new <tip>`) and leaves bookmark placement to the
+  user, keeping landed work durable across the git imports the sandbox commands
+  trigger. Touches `plugins/katsuobushi/skills/sandbox/SKILL.md` and
+  `lib/sandbox/README.md`; no library change.
+
 ## [0.1.5] — 2026-06-24
 
 A docs-only release; nothing to migrate (see [`MIGRATING.md`](MIGRATING.md#015)).
