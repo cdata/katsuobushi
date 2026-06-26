@@ -119,7 +119,11 @@ sandbox = katsuobushi.lib.sandbox {
   # Resources
   vcpu = 4;
   mem = 8192;                          # MiB — avoid exactly 2048 (QEMU hangs)
-  storeOverlaySize = "8G";             # tmpfs writable /nix/store overlay
+  # Disk-backed writable scratch (sparse raw images, MiB). Named instances keep
+  # these across stop/restart, so warm build caches survive a pause.
+  storeVolumeSize = 16384;             # writable /nix/store overlay
+  scratchVolumeSize = 32768;           # workspace clone + cargo/rustup/XDG caches
+  dbVolumeSize = 4096;                 # guest Nix database
 
   # Escape hatch: extra NixOS modules merged into the guest
   guestModules = [ ./guest-extra.nix ];

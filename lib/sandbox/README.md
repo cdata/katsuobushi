@@ -58,16 +58,17 @@ project id; see
 [`templates/sandbox/flake.nix`](../../templates/sandbox/flake.nix) for the
 fully-commented reference. The most important arguments:
 
-| Argument                                        | Purpose                                                                                                               |
-| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `workspaceRoot`                                 | Your project root (e.g. `./.`). Used to build the per-instance mirror at launch; not baked into the image.            |
-| `projectId`                                     | Owner-qualified id (e.g. `"my-org/my-project"`). Names the in-guest path and per-instance host state dirs.            |
-| `allowedOrigins`                                | Extra reachable hostnames, appended to the lean Anthropic+Nix baseline (`baseAllowedOrigins`). No implicit wildcards. |
-| `packages`                                      | Goes on the guest `PATH` — **this is where your agent harness goes** (e.g. `claude-code`).                            |
-| `secrets`                                       | `NAME -> { fromEnv \| fromFile }`. Read from the host at launch, injected via `fw_cfg`; never in the store.           |
-| `extraRepos` / `workspaceContext` / `homeFiles` | Pin reference repos, carry untracked project context, and map files into the agent's home.                            |
-| `importHostStoreDb`                             | Default `true`. Reuse everything the host has already built (e.g. `nix develop` toolchains) offline; see below.       |
-| `vcpu` / `mem` / `storeOverlaySize`             | Resources (avoid `mem = 2048` exactly — QEMU hangs).                                                                  |
+| Argument                                                 | Purpose                                                                                                               |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `workspaceRoot`                                          | Your project root (e.g. `./.`). Used to build the per-instance mirror at launch; not baked into the image.            |
+| `projectId`                                              | Owner-qualified id (e.g. `"my-org/my-project"`). Names the in-guest path and per-instance host state dirs.            |
+| `allowedOrigins`                                         | Extra reachable hostnames, appended to the lean Anthropic+Nix baseline (`baseAllowedOrigins`). No implicit wildcards. |
+| `packages`                                               | Goes on the guest `PATH` — **this is where your agent harness goes** (e.g. `claude-code`).                            |
+| `secrets`                                                | `NAME -> { fromEnv \| fromFile }`. Read from the host at launch, injected via `fw_cfg`; never in the store.           |
+| `extraRepos` / `workspaceContext` / `homeFiles`          | Pin reference repos, carry untracked project context, and map files into the agent's home.                            |
+| `importHostStoreDb`                                      | Default `true`. Reuse everything the host has already built (e.g. `nix develop` toolchains) offline; see below.       |
+| `vcpu` / `mem`                                           | CPU + RAM (avoid `mem = 2048` exactly — QEMU hangs).                                                                  |
+| `storeVolumeSize` / `scratchVolumeSize` / `dbVolumeSize` | Disk-backed scratch image sizes in MiB (sparse). Default 16384 / 32768 / 4096. See "Reusing the host's Nix store".    |
 
 ### A comprehensive example
 
@@ -153,7 +154,9 @@ sandbox = katsuobushi.lib.sandbox {
   # Resources
   vcpu = 4;
   mem = 8192;                          # MiB — avoid exactly 2048 (QEMU hangs)
-  storeOverlaySize = "8G";             # tmpfs writable /nix/store overlay; raise for heavy builds
+  storeVolumeSize = 16384;             # writable /nix/store overlay (MiB, sparse)
+  scratchVolumeSize = 32768;           # workspace clone + cargo/rustup/XDG caches
+  dbVolumeSize = 4096;                 # guest Nix database
 
   # Escape hatch: extra NixOS modules merged into the guest
   #
@@ -330,6 +333,26 @@ accumulated work.
   own session — only the host can. vsock bypasses the IP stack entirely, so it
   is invisible to the egress firewall and cannot be used for exfiltration.
 
+## Disk-backed writable scratch
+
+Everything the guest writes — the workspace clone with its build artifacts, the
+relocated `cargo`/`rustup`/XDG caches, the writable `/nix/store` overlay, and
+the guest Nix database — lives on **sparse disk images**, not RAM. (The guest
+root `/` stays a tmpfs; only the scratch surfaces are disk-backed.) microvm's
+default is a tmpfs for all of it, which caps writable space at a fraction of
+`mem` and makes a single Rust `target/` able to OOM the VM. Three per-instance
+raw images (`storeVolumeSize` / `scratchVolumeSize` / `dbVolumeSize`, all MiB)
+move that spill to host disk instead: capacity scales with disk, not RAM, and
+peak guest RAM tracks the working set rather than the total bytes ever written.
+The images are sparse and mounted with `discard`, so host usage follows real
+content, not the (generous) nominal sizes.
+
+The images are created (and `mkfs`'d) on the host at launch and reused if they
+already exist. For a **named** instance they live in the kept state dir, so a
+stop/restart resumes with **warm caches** — an incremental `cargo build` after a
+pause is a no-op, and host-built store paths stay registered. An **ephemeral**
+instance gets fresh images each launch, cleaned up with the rest of its state.
+
 ## Reusing the host's Nix store
 
 The guest mounts the host `/nix/store` read-only, but a Nix store is files
@@ -340,21 +363,28 @@ on the mount yet treated as missing, and re-downloaded.
 
 `importHostStoreDb` (default `true`) closes that gap. At launch the runner takes
 a consistent SQLite snapshot of the host's `db.sqlite` (~0.5s) into the
-per-instance share; a guest boot service then transplants it over the
-system-only DB, _after_ microvm's own closure registration. Because the guest
-system was itself built on the host, the host DB is a strict superset — the swap
-keeps the VM bootable while marking every host-built path valid, served straight
-from the shared store with **no network and no copying**. Dropping into
-`nix develop` inside the VM is then offline for anything the host already has;
-only genuinely-new paths hit the network (and only if their origin is on the
-allowlist — keep e.g. `static.rust-lang.org` there to pick up a freshly-bumped
-Rust toolchain).
+per-instance share; a guest boot service then seeds it over the system-only DB,
+_after_ microvm's own closure registration. Because the guest system was itself
+built on the host, the host DB is a strict superset — the seed keeps the VM
+bootable while marking every host-built path valid, served straight from the
+shared store with **no network**. Dropping into `nix develop` inside the VM is
+then offline for anything the host already has; only genuinely-new paths hit the
+network (and only if their origin is on the allowlist — keep e.g.
+`static.rust-lang.org` there to pick up a freshly-bumped Rust toolchain).
 
-It's best-effort: a missing snapshot or a host/guest Nix schema mismatch rolls
-the guest back to its system-only DB, so a sandbox always boots. There is no new
-read exposure — the whole host store is already readable over the mount; this
-only changes what Nix _trusts_. Set `importHostStoreDb = false` to opt out (the
-guest then substitutes everything from the allowlisted caches).
+The guest DB is on its own persistent volume, so the seed runs **once** per
+named instance (gated on a marker) and then accumulates whatever the agent
+builds in-VM — keeping it consistent with the persistent store overlay across a
+restart. The trade is that a resumed instance does not pick up host paths built
+_after_ its first launch; discard it with `--remove` to re-seed from a fresh
+snapshot. An ephemeral instance, with a fresh DB volume each launch, seeds every
+boot as before.
+
+It's best-effort: a missing snapshot or a host/guest Nix schema mismatch falls
+back to a freshly re-registered system-only DB, so a sandbox always boots. There
+is no new read exposure — the whole host store is already readable over the
+mount; this only changes what Nix _trusts_. Set `importHostStoreDb = false` to
+opt out (the guest then substitutes everything from the allowlisted caches).
 
 ## Caveats
 

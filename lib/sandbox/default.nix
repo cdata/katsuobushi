@@ -92,7 +92,15 @@ defaults:
   # Resources
   vcpu ? 4,
   mem ? 8192, # MiB. NB: qemu hangs at exactly 2048 (microvm.nix#171).
-  storeOverlaySize ? "8G", # tmpfs writable /nix/store overlay; heavy builds need more.
+
+  # Writable scratch is disk-backed, not RAM-backed. Three sparse raw images
+  # (created lazily, sized in MiB) replace the old tmpfs overlays so heavy
+  # builds — Rust `target/` dirs especially — spill to host disk instead of
+  # competing for the guest's RAM. Provision generously: the images are sparse
+  # and trimmed (discard), so host usage tracks real content, not these caps.
+  storeVolumeSize ? 16384, # writable /nix/store overlay (in-guest `nix build`)
+  scratchVolumeSize ? 32768, # workspace clone + cargo/rustup/XDG caches
+  dbVolumeSize ? 4096, # guest Nix database (importHostStoreDb)
 
   # Packages to put on the guest's PATH. This is where the agent harness goes —
   # it is just another package, not a built-in concept, so the consumer supplies
@@ -152,8 +160,22 @@ let
   # In-guest constants.
   agentUser = "agent";
   agentHome = "/home/${agentUser}";
-  workspaceParent = "/workspace";
+  # Writable scratch lives on a disk-backed volume mounted here, not on the RAM
+  # root tmpfs: the workspace clone (with its build artifacts) and the agent's
+  # build caches go on disk so a Rust `target/` can't exhaust guest RAM.
+  scratchMount = "/scratch";
+  workspaceParent = "${scratchMount}/workspace";
   workspacePath = "${workspaceParent}/${projectName}";
+  # Build caches relocated onto the scratch volume via the agent's environment.
+  cargoHome = "${scratchMount}/cargo";
+  rustupHome = "${scratchMount}/rustup";
+  xdgCacheHome = "${scratchMount}/cache";
+  # Volume-backed mount points + their by-label device names.
+  rwStoreMount = "/nix/.rw-store";
+  nixDbMount = "/nix/var/nix/db";
+  rwStoreLabel = "katsu-rwstore";
+  nixDbLabel = "katsu-nixdb";
+  scratchLabel = "katsu-scratch";
   proxyPort = 3128;
   proxyUid = 3128; # fixed so the nftables uid match is deterministic.
   guestMac = "02:00:00:00:00:02";
@@ -600,19 +622,60 @@ let
             proto = "9p";
           }
         ];
-        writableStoreOverlay = "/nix/.rw-store";
+        writableStoreOverlay = rwStoreMount;
+
+        # Disk-backed writable scratch (replaces the old RAM-backed tmpfs
+        # overlays). Three sparse raw images, created+mkfs'd on the host at
+        # launch and mounted by label. The images are symlinked into the
+        # per-instance state dir by the runner (see the launch flow), so a named
+        # instance's build caches survive a stop/restart while ephemeral ones are
+        # cleaned up with the rest of its state.
+        #
+        # microvm forces neededForBoot on whichever volume backs
+        # writableStoreOverlay (it is the /nix/store overlay's upperdir), so the
+        # rw-store image is mounted in the initrd; the other two mount normally
+        # post-switch-root, which is early enough (the nix-db seed and the
+        # workspace clone are both ordered after their mounts).
+        volumes = [
+          {
+            image = "rw-store.img";
+            label = rwStoreLabel;
+            mountPoint = rwStoreMount;
+            size = storeVolumeSize;
+            fsType = "ext4";
+          }
+          {
+            image = "nix-db.img";
+            label = nixDbLabel;
+            mountPoint = nixDbMount;
+            size = dbVolumeSize;
+            fsType = "ext4";
+          }
+          {
+            image = "scratch.img";
+            label = scratchLabel;
+            mountPoint = scratchMount;
+            size = scratchVolumeSize;
+            fsType = "ext4";
+          }
+        ];
       };
 
-      # RAM-backed writable store overlay, bounded by storeOverlaySize. Heavy
-      # in-guest `nix` builds can exhaust it; raise the size if needed.
-      fileSystems."/nix/.rw-store" = {
-        device = "rwstore";
-        fsType = "tmpfs";
-        options = [
-          "size=${storeOverlaySize}"
-          "mode=0755"
-        ];
-        neededForBoot = true;
+      # Online discard on the volumes so freed blocks return to the host and the
+      # sparse images track real content rather than creeping to their nominal
+      # size. microvm already passes `discard=unmap` on the virtio-blk drives;
+      # this is the guest half. (device/fsType/neededForBoot come from microvm's
+      # volume-derived fileSystems entries; we only add mount options here.)
+      fileSystems.${rwStoreMount}.options = [ "discard" ];
+      fileSystems.${nixDbMount}.options = [ "discard" ];
+      fileSystems.${scratchMount}.options = [ "discard" ];
+
+      # Relocate the agent's build caches onto the scratch volume. A login shell
+      # (the agent and ssh sessions both use one) sources these from /etc/profile.
+      environment.sessionVariables = {
+        CARGO_HOME = cargoHome;
+        RUSTUP_HOME = rustupHome;
+        XDG_CACHE_HOME = xdgCacheHome;
       };
 
       # The per-instance 9p share (emitted by extraArgsScript above). nofail so
@@ -870,9 +933,14 @@ let
         });
       '';
 
-      # /workspace owned by the agent.
+      # Agent-owned scratch: the workspace clone and the relocated build caches,
+      # all on the disk-backed scratch volume mounted at ${scratchMount}. The
+      # volume's own root stays root-owned; these subdirs are the agent's.
       systemd.tmpfiles.rules = [
         "d ${workspaceParent} 0755 ${agentUser} users - -"
+        "d ${cargoHome} 0755 ${agentUser} users - -"
+        "d ${rustupHome} 0755 ${agentUser} users - -"
+        "d ${xdgCacheHome} 0755 ${agentUser} users - -"
         "d /run/katsuobushi 0755 root root - -"
         # Agent-owned: the controller server (spawned by claude as the agent) binds the
         # report socket here, and the `report` command connects to it.
@@ -933,21 +1001,37 @@ let
         '';
       };
 
-      # Import the host Nix database (importHostStoreDb)
+      # Seed the guest Nix database from the host (importHostStoreDb)
       #
-      # microvm registers only the guest *system* closure at boot (store-disk.nix,
-      # via boot.postBootCommands — which runs *before* systemd, hence before this
-      # unit). The runner has dropped a consistent snapshot of the *host* DB into
-      # the share; swap it in over the system-only DB so every host-built path the
-      # ro store mount already exposes becomes valid to nix (no copy, no network).
-      # The host DB is a superset of the system closure, so the VM stays bootable.
-      # Best-effort: any failure (missing snapshot, host/guest schema mismatch)
-      # rolls the original DB back, so a sandbox always boots. Ordered before
-      # nix-daemon and the agent so nothing reads the DB mid-swap; the sanity check
-      # runs with NIX_REMOTE unset so it reads the DB directly instead of waking
-      # the (not-yet-started, and we-are-ordered-before-it) daemon.
+      # The guest DB lives on the persistent nix-db volume (mounted at
+      # ${nixDbMount}). microvm registers the guest *system* closure into it at
+      # boot (store-disk.nix's postBootCommands `nix-store --load-db`, additive
+      # and idempotent). The runner has dropped a consistent SQLite `.backup` of
+      # the *host* DB into the share; we seed it over the system-only DB so every
+      # host-built path the ro store mount exposes becomes valid to nix — no
+      # network, just a small file copy. The host DB is a superset of the system
+      # closure, so the VM stays bootable.
+      #
+      # Seed ONCE, gated on a marker on the volume. An ephemeral instance gets a
+      # fresh (empty, unmarked) volume each launch, so it seeds every boot as
+      # before. A named instance keeps its volume across stop/restart: after the
+      # first seed it carries the host superset PLUS whatever the agent built and
+      # registered in-VM, so re-seeding would clobber those guest registrations
+      # and strand the matching paths sitting in the persistent rw-store overlay.
+      # Skipping on the marker keeps the DB consistent with that persistent store
+      # — the point of disk-backing it: warm `nix build` results survive a pause.
+      # (The trade is that a resumed instance does not pick up host paths built
+      # after its first launch; refresh by discarding it with --remove.)
+      #
+      # Best-effort: a missing snapshot or a failed sanity check falls back to a
+      # freshly re-registered system-only DB (from the kernel-cmdline regInfo, the
+      # same source postBootCommands uses), so a sandbox always boots. Ordered
+      # before nix-daemon and the agent so nothing reads the DB mid-seed, and
+      # after the nix-db mount so it operates on the volume, not the shadowed root
+      # tmpfs. The sanity check runs with NIX_REMOTE unset so it reads the DB
+      # directly instead of waking the (not-yet-started) daemon.
       systemd.services.katsuobushi-nixdb = lib.mkIf importHostStoreDb {
-        description = "Import the host Nix database for store sharing";
+        description = "Seed the guest Nix database from the host";
         wantedBy = [ "multi-user.target" ];
         before = [
           "nix-daemon.service"
@@ -956,6 +1040,7 @@ let
         ];
         after = [
           "${lib.replaceStrings [ "/" ] [ "-" ] (lib.removePrefix "/" shareMount)}.mount"
+          "${lib.replaceStrings [ "/" ] [ "-" ] (lib.removePrefix "/" nixDbMount)}.mount"
           "local-fs.target"
         ];
         unitConfig.ConditionPathExists = "${shareMount}/nix-db.sqlite";
@@ -967,24 +1052,43 @@ let
           StandardError = "journal+console";
         };
         script = ''
-          db=/nix/var/nix/db/db.sqlite
+          dbdir=${nixDbMount}
+          db="$dbdir/db.sqlite"
           snap=${shareMount}/nix-db.sqlite
-          # Move the postBoot-seeded DB aside (rename: instant, no extra RAM) so we
-          # can roll back; drop any stale WAL/SHM so the swapped-in file is read clean.
+          marker="$dbdir/.katsu-seeded"
+
+          if [ -e "$marker" ]; then
+            echo "katsuobushi: guest Nix DB already seeded (persistent volume); keeping it."
+            exit 0
+          fi
+
+          # Move the postBoot-registered DB aside (rename: instant) so we can roll
+          # back; drop any stale WAL/SHM so the seeded file is read clean.
           mv -f "$db" "$db.katsu-orig" 2>/dev/null || true
           rm -f "$db-wal" "$db-shm"
-          # Probe with nix's own store path: it is in the guest system closure
-          # (so valid in the transplanted host DB) and obviously present (it is
-          # running), and unlike /run/current-system it needs no activation step
-          # to exist this early. A clean query means the swapped DB reads.
+          # Probe with nix's own store path: it is in the guest system closure (so
+          # valid in the seeded host superset) and obviously present (it is
+          # running), and unlike /run/current-system needs no activation to exist
+          # this early. A clean query means the seeded DB reads.
           if cp -f "$snap" "$db" && chmod 0644 "$db" \
             && NIX_REMOTE= ${config.nix.package}/bin/nix-store -q --deriver ${config.nix.package} >/dev/null 2>&1; then
             rm -f "$db.katsu-orig"
-            echo "katsuobushi: imported host Nix DB; host-built paths are reusable offline."
+            : > "$marker"
+            echo "katsuobushi: seeded guest Nix DB from host; host-built paths are reusable offline."
           else
-            echo "katsuobushi: host Nix DB import failed; falling back to the system-only DB." >&2
-            if [ -e "$db.katsu-orig" ]; then mv -f "$db.katsu-orig" "$db"; fi
-            rm -f "$db-wal" "$db-shm"
+            echo "katsuobushi: host Nix DB seed failed; rebuilding a system-only DB." >&2
+            rm -f "$db" "$db-wal" "$db-shm"
+            # Re-register the system closure from the kernel-cmdline regInfo (the
+            # same registration postBootCommands loads) so the fallback DB is at
+            # least valid for the guest's own paths, even on a fresh empty volume
+            # where there was no prior DB to roll back to.
+            reg="$(sed -n 's/.*regInfo=\([^ ]*\).*/\1/p' /proc/cmdline)"
+            if [ -n "$reg" ] && [ -e "$reg/registration" ]; then
+              NIX_REMOTE= ${config.nix.package}/bin/nix-store --load-db < "$reg/registration" || true
+            elif [ -n "$reg" ] && [ -e "$reg" ]; then
+              NIX_REMOTE= ${config.nix.package}/bin/nix-store --load-db < "$reg" || true
+            fi
+            # Leave the marker unset so a later boot retries the seed.
           fi
         '';
       };
@@ -1392,6 +1496,20 @@ let
       export KATSU_SSH_PORT="$port"
 
       cd "$runtime_root"
+
+      # Back the guest's disk-image volumes from the per-instance STATE dir, not
+      # the runtime dir. microvm's runner creates (and mkfs's) each volume image
+      # relative to the launch CWD on first boot and reuses it if it already
+      # exists; the qemu drive then opens it by that same relative path. By
+      # symlinking each image name here to a file under $state_root, the actual
+      # image lives in state — which is kept for a named instance (so its build
+      # caches and seeded Nix DB survive a stop/restart) and removed with the rest
+      # of an ephemeral instance's state on stop. The runtime dir, wiped on every
+      # stop, would discard them. A pre-existing target (a named restart) makes
+      # the runner's `[ ! -e ]` check skip recreation, so the volume is reused.
+      for _img in rw-store.img nix-db.img scratch.img; do
+        ln -sfn "$state_root/$_img" "$runtime_root/$_img"
+      done
 
       # Tear the VM down on exit — normal exit, Ctrl-C, terminal close, or
       # termination — then discard ephemeral instances so they don't accumulate.

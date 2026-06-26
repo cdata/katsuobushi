@@ -145,7 +145,12 @@
           # Resources
           vcpu = 4;
           mem = 8192; # MiB (avoid exactly 2048 — qemu hangs)
-          storeOverlaySize = "8G"; # tmpfs writable /nix/store overlay
+          # Writable scratch is disk-backed (sparse raw images, MiB). Provision
+          # generously — images are sparse + trimmed, so host usage tracks real
+          # content. A named instance keeps these across stop/restart.
+          storeVolumeSize = 16384; # writable /nix/store overlay (in-guest nix build)
+          scratchVolumeSize = 32768; # workspace clone + cargo/rustup/XDG caches
+          dbVolumeSize = 4096; # guest Nix database
 
           # Escape hatch: extra NixOS modules merged into the guest
           #
