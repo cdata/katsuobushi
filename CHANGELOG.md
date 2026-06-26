@@ -5,6 +5,37 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.1.8] — 2026-06-25
+
+A sandbox release. One default-on behavioral change — the guest now reuses the
+host's Nix store instead of re-downloading what the host already built — that is
+transparent in normal use; see [`MIGRATING.md`](MIGRATING.md#018).
+
+### Added
+
+- **`lib.sandbox`: `importHostStoreDb` option.** A new argument (default `true`)
+  that makes the guest reuse everything the host has already built instead of
+  re-downloading it. The guest already mounts the host `/nix/store` read-only,
+  but microvm registers only the guest's _system_ closure as valid, so other host
+  paths (e.g. a `nix develop` toolchain) were present on the mount yet
+  re-substituted from the network. The runner now snapshots the host's
+  `db.sqlite` at launch (a consistent SQLite `.backup`, ~0.5s) into the share, and
+  a guest boot service transplants it over the system-only DB — after microvm's
+  own closure registration — so every host-built path becomes valid with no
+  network and no copying. The transplant is best-effort: a missing snapshot or a
+  host/guest Nix schema mismatch rolls back to the system-only DB, so a sandbox
+  always boots. No new read exposure — the whole host store was already readable
+  over the mount. Set `importHostStoreDb = false` to opt out.
+
+### Changed
+
+- **`lib.sandbox` (this repo's own config): allowlist `static.rust-lang.org`.**
+  Dropping into `nix develop` inside the sandbox provisions the Rust toolchain via
+  rust-overlay, which fetches from `static.rust-lang.org`; that host was missing
+  from the egress allowlist. With `importHostStoreDb` on, the toolchain is reused
+  from the host offline, so this is only the fallback for picking up a newly
+  bumped `rust-toolchain.toml`.
+
 ## [0.1.7] — 2026-06-25
 
 A docs-and-features release; nothing to migrate (see

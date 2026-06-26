@@ -8,6 +8,26 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.1.8
+
+### `lib.sandbox`: the guest now imports the host Nix DB by default — no action required in normal use
+
+`importHostStoreDb` defaults to `true`, so a launched sandbox now snapshots the
+host's Nix database and the guest reuses every path the host has already built
+(e.g. a `nix develop` toolchain) instead of re-downloading it. This is
+transparent: it only changes what the guest's `nix` treats as valid, adds no
+read exposure (the whole host store was already mounted read-only), and falls
+back to the previous system-only behavior if the snapshot is missing or a
+host/guest Nix schema mismatch is detected — so a sandbox always boots.
+
+Two things worth knowing:
+
+- Each launch writes a ~150 MB `nix-db.sqlite` into the per-instance host state
+  dir and the guest copies it in at boot. For a persistent (`--name`d) instance
+  this lives alongside its other state until teardown.
+- To restore the old behavior (substitute everything from the allowlisted
+  caches), pass `importHostStoreDb = false`.
+
 ## 0.1.7
 
 No action required.
