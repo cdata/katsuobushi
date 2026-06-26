@@ -139,12 +139,19 @@
         };
 
         # The Katsuobushi sandbox, configured for this repo. The lean
-        # Anthropic+Nix baseline already covers everything this pure-Nix flake
-        # needs (github flake inputs + cache.nixos.org), so no extra origins.
+        # Anthropic+Nix baseline covers building the guest image and most flake
+        # inputs (github + cache.nixos.org). The one extra origin is the Rust
+        # toolchain dist server: `nix develop` provisions the toolchain via
+        # rust-overlay, which fetches it from static.rust-lang.org. With
+        # importHostStoreDb on (default) the guest reuses the host's already-built
+        # toolchain offline, so this is only the fallback for picking up a *new*
+        # toolchain the host hasn't built yet (e.g. after bumping
+        # rust-toolchain.toml).
         sandbox = sandboxLib {
           inherit pkgs;
           workspaceRoot = ./.;
           projectId = "cdata/katsuobushi";
+          allowedOrigins = [ "static.rust-lang.org" ];
           # Carry local agent context into the VM (both are gitignored).
           workspaceContext = [
             ".claude"

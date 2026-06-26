@@ -102,6 +102,30 @@ defaults:
   # `guestModules`.
   packages ? [ ],
 
+  # Import the host's Nix database into the guest, so in-guest `nix develop` /
+  # `nix build` reuse everything the host has already built instead of
+  # re-downloading it.
+  #
+  # The host `/nix/store` is already shared into the guest read-only, but
+  # microvm.nix's guest Nix database only knows the VM's *system* closure — every
+  # other host path is present as bytes on the 9p mount yet not registered as
+  # valid, so the guest's `nix` ignores it and re-substitutes from the network.
+  # With this on, the runner snapshots the host's `db.sqlite` at launch (a
+  # consistent SQLite `.backup`, ~0.5s) into the per-instance share, and a guest
+  # boot service transplants it over the system-only DB *after* microvm's own
+  # closure registration. Because the guest system closure was itself built on the
+  # host, the host DB is a strict superset, so the swap keeps the VM bootable
+  # while marking all host paths valid — served straight from the shared store
+  # with zero network and zero copying. Only genuinely host-absent paths then hit
+  # the network, and only if their origin is allowlisted.
+  #
+  # The transplant is best-effort: if the snapshot is missing or the swapped DB
+  # fails a sanity check (e.g. a host/guest Nix schema mismatch), the guest rolls
+  # back to its system-only DB, so a sandbox always boots. No new read exposure:
+  # the whole host store is already readable over the ro mount; this only changes
+  # what `nix` treats as valid.
+  importHostStoreDb ? true,
+
   # Escape hatch: extra NixOS modules merged into the guest.
   guestModules ? [ ],
 
@@ -909,6 +933,62 @@ let
         '';
       };
 
+      # Import the host Nix database (importHostStoreDb)
+      #
+      # microvm registers only the guest *system* closure at boot (store-disk.nix,
+      # via boot.postBootCommands — which runs *before* systemd, hence before this
+      # unit). The runner has dropped a consistent snapshot of the *host* DB into
+      # the share; swap it in over the system-only DB so every host-built path the
+      # ro store mount already exposes becomes valid to nix (no copy, no network).
+      # The host DB is a superset of the system closure, so the VM stays bootable.
+      # Best-effort: any failure (missing snapshot, host/guest schema mismatch)
+      # rolls the original DB back, so a sandbox always boots. Ordered before
+      # nix-daemon and the agent so nothing reads the DB mid-swap; the sanity check
+      # runs with NIX_REMOTE unset so it reads the DB directly instead of waking
+      # the (not-yet-started, and we-are-ordered-before-it) daemon.
+      systemd.services.katsuobushi-nixdb = lib.mkIf importHostStoreDb {
+        description = "Import the host Nix database for store sharing";
+        wantedBy = [ "multi-user.target" ];
+        before = [
+          "nix-daemon.service"
+          "katsuobushi-workspace.service"
+          "katsuobushi-agent.service"
+        ];
+        after = [
+          "${lib.replaceStrings [ "/" ] [ "-" ] (lib.removePrefix "/" shareMount)}.mount"
+          "local-fs.target"
+        ];
+        unitConfig.ConditionPathExists = "${shareMount}/nix-db.sqlite";
+        path = [ pkgs.coreutils ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          StandardOutput = "journal+console";
+          StandardError = "journal+console";
+        };
+        script = ''
+          db=/nix/var/nix/db/db.sqlite
+          snap=${shareMount}/nix-db.sqlite
+          # Move the postBoot-seeded DB aside (rename: instant, no extra RAM) so we
+          # can roll back; drop any stale WAL/SHM so the swapped-in file is read clean.
+          mv -f "$db" "$db.katsu-orig" 2>/dev/null || true
+          rm -f "$db-wal" "$db-shm"
+          # Probe with nix's own store path: it is in the guest system closure
+          # (so valid in the transplanted host DB) and obviously present (it is
+          # running), and unlike /run/current-system it needs no activation step
+          # to exist this early. A clean query means the swapped DB reads.
+          if cp -f "$snap" "$db" && chmod 0644 "$db" \
+            && NIX_REMOTE= ${config.nix.package}/bin/nix-store -q --deriver ${config.nix.package} >/dev/null 2>&1; then
+            rm -f "$db.katsu-orig"
+            echo "katsuobushi: imported host Nix DB; host-built paths are reusable offline."
+          else
+            echo "katsuobushi: host Nix DB import failed; falling back to the system-only DB." >&2
+            if [ -e "$db.katsu-orig" ]; then mv -f "$db.katsu-orig" "$db"; fi
+            rm -f "$db-wal" "$db-shm"
+          fi
+        '';
+      };
+
       # Immutable homeFiles: per-file read-only bind mounts
       #
       # A symlink would be removable by the agent (it owns its home); a per-file
@@ -1089,13 +1169,16 @@ let
   # pushed branch and console.log persist in the host state dir.
   sandboxRunner = pkgs.writeShellApplication {
     name = "sandbox";
-    runtimeInputs = with pkgs; [
-      git
-      openssh
-      coreutils
-      rsync
-      gnused
-    ];
+    runtimeInputs =
+      (with pkgs; [
+        git
+        openssh
+        coreutils
+        rsync
+        gnused
+      ])
+      # `sqlite3` snapshots the host Nix DB at launch (importHostStoreDb).
+      ++ lib.optional importHostStoreDb pkgs.sqlite.bin;
     text = ''
       mode="interactive"
       prompt=""
@@ -1218,6 +1301,30 @@ let
       # Run every launch — idempotent, and it re-opens anything a host-side fetch
       # or a resumed instance may have created with tighter perms.
       chmod -R a+rwX "$state_root/sync.git"
+
+      ${lib.optionalString importHostStoreDb ''
+        # Snapshot the host Nix DB so the guest can reuse every host-built path
+        # without re-downloading it (see importHostStoreDb). A SQLite `.backup`
+        # is a consistent online snapshot (it folds in the WAL) and needs only
+        # read access; `immutable=1` is the fallback if the live DB can't be
+        # opened (it skips any not-yet-checkpointed WAL frames). Refresh every
+        # launch so a resumed instance picks up newly-built host paths. Write to
+        # a temp then rename so the guest never sees a half-written file. Failure
+        # is non-fatal: without the snapshot the guest simply keeps its
+        # system-only DB.
+        hostdb="''${NIX_STATE_DIR:-/nix/var/nix}/db/db.sqlite"
+        if [ -r "$hostdb" ]; then
+          tmpdb="$state_root/.nix-db.sqlite.tmp"
+          rm -f "$tmpdb"
+          if sqlite3 "$hostdb" ".backup '$tmpdb'" 2>/dev/null \
+            || sqlite3 "file:$hostdb?immutable=1" ".backup '$tmpdb'" 2>/dev/null; then
+            mv -f "$tmpdb" "$state_root/nix-db.sqlite"
+          else
+            echo "sandbox: warning: could not snapshot host Nix DB; guest store sharing limited to its system closure." >&2
+            rm -f "$tmpdb" "$state_root/nix-db.sqlite"
+          fi
+        fi
+      ''}
 
       # Stage declared untracked context. rsync --safe-links drops any symlink
       # whose target escapes the project tree, so context can't smuggle in files

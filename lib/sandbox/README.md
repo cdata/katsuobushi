@@ -66,6 +66,7 @@ fully-commented reference. The most important arguments:
 | `packages`                                      | Goes on the guest `PATH` — **this is where your agent harness goes** (e.g. `claude-code`).                            |
 | `secrets`                                       | `NAME -> { fromEnv \| fromFile }`. Read from the host at launch, injected via `fw_cfg`; never in the store.           |
 | `extraRepos` / `workspaceContext` / `homeFiles` | Pin reference repos, carry untracked project context, and map files into the agent's home.                            |
+| `importHostStoreDb`                             | Default `true`. Reuse everything the host has already built (e.g. `nix develop` toolchains) offline; see below.       |
 | `vcpu` / `mem` / `storeOverlaySize`             | Resources (avoid `mem = 2048` exactly — QEMU hangs).                                                                  |
 
 ### A comprehensive example
@@ -309,6 +310,32 @@ accumulated work.
   own session — only the host can. vsock bypasses the IP stack entirely, so it
   is invisible to the egress firewall and cannot be used for exfiltration.
 
+## Reusing the host's Nix store
+
+The guest mounts the host `/nix/store` read-only, but a Nix store is files
+_plus_ a validity database, and microvm only registers the guest's own
+**system** closure in that DB. So by default everything else — your
+`nix develop` toolchain, build deps the host already has — is present as bytes
+on the mount yet treated as missing, and re-downloaded.
+
+`importHostStoreDb` (default `true`) closes that gap. At launch the runner takes
+a consistent SQLite snapshot of the host's `db.sqlite` (~0.5s) into the
+per-instance share; a guest boot service then transplants it over the
+system-only DB, _after_ microvm's own closure registration. Because the guest
+system was itself built on the host, the host DB is a strict superset — the swap
+keeps the VM bootable while marking every host-built path valid, served straight
+from the shared store with **no network and no copying**. Dropping into
+`nix develop` inside the VM is then offline for anything the host already has;
+only genuinely-new paths hit the network (and only if their origin is on the
+allowlist — keep e.g. `static.rust-lang.org` there to pick up a freshly-bumped
+Rust toolchain).
+
+It's best-effort: a missing snapshot or a host/guest Nix schema mismatch rolls
+the guest back to its system-only DB, so a sandbox always boots. There is no new
+read exposure — the whole host store is already readable over the mount; this
+only changes what Nix _trusts_. Set `importHostStoreDb = false` to opt out (the
+guest then substitutes everything from the allowlisted caches).
+
 ## Caveats
 
 - **Channels are a research preview.** Agent mode's inbound prompt injection
@@ -321,5 +348,23 @@ accumulated work.
   subscription billing. Treat the token as a live credential.
 - **Allowlist.** The baseline is intentionally lean (Anthropic inference + auth,
   Nix substituters, GitHub flake hosts). Add only what your project needs.
+
+## Future plans
+
+- **macOS hosts.** The sandbox is Linux-only today (the guest needs `/dev/kvm`).
+  Porting to macOS is wanted, and `importHostStoreDb` is the part to watch: it
+  assumes the host store/DB is the same world as the guest, which holds because
+  the Linux guest is built _on_ the Linux host. An Apple-Silicon host is
+  `aarch64-darwin` while the guest is `aarch64-linux` — different architectures
+  — so the host's Darwin store is useless to the guest and its DB doesn't
+  contain the guest's own closure. The feature stays _safe_ there (the post-swap
+  sanity check fails and the guest rolls back to its system-only DB), but it
+  would be a wasteful no-op. The real fix is store provisioning: on macOS the
+  guest's world is backed by a **Linux builder store** (nix-darwin's
+  `linux-builder` or a remote builder), so the same snapshot/transplant strategy
+  applies unchanged — it just has to read the builder's DB rather than the local
+  host's. The seams a port would touch: gate the runner snapshot on host
+  platform, and let the snapshot source be the builder store instead of the
+  hardcoded local `/nix/var/nix/db`.
 
 [microvm]: https://github.com/microvm-nix/microvm.nix
