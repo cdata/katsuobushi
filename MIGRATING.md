@@ -8,6 +8,13 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.1.9
+
+No action required. Adds `sandbox:attach` and numeric instance references; both
+are additive. One cosmetic change: `sandbox:status`'s instance listing now leads
+with a `#` index column, so any tooling that parses that table by column
+position should account for the extra leading field.
+
 ## 0.1.8
 
 ### `lib.sandbox`: the guest now imports the host Nix DB by default — no action required in normal use

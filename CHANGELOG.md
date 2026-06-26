@@ -5,6 +5,34 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.1.9] — 2026-06-26
+
+A sandbox-ergonomics release: instances are now numbered, and there is a
+one-shot command to attach to a running agent's live session. Purely additive —
+no consumer config changes; see [`MIGRATING.md`](MIGRATING.md#019).
+
+### Added
+
+- **`sandbox:attach <instance|#>`.** A new menu command that SSHes into a
+  running instance, pins `TERM=xterm-256color` in the remote session (so
+  terminals like ghostty don't confuse the guest's `tmux`), and attaches the
+  agent's `katsuobushi` tmux session — collapsing the ssh-then-`tmux attach`
+  dance that `sandbox:status <instance>` used to print by hand.
+- **Numeric instance references.** `sandbox:status` now prints a leading `#`
+  column numbering each instance, and that index is accepted anywhere a name is
+  — `sandbox:prompt`, `sandbox:status`, `sandbox:attach`, `sandbox:fetch`, and
+  `sandbox:stop` all resolve an all-digit argument as a 1-based index into the
+  current listing. The numbering is positional (it can shift as instances come
+  and go); names remain the stable handle. Real instance names always carry a
+  `-` from their timestamp or hex suffix, so a name is never mistaken for an
+  index.
+
+### Changed
+
+- **`sandbox:status` listing gains a `#` column.** The instance table now leads
+  with a 1-based index; anything parsing that table by column position should
+  account for the extra leading field.
+
 ## [0.1.8] — 2026-06-25
 
 A sandbox release. One default-on behavioral change — the guest now reuses the
