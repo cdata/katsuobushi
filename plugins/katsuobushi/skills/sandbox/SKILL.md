@@ -6,9 +6,10 @@ description:
   when the user wants to "use the sandbox to…", delegate a task to a sandbox or
   VM, run risky / long-running / parallel work in isolation, spin up an
   agent-mode sandbox, push prompts to a running sandbox instance, check on or
-  fetch a sandbox's work, or stop one — i.e. anything involving the
-  sandbox:start / sandbox:prompt / sandbox:status / sandbox:fetch / sandbox:stop
-  commands or `nix run .#sandbox`.
+  fetch a sandbox's work, attach to a running sandbox's live session, or stop
+  one — i.e. anything involving the sandbox:start / sandbox:prompt /
+  sandbox:status / sandbox:attach / sandbox:fetch / sandbox:stop commands or
+  `nix run .#sandbox`.
 ---
 
 # Driving a Katsuobushi sandbox
@@ -262,15 +263,24 @@ still land on accumulated work and need a follow-up sandbox, exactly as above.)
 ## Observing & lifecycle
 
 ```sh
-sandbox:status                  # list instances; running/stopped, agent CID, branch
-sandbox:status <name>           # detail, incl. the ssh command to watch live
-sandbox:stop [--remove] <name>  # stop (and remove a named instance with --remove)
+sandbox:status                  # list instances; numbered, running/stopped, agent CID, branch
+sandbox:status <name|#>         # detail, incl. the ssh command to watch live
+sandbox:attach <name|#>         # ssh in + attach the agent's tmux session live
+sandbox:stop [--remove] <name|#> # stop (and remove a named instance with --remove)
 ```
 
-To watch the agent work live, attach to its session over the ssh command that
-`sandbox:status <name>` prints (it runs `tmux attach -t katsuobushi` in the VM).
-The serial console is teed to `console.log` in the instance's state dir — read
-it to diagnose a stuck boot.
+`sandbox:status` numbers every instance in a `#` column. That index is an
+alternative to the full suffixed name for **every** instance-taking command
+(`prompt`, `status`, `attach`, `fetch`, `stop`) — handy interactively, but
+positional, so it can shift as instances appear or disappear; re-check
+`sandbox:status` before trusting a number across a change.
+
+To watch the agent work live, run `sandbox:attach <name|#>` — it SSHes in, pins
+`TERM=xterm-256color` (so terminals like ghostty don't trip up the guest's
+`tmux`), and attaches the running `katsuobushi` tmux session. `sandbox:status
+<name>` still prints the raw ssh command if you need it. The serial console is
+teed to `console.log` in the instance's state dir — read it to diagnose a stuck
+boot.
 
 Unnamed instances are ephemeral (removed on stop). `--name` makes an instance
 persistent: it keeps its branch. A provided `--name` is suffixed with random

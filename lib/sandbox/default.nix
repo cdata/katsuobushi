@@ -1495,6 +1495,48 @@ let
     _sock="${runtimeGlob}/$1/katsuobushi.sock"
     [ -S "$_sock" ] && ${pkgs.socat}/bin/socat -T1 - "UNIX-CONNECT:$_sock" </dev/null >/dev/null 2>&1
   '';
+  # Shared instance-reference helpers, injected at the top of every menu command
+  # that takes an `<instance>` argument. `_list_instances` enumerates the state
+  # dirs in one deterministic order (`LC_ALL=C sort`); `sandbox:status` numbers
+  # its listing in that same order, and `_resolve_instance` maps a 1-based index
+  # back through it — so the number printed by status and the number every other
+  # command accepts always denote the same instance (as long as the set of
+  # instances is unchanged between the two calls). An all-digit argument is
+  # treated as such an index; anything else (every real instance name carries a
+  # `-` from its timestamp or hex suffix, so none is ever all-digits) is a
+  # literal name passed straight through.
+  instanceHelpers = ''
+    _list_instances() {
+      [ -d "${stateGlob}" ] || return 0
+      for _d in "${stateGlob}"/*/; do
+        [ -d "$_d" ] || continue
+        basename "$_d"
+      done | LC_ALL=C sort
+    }
+    _resolve_instance() {
+      case "$1" in
+        "")
+          return 0 ;;
+        *[!0-9]*)
+          printf '%s\n' "$1" ;;
+        *)
+          _i=0
+          _name=""
+          while IFS= read -r _n; do
+            [ -n "$_n" ] || continue
+            _i=$((_i + 1))
+            if [ "$_i" = "$1" ]; then _name="$_n"; break; fi
+          done <<EOF
+$(_list_instances)
+EOF
+          if [ -z "$_name" ]; then
+            echo "no sandbox at index $1 (see sandbox:status)" >&2
+            return 1
+          fi
+          printf '%s\n' "$_name" ;;
+      esac
+    }
+  '';
   # Width of the label column in the `sandbox:status` environment report, sized
   # to the widest of the declared secret names and the static "vhost-vsock" row.
   envLabels = builtins.attrNames secrets ++ [ "vhost-vsock" ];
@@ -1547,13 +1589,15 @@ let
     "sandbox:prompt" = {
       description = "Send a prompt to a running agent instance";
       command = ''
+        ${instanceHelpers}
         inst="''${1:-}"
         shift || true
         text="''${*:-}"
         if [ -z "$inst" ] || [ -z "$text" ]; then
-          echo "usage: sandbox:prompt <instance> \"<text>\"" >&2
+          echo "usage: sandbox:prompt <instance|#> \"<text>\"" >&2
           exit 2
         fi
+        inst="$(_resolve_instance "$inst")" || exit 1
         cidf="${stateGlob}/$inst/vsock-cid"
         if [ ! -r "$cidf" ]; then
           echo "sandbox:prompt: no control channel for '$inst' (is it an --agent instance, and running?)" >&2
@@ -1565,6 +1609,7 @@ let
     "sandbox:status" = {
       description = "List instances, or detail a single instance";
       command = ''
+                ${instanceHelpers}
                 running() {
                   ${isRunning}
                 }
@@ -1606,31 +1651,36 @@ let
                     echo
                   fi
 
-                  rows=""
-                  if [ -d "$root" ]; then
-                    for d in "$root"/*/; do
-                      [ -d "$d" ] || continue
-                      i="$(basename "$d")"
+                  # Enumerate through `_list_instances` so the leading index
+                  # column matches the number `_resolve_instance` (and thus every
+                  # other command) accepts. The counter lives inside the pipeline
+                  # subshell, which is fine — it is only read to print each row.
+                  rows="$(
+                    n=0
+                    _list_instances | while IFS= read -r i; do
+                      [ -n "$i" ] || continue
+                      n=$((n + 1))
                       if running "$i"; then s="running"; else s="stopped"; fi
-                      if [ -e "$d/.named" ]; then p="named"; else p="ephemeral"; fi
-                      rows="$rows$(printf '%s\t%s\t%s\n' "$i" "$s" "$p")
-        "
+                      if [ -e "$root/$i/.named" ]; then p="named"; else p="ephemeral"; fi
+                      printf '%s\t%s\t%s\t%s\n' "$n" "$i" "$s" "$p"
                     done
-                  fi
+                  )"
                   # "No active sandboxes" means the list is empty - nothing to inspect,
                   # restart, or remove. If there are any instances (running, or stopped
                   # leftovers / persistent named ones), list them all instead.
                   if [ -z "$rows" ]; then
                     echo "No active sandboxes"
                   else
-                    { printf 'INSTANCE\tSTATE\tPERSIST\n'; printf '%s' "$rows"; } | column -t
+                    { printf '#\tINSTANCE\tSTATE\tPERSIST\n'; printf '%s\n' "$rows"; } | column -t
                   fi
                   # Non-zero iff the environment preflight found a problem, so the
                   # exit status alone is a usable prerequisite gate.
                   exit "$errs"
                 fi
 
-                # One instance: details, derived live where possible.
+                # One instance: details, derived live where possible. Accept a
+                # name or an index from the listing above.
+                inst="$(_resolve_instance "$inst")" || exit 1
                 d="$root/$inst"
                 [ -d "$d" ] || { echo "no such instance: $inst" >&2; exit 1; }
                 if running "$inst"; then state="running"; else state="stopped"; fi
@@ -1640,6 +1690,7 @@ let
                 echo "persistent: $persist"
                 if [ "$state" = "running" ] && [ -f "$d/ssh-port" ]; then
                   echo "ssh:        ssh -i ${runtimeGlob}/$inst/id -p $(cat "$d/ssh-port") -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${agentUser}@127.0.0.1"
+                  echo "attach:     sandbox:attach $inst (ssh in + attach the agent's tmux session)"
                 fi
                 if git -C "$d/sync.git" rev-parse --verify "refs/heads/sandbox/$inst" >/dev/null 2>&1; then
                   echo "branch:     sandbox/$inst (fetch: sandbox:fetch $inst)"
@@ -1653,8 +1704,10 @@ let
     "sandbox:fetch" = {
       description = "Fetch a sandbox's branch into this repo";
       command = ''
+        ${instanceHelpers}
         inst="''${1:-}"
-        [ -n "$inst" ] || { echo "usage: sandbox:fetch <instance>" >&2; exit 2; }
+        [ -n "$inst" ] || { echo "usage: sandbox:fetch <instance|#>" >&2; exit 2; }
+        inst="$(_resolve_instance "$inst")" || exit 1
         git fetch "${stateGlob}/$inst/sync.git" "sandbox/$inst:sandbox/$inst"
         echo "fetched sandbox/$inst"
       '';
@@ -1662,12 +1715,14 @@ let
     "sandbox:stop" = {
       description = "Suspend or remove an instance";
       command = ''
+        ${instanceHelpers}
         remove="no"
         if [ "''${1:-}" = "--remove" ]; then remove="yes"; shift; fi
         inst="''${1:-}"
         # Guard hard: an empty instance would expand the paths below to the whole
         # project state dir and remove every instance.
-        [ -n "$inst" ] || { echo "usage: sandbox:stop [--remove] <instance>" >&2; exit 2; }
+        [ -n "$inst" ] || { echo "usage: sandbox:stop [--remove] <instance|#>" >&2; exit 2; }
+        inst="$(_resolve_instance "$inst")" || exit 1
         sock="${runtimeGlob}/$inst/katsuobushi.sock"
         if [ -S "$sock" ]; then
           # QMP requires capability negotiation before any command is accepted.
@@ -1684,6 +1739,56 @@ let
         else
           echo "stopped $inst (named; kept — restart: sandbox:start --name $inst, discard: sandbox:stop --remove $inst)"
         fi
+      '';
+    };
+    "sandbox:attach" = {
+      description = "SSH in and attach to a running agent's tmux session";
+      command = ''
+        ${instanceHelpers}
+        running() {
+          ${isRunning}
+        }
+        inst="''${1:-}"
+        [ -n "$inst" ] || { echo "usage: sandbox:attach <instance|#>" >&2; exit 2; }
+        inst="$(_resolve_instance "$inst")" || exit 1
+        d="${stateGlob}/$inst"
+        [ -d "$d" ] || { echo "no such instance: $inst" >&2; exit 1; }
+        if ! running "$inst"; then
+          echo "sandbox:attach: '$inst' is not running" >&2
+          exit 1
+        fi
+        portf="$d/ssh-port"
+        [ -r "$portf" ] || { echo "sandbox:attach: no ssh port recorded for '$inst'" >&2; exit 1; }
+        port="$(cat "$portf")"
+        _ssh() {
+          ssh -i "${runtimeGlob}/$inst/id" -p "$port" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR ${agentUser}@127.0.0.1 "$@"
+        }
+        # Pre-check the agent's tmux session exists before allocating a PTY. A
+        # freshly launched VM needs ~30-60s to arm it, an interactive (non
+        # --agent) VM never has one, and a finished agent's session is gone.
+        # Without this guard we would drop the caller into a bare login shell —
+        # which greets with ~/README.md and then exits — i.e. the confusing
+        # "attached, then kicked out right after the README" symptom. `has-session`
+        # runs with no PTY so it stays silent on success (and skips the greeting,
+        # which is gated on an interactive terminal).
+        if ! _ssh 'tmux has-session -t katsuobushi' 2>/dev/null; then
+          echo "sandbox:attach: no live 'katsuobushi' tmux session in '$inst'." >&2
+          echo "  - if it just launched, give it ~30-60s to arm, then retry" >&2
+          echo "  - only --agent instances run one (check: sandbox:status $inst)" >&2
+          exit 1
+        fi
+        # TERM is set in the *remote* command environment rather than forwarded
+        # with ssh's SetEnv (which needs sshd's AcceptEnv): ghostty's default
+        # $TERM (xterm-ghostty) has no terminfo entry in the guest, so tmux aborts
+        # with "missing or unsuitable terminal" the instant it attaches — pin a
+        # universally-present entry instead. -t forces a PTY for the interactive
+        # client; tmux's alternate screen then hides the login greeting for the
+        # life of the session. Not `exec`'d: `_ssh` is a shell function, and
+        # `exec` only replaces the process with an external program (it would
+        # fail with "_ssh: not found"). The wrapping shell just waits on ssh.
+        _ssh -t 'TERM=xterm-256color tmux attach -t katsuobushi'
       '';
     };
   };

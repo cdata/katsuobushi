@@ -161,8 +161,9 @@
             };
           }
           # Adds `sandbox:start` plus `sandbox:prompt <inst> "…"` /
-          # `sandbox:status [inst]` / `sandbox:fetch <inst>` / `sandbox:stop
-          # <inst>` to the dev shell.
+          # `sandbox:status [inst]` / `sandbox:attach <inst>` / `sandbox:fetch
+          # <inst>` / `sandbox:stop <inst>` to the dev shell. Every `<inst>`
+          # also accepts the index shown in `sandbox:status`.
           // sandbox.menuCommands;
         };
       in

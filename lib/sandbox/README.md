@@ -250,12 +250,17 @@ status lines until it reports `done` or `blocked`:
 
 ### Watching it work
 
-A real human can attach to the live session over ssh:
+A real human can attach to the live agent session with one command:
 
 ```sh
-# `sandbox:status <instance>` prints the exact ssh command for an instance.
-ssh … agent@127.0.0.1 -t 'tmux attach -t katsuobushi'
+sandbox:attach task1         # ssh in and attach the agent's tmux session
+sandbox:attach 2             # …or reference it by its sandbox:status index
 ```
+
+`sandbox:attach` SSHes into the instance, pins `TERM=xterm-256color` for the
+remote session (so terminals like ghostty don't confuse the guest's `tmux`),
+and attaches to the running `katsuobushi` tmux session. `sandbox:status
+<instance>` still prints the raw ssh command if you want to build on it.
 
 The serial console is also teed to `console.log` in the instance's state dir.
 
@@ -281,10 +286,16 @@ is the artifact.
 | Command                                             | Description                                                                                        |
 | --------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `sandbox:start [--agent] [--prompt "…"] [--name N]` | Launch a VM (interactive, or lingering agent mode). Alias: `nix run .#sandbox -- …`.               |
-| `sandbox:prompt <instance> "<text>"`                | Push a prompt to a running agent instance and stream its reports.                                  |
-| `sandbox:status [instance]`                         | List instances (running/stopped, ephemeral/named), or detail one (ssh command, agent CID, branch). |
-| `sandbox:fetch <instance>`                          | Fetch the instance's `sandbox/<instance>` branch into this repo.                                   |
-| `sandbox:stop [--remove] <instance>`                | Stop a VM (and remove a named instance's state with `--remove`).                                   |
+| `sandbox:prompt <instance\|#> "<text>"`             | Push a prompt to a running agent instance and stream its reports.                                  |
+| `sandbox:status [instance\|#]`                       | List instances (numbered, running/stopped, ephemeral/named), or detail one (ssh command, agent CID, branch). |
+| `sandbox:attach <instance\|#>`                      | SSH into a running instance and attach the agent's `tmux` session (`TERM=xterm-256color`).         |
+| `sandbox:fetch <instance\|#>`                       | Fetch the instance's `sandbox/<instance>` branch into this repo.                                   |
+| `sandbox:stop [--remove] <instance\|#>`             | Stop a VM (and remove a named instance's state with `--remove`).                                   |
+
+Every command that takes an `<instance>` also accepts the **index** shown in the
+`#` column of `sandbox:status` — a convenience shorthand for the full suffixed
+name. The numbering is positional over the current instance list, so it can
+shift as instances come and go; re-run `sandbox:status` to see the current map.
 
 Unnamed instances are **ephemeral** (removed on stop); `--name` makes an
 instance **persistent** — it keeps its branch. To keep names collision-free, a
