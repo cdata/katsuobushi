@@ -160,15 +160,26 @@ branch. Run `report done \"<summary>\"` when complete;
 sandbox:prompt <name> "<the next directive>"
 ```
 
-Each prompt is the next turn in the **same** conversation — context is retained
-across pokes. Iterate: "do X" → done → "now Y" → done → "finish up". The command
-streams the agent's status lines and returns when the agent reports a terminal
-status:
+Each prompt to a **running** instance is the next turn in the **same**
+conversation — context is retained across pokes. Iterate: "do X" → done → "now
+Y" → done → "finish up". The command streams the agent's status lines and
+returns when the agent reports a terminal status:
 
 - `working` — progress (optional, non-terminal).
 - `done` — the turn is complete; the work product is the pushed branch.
 - `blocked` — it needs something; address it and send the next prompt.
 - `info` — anything else worth surfacing.
+
+**Prompting a paused instance auto-starts it.** `sandbox:stop <name>` on a named
+instance _pauses_ it: the VM powers off but its state dir (and branch) are kept.
+If you `sandbox:prompt` a paused instance, the command restarts it for you —
+booting and arming the channel (~30–60s) before delivering the turn — rather
+than hanging against the dead VM. The catch: a pause wipes the VM's RAM, so the
+live conversation **does not** survive it; only the committed branch does. The
+resumed agent is a fresh session reading its branch, _not_ a continuation of the
+pre-pause context — so write the prompt to stand on its own (point at the branch
+state, not "as we discussed"). Poking a still-running instance keeps the
+same-conversation behavior above.
 
 When the work is finished, tell the agent it's done — it powers the VM off
 itself — or stop it from the host (below).
@@ -277,10 +288,10 @@ positional, so it can shift as instances appear or disappear; re-check
 
 To watch the agent work live, run `sandbox:attach <name|#>` — it SSHes in, pins
 `TERM=xterm-256color` (so terminals like ghostty don't trip up the guest's
-`tmux`), and attaches the running `katsuobushi` tmux session. `sandbox:status
-<name>` still prints the raw ssh command if you need it. The serial console is
-teed to `console.log` in the instance's state dir — read it to diagnose a stuck
-boot.
+`tmux`), and attaches the running `katsuobushi` tmux session.
+`sandbox:status <name>` still prints the raw ssh command if you need it. The
+serial console is teed to `console.log` in the instance's state dir — read it to
+diagnose a stuck boot.
 
 Unnamed instances are ephemeral (removed on stop). `--name` makes an instance
 persistent: it keeps its branch. A provided `--name` is suffixed with random

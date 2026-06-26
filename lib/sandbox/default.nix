@@ -1587,9 +1587,12 @@ EOF
       command = "${sandboxRunner}/bin/sandbox \"$@\"";
     };
     "sandbox:prompt" = {
-      description = "Send a prompt to a running agent instance";
+      description = "Send a prompt to an agent instance (auto-starting a paused one)";
       command = ''
         ${instanceHelpers}
+        running() {
+          ${isRunning}
+        }
         inst="''${1:-}"
         shift || true
         text="''${*:-}"
@@ -1601,6 +1604,25 @@ EOF
         cidf="${stateGlob}/$inst/vsock-cid"
         if [ ! -r "$cidf" ]; then
           echo "sandbox:prompt: no control channel for '$inst' (is it an --agent instance, and running?)" >&2
+          exit 1
+        fi
+        # A paused instance (stopped but kept — i.e. named) still has its state
+        # dir, and so this CID file, on disk; but the VM behind the channel is
+        # powered off, so a direct prompt would just hang against a dead vsock.
+        # Auto-start it instead: `sandbox:start --name <full> --prompt` resumes
+        # the instance from its branch, waits for the channel to arm, and
+        # delivers this text as the first turn of the fresh session. `exec`
+        # hands our stdout/exit status to the runner so the caller sees the same
+        # streamed reports a running poke would give. NB the live conversation
+        # does NOT survive a pause (the VM's RAM is gone) — only the branch
+        # does — so the resumed agent reads its committed work, not the prior
+        # in-VM context; phrase the prompt so a fresh session can act on it.
+        if ! running "$inst"; then
+          if [ -e "${stateGlob}/$inst/.named" ]; then
+            echo "sandbox:prompt: '$inst' is paused — restarting it to deliver this turn (boot + arm ~30-60s)..." >&2
+            exec ${sandboxRunner}/bin/sandbox --agent --name "$inst" --prompt "$text"
+          fi
+          echo "sandbox:prompt: '$inst' is not running and isn't a kept instance, so it can't be resumed." >&2
           exit 1
         fi
         ${controlHostBin} --cid "$(cat "$cidf")" "$text"
