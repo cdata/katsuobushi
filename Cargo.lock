@@ -388,6 +388,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "katsuctl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "katsuobushi-protocol"
 version = "0.1.0"
 dependencies = [

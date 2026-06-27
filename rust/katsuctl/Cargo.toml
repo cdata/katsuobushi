@@ -1,0 +1,17 @@
+[package]
+name = "katsuctl"
+version.workspace = true
+edition = "2021"
+description = "Host-side Katsuobushi sandbox controller (katsuctl <domain> <command>)."
+
+# Single binary named after the package (`katsuctl`); cargo auto-detects
+# src/main.rs, so no explicit [[bin]] is needed.
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+# Inherited now for the upcoming subcommands (design/katsuctl.md §12): tokio for
+# the async vsock/QMP paths (prompt/status/stop), serde for spec/instance
+# (de)serialization. The dispatch stubs in this scaffold do not use them yet.
+tokio.workspace = true
+serde.workspace = true
