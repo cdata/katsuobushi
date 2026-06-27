@@ -487,14 +487,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "katsuctl"
+name = "katsuobushi-controller"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "comfy-table",
  "insta",
- "katsuobushi-protocol",
+ "katsuobushi-sandbox-protocol",
  "owo-colors",
  "serde",
  "serde_json",
@@ -503,24 +503,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "katsuobushi-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "katsuobushi-sandbox-control"
+name = "katsuobushi-sandbox-guest"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "katsuobushi-protocol",
+ "katsuobushi-sandbox-protocol",
  "rmcp",
  "serde",
  "serde_json",
  "tokio",
  "tokio-vsock",
+]
+
+[[package]]
+name = "katsuobushi-sandbox-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

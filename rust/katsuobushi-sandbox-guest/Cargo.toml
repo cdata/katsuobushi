@@ -1,23 +1,23 @@
 [package]
-name = "katsuobushi-sandbox-control"
+name = "katsuobushi-sandbox-guest"
 version.workspace = true
 edition = "2021"
 description = "Guest-side sandbox controller for Katsuobushi agent mode: the rmcp/channel server."
 
-# Shared wire types live in the standalone `katsuobushi-protocol` crate, so the
+# Shared wire types live in the standalone `katsuobushi-sandbox-protocol` crate, so the
 # host (`katsuctl`) and guest sides cannot drift.
 [lib]
-name = "katsuobushi_sandbox_control"
+name = "katsuobushi_sandbox_guest"
 path = "src/lib.rs"
 
 # Guest: the rmcp/channel controller server claude spawns over stdio. The host
 # client was retired into `katsuctl sandbox prompt`.
 [[bin]]
-name = "katsuobushi-sandbox-control"
+name = "katsuobushi-sandbox-guest"
 path = "src/bin/server.rs"
 
 [dependencies]
-katsuobushi-protocol = { path = "../katsuobushi-protocol" }
+katsuobushi-sandbox-protocol = { path = "../katsuobushi-sandbox-protocol" }
 rmcp.workspace = true
 tokio-vsock.workspace = true
 tokio.workspace = true

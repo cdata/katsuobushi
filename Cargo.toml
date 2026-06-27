@@ -5,7 +5,7 @@
 # the `cargoChecks.sharedWorkspaceDeps` hygiene check passes.
 [workspace]
 resolver = "2"
-members = ["rust/katsuobushi-protocol", "rust/katsuobushi-sandbox-control", "rust/katsuctl"]
+members = ["rust/katsuobushi-sandbox-protocol", "rust/katsuobushi-sandbox-guest", "rust/katsuobushi-controller"]
 
 # Shared package metadata. Members inherit `version` via `version.workspace =
 # true`; also lets crane read a version for the virtual manifest without warning.

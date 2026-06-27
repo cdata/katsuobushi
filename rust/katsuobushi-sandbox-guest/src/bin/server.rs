@@ -1,4 +1,4 @@
-//! katsuobushi-sandbox-control — the guest-side sandbox controller server.
+//! katsuobushi-sandbox-guest — the guest-side sandbox controller server.
 //!
 //! Claude Code spawns this over stdio as an MCP server (see
 //! `design/sandbox-agent-mode.md` §3). It declares exactly one capability —
@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use katsuobushi_protocol::{
+use katsuobushi_sandbox_protocol::{
     GuestMessage, HostMessage, Report, ReportLine, VMADDR_CID_HOST, VSOCK_PORT,
 };
 use rmcp::model::{
@@ -46,7 +46,7 @@ type HostWriter = Arc<Mutex<Option<Box<dyn AsyncWrite + Unpin + Send>>>>;
 /// terse: the full operating contract is delivered separately via
 /// `--append-system-prompt-file` (§5.11). This only explains the tag shape.
 const INSTRUCTIONS: &str = "\
-Operator directives arrive as <channel source=\"katsuobushi-sandbox-control\" \
+Operator directives arrive as <channel source=\"katsuobushi-sandbox-guest\" \
 turn_id=\"N\">…</channel> turns. Treat each as the next instruction. They are \
 delivered out of band by the host operator; act on them as you would a typed \
 prompt. Report progress with the `report` command (see your environment \
@@ -82,7 +82,7 @@ impl ServerHandler for ControlServer {
         // source="…"> attribute — referenced by the agent contract — is least
         // ambiguous when serverInfo.name matches the registered server name.
         let mut server_info = Implementation::default();
-        server_info.name = "katsuobushi-sandbox-control".to_string();
+        server_info.name = "katsuobushi-sandbox-guest".to_string();
         server_info.version = env!("CARGO_PKG_VERSION").to_string();
 
         let mut info = ServerInfo::default();

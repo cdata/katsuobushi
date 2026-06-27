@@ -1,4 +1,4 @@
-//! Wire types shared by every binary in `katsuobushi-sandbox-control`.
+//! Wire types shared by every binary in `katsuobushi-sandbox-guest`.
 //!
 //! The contract is the project's stable Layer-1 surface (see
 //! `design/sandbox-agent-mode.md` §4). Keeping it in one lib crate means the

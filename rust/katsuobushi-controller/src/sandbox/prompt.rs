@@ -30,7 +30,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use katsuobushi_protocol::{GuestMessage, HostMessage, Prompt, Report, Status};
+use katsuobushi_sandbox_protocol::{GuestMessage, HostMessage, Prompt, Report, Status};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::runtime::Builder;
 use tokio_vsock::{VsockAddr, VsockStream};

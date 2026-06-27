@@ -1,17 +1,20 @@
 [package]
-name = "katsuctl"
+name = "katsuobushi-controller"
 version.workspace = true
 edition = "2021"
-description = "Host-side Katsuobushi sandbox controller (katsuctl <domain> <command>)."
+description = "Host-side Katsuobushi sandbox controller (the `katsuctl <domain> <command>` binary)."
 
-# Single binary named after the package (`katsuctl`); cargo auto-detects
-# src/main.rs, so no explicit [[bin]] is needed.
+# The package is `katsuobushi-controller` but ships the `katsuctl` CLI binary, so
+# name the bin explicitly (cargo would otherwise derive it from the package name).
+[[bin]]
+name = "katsuctl"
+path = "src/main.rs"
 
 [dependencies]
 # Shared wire types (Prompt/Report/GuestMessage/Status) for the vsock control
 # channel — the `prompt` subcommand streams these, so host and guest cannot
 # drift (design/katsuctl.md §3). Path dep on the in-workspace protocol crate.
-katsuobushi-protocol = { path = "../katsuobushi-protocol" }
+katsuobushi-sandbox-protocol = { path = "../katsuobushi-sandbox-protocol" }
 clap.workspace = true
 anyhow.workspace = true
 # Inherited now for the upcoming subcommands (design/katsuctl.md §12): tokio for

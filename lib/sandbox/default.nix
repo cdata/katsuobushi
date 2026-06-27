@@ -203,8 +203,8 @@ let
   };
   # Guest controller server (the host client was retired into katsuctl).
   controlPkg = controlRust.buildCrate {
-    pname = "katsuobushi-sandbox-control";
-    cargoExtraArgs = "--package katsuobushi-sandbox-control";
+    pname = "katsuobushi-sandbox-guest";
+    cargoExtraArgs = "--package katsuobushi-sandbox-guest";
   };
   # Host-side controller (design/katsuctl.md), built from the same workspace.
   # `nix run .#sandbox` runs outside the devshell, where `katsuctl` is not on
@@ -212,7 +212,7 @@ let
   # so the emitted agent-start tail-call `exec katsuctl … prompt` resolves too).
   katsuctlPkg = controlRust.buildCrate {
     pname = "katsuctl";
-    cargoExtraArgs = "--package katsuctl";
+    cargoExtraArgs = "--package katsuobushi-controller";
   };
 
   # vsock + control-socket constants. The guest server listens on AF_VSOCK; the
@@ -221,7 +221,7 @@ let
   # per-instance discriminator is the CID, emitted at launch).
   controlSocketDir = "/run/katsuobushi/control";
   reportSocket = "${controlSocketDir}/report.sock";
-  controlServerBin = "${controlPkg}/bin/katsuobushi-sandbox-control";
+  controlServerBin = "${controlPkg}/bin/katsuobushi-sandbox-guest";
 
   # The agent's `report` command — a shell app, not a Rust binary. It just
   # writes one JSON line (the ReportLine wire shape) to the server's guest-local
@@ -375,7 +375,7 @@ let
     host operator rather than a human at this terminal.
 
     **Operator directives arrive as channel turns** that look like
-    `<channel source="katsuobushi-sandbox-control" turn_id="N">…</channel>`.
+    `<channel source="katsuobushi-sandbox-guest" turn_id="N">…</channel>`.
     Treat the content of each such turn as your next instruction.
 
     For each directive:
@@ -463,14 +463,14 @@ let
   # `.mcp.json` servers, and that dialog does not relay — a dormant headless
   # agent has nobody to accept it. A user-scoped server is pre-trusted, so the
   # channel registers unattended. `--dangerously-load-development-channels
-  # server:katsuobushi-sandbox-control` (passed only in agent mode) resolves to
+  # server:katsuobushi-sandbox-guest` (passed only in agent mode) resolves to
   # this entry by name.
   claudeConfigSeed = pkgs.writeText "claude.json" (
     builtins.toJSON {
       hasCompletedOnboarding = true;
       theme = "dark";
       mcpServers = {
-        katsuobushi-sandbox-control = {
+        katsuobushi-sandbox-guest = {
           command = controlServerBin;
           args = [ ];
           env.KATSU_REPORT_SOCK = reportSocket;
@@ -1258,7 +1258,7 @@ let
             exit 0
           fi
           runuser -u ${agentUser} -- ${pkgs.tmux}/bin/tmux new-session -d -s katsuobushi -x 220 -y 50 \
-            ${pkgs.bash}/bin/bash -lc 'unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC; cd ${workspacePath} && exec claude --dangerously-skip-permissions --dangerously-load-development-channels server:katsuobushi-sandbox-control --append-system-prompt-file ${agentContract}'
+            ${pkgs.bash}/bin/bash -lc 'unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC; cd ${workspacePath} && exec claude --dangerously-skip-permissions --dangerously-load-development-channels server:katsuobushi-sandbox-guest --append-system-prompt-file ${agentContract}'
           setsid runuser -u ${agentUser} -- ${agentChannelAck} >/dev/null 2>&1 &
           # Future: idle backstop — reap a forgotten/wedged session (design §5.10).
         '';

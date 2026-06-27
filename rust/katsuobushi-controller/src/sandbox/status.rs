@@ -24,7 +24,7 @@ use serde::Serialize;
 
 use crate::sandbox::host::{Host, HostImpl};
 use crate::sandbox::instance::{self, Mode};
-use crate::sandbox::output::{render_table, Renderer};
+use crate::sandbox::output::{render_table, CellStyle, Renderer, TableCell};
 use crate::sandbox::resolve::{list_instances, resolve_instance};
 use crate::sandbox::spec::{
     load_spec, resolve_roots, ResolvedRoots, SecretSource, SecretSpec, Spec,
@@ -201,31 +201,33 @@ fn render_preflight(pf: &Preflight, r: &Renderer) -> String {
 /// (design §13; lib/sandbox/default.nix:1868). Rows are numbered 1..n in the
 /// order given, which is the byte-sorted [`list_instances`] order so the `#`
 /// column matches the index every other command accepts. State is color-coded
-/// (running=green, stopped=dim); the helper paints cells with `r` before handing
-/// them to the borderless table, so gating stays in one place.
+/// (running=green, stopped=dim) via styled cells the borderless table colors
+/// itself, so widths measure the printable text and the columns stay aligned.
 fn render_list(views: &[InstanceView], r: &Renderer) -> String {
-    let headers = ["#", "INSTANCE", "STATE", "MODE", "PERSIST", "SSH", "CID"];
-    let rows: Vec<Vec<String>> = views
+    // Just orientation columns: the ssh port and vsock CID are internal plumbing,
+    // not things you type (you drive an instance by name or `#`), so they stay in
+    // the detail view (with the actual ssh/prompt commands) and in `--json` for
+    // machine consumers — out of the scannable human list.
+    let headers = ["#", "INSTANCE", "STATE", "MODE", "PERSIST"];
+    let rows: Vec<Vec<TableCell>> = views
         .iter()
         .enumerate()
         .map(|(i, v)| {
             let state = if v.running() {
-                r.green("running")
+                TableCell::styled("running", CellStyle::Green)
             } else {
-                r.dim("stopped")
+                TableCell::styled("stopped", CellStyle::Dim)
             };
             vec![
-                (i + 1).to_string(),
-                v.name.clone(),
+                TableCell::plain((i + 1).to_string()),
+                TableCell::plain(v.name.clone()),
                 state,
-                r.dim(v.mode_label()),
-                r.dim(v.persist_label()),
-                v.port.map_or_else(|| "-".to_string(), |p| p.to_string()),
-                v.cid.map_or_else(|| "-".to_string(), |c| c.to_string()),
+                TableCell::styled(v.mode_label(), CellStyle::Dim),
+                TableCell::styled(v.persist_label(), CellStyle::Dim),
             ]
         })
         .collect();
-    render_table(&headers, &rows)
+    render_table(&headers, &rows, r.color())
 }
 
 // ---- the detail view (pure over the derived view + computed strings) ----
@@ -486,10 +488,16 @@ mod tests {
         let table = render_list(&views, &r);
 
         assert!(!has_ansi(&table), "no ANSI when color off: {table:?}");
-        // Header columns are present.
-        for col in ["#", "INSTANCE", "STATE", "MODE", "PERSIST", "SSH", "CID"] {
+        // Orientation columns are present.
+        for col in ["#", "INSTANCE", "STATE", "MODE", "PERSIST"] {
             assert!(table.contains(col), "header {col} present: {table}");
         }
+        // The ssh port / vsock CID are plumbing, not list columns — they live in
+        // the detail view and `--json` only.
+        assert!(
+            !table.contains("SSH") && !table.contains("CID"),
+            "no SSH/CID columns in the list: {table}"
+        );
         // Rows are numbered 1..n in the given order, carrying each name + fields.
         let rows: Vec<&str> = table
             .lines()
@@ -498,7 +506,8 @@ mod tests {
         assert!(rows[0].starts_with("1 ") || rows[0].trim_start().starts_with('1'));
         assert!(rows[0].contains("inst-a") && rows[0].contains("running"));
         assert!(rows[0].contains("agent") && rows[0].contains("named"));
-        assert!(rows[0].contains("2222") && rows[0].contains("4242"));
+        // The ssh port / CID are no longer in the list row.
+        assert!(!rows[0].contains("2222") && !rows[0].contains("4242"));
         assert!(rows[1].contains("inst-b") && rows[1].contains("stopped"));
         assert!(rows[1].contains("interactive") && rows[1].contains("ephemeral"));
     }

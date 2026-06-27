@@ -1,5 +1,5 @@
 [package]
-name = "katsuobushi-protocol"
+name = "katsuobushi-sandbox-protocol"
 version.workspace = true
 edition = "2021"
 description = "Shared serde wire types for Katsuobushi agent mode (host↔guest channel + report socket)."
@@ -7,7 +7,7 @@ description = "Shared serde wire types for Katsuobushi agent mode (host↔guest 
 # A standalone lib crate so the host controller and the guest server can both
 # depend on the wire types without the host linking the guest server's deps.
 [lib]
-name = "katsuobushi_protocol"
+name = "katsuobushi_sandbox_protocol"
 path = "src/lib.rs"
 
 [dependencies]

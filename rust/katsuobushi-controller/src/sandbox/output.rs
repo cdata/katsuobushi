@@ -57,7 +57,7 @@ pub fn color_enabled(when: ColorWhen, json: bool, stdout_is_tty: bool, no_color:
 /// One streamed agent report's flavor — the four `protocol::Status` variants,
 /// mapped here to a glyph + color (design §13: `working`=dim, `done`=green ✓,
 /// `blocked`=yellow ⚠, `info`=blue). Kept local rather than depending on
-/// `katsuobushi-protocol`; the `prompt` subcommand maps `Status` → this when it
+/// `katsuobushi-sandbox-protocol`; the `prompt` subcommand maps `Status` → this when it
 /// renders a stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReportKind {
@@ -210,20 +210,76 @@ impl Renderer {
     }
 }
 
+/// The semantic style of a [`TableCell`]. comfy-table applies it itself, so a
+/// styled cell's column width is measured from its *printable* text rather than
+/// baked-in ANSI (which would otherwise inflate the column and break alignment).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CellStyle {
+    Plain,
+    Green,
+    Yellow,
+    Dim,
+}
+
+/// A status-table cell: printable text plus the style comfy-table should apply.
+#[derive(Clone)]
+pub struct TableCell {
+    text: String,
+    style: CellStyle,
+}
+
+impl TableCell {
+    /// An undecorated cell.
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            style: CellStyle::Plain,
+        }
+    }
+
+    /// A cell comfy-table colors/dims when `color` is on.
+    pub fn styled(text: impl Into<String>, style: CellStyle) -> Self {
+        Self {
+            text: text.into(),
+            style,
+        }
+    }
+}
+
 /// Render an aligned, borderless status table built on `comfy-table` — the
 /// replacement for the old `column -t` (design §13; lib/sandbox/default.nix:1814).
 /// Width is computed from content (arrangement disabled) rather than the
-/// terminal, so output is deterministic for snapshot tests. The helper itself
-/// emits no ANSI; a caller that wants a colored cell paints the string with a
-/// [`Renderer`] helper before handing it in (so gating stays in one place).
-pub fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
+/// terminal, so output is deterministic. Color is applied by comfy-table itself
+/// (not baked into the cell strings), so it measures the *printable* width and
+/// the columns stay aligned; `color` gates it (forced on even off-TTY so
+/// `--color always` / a captured stream is still colored, forced off otherwise).
+pub fn render_table(headers: &[&str], rows: &[Vec<TableCell>], color: bool) -> String {
+    use comfy_table::{Attribute, Cell, Color};
+
     let mut table = Table::new();
     table
         .load_preset(comfy_table::presets::NOTHING)
         .set_content_arrangement(ContentArrangement::Disabled)
         .set_header(headers.to_vec());
+    if color {
+        table.enforce_styling();
+    } else {
+        table.force_no_tty();
+    }
     for row in rows {
-        table.add_row(row.clone());
+        let cells = row.iter().map(|c| {
+            let cell = Cell::new(&c.text);
+            if !color {
+                return cell;
+            }
+            match c.style {
+                CellStyle::Plain => cell,
+                CellStyle::Green => cell.fg(Color::Green),
+                CellStyle::Yellow => cell.fg(Color::Yellow),
+                CellStyle::Dim => cell.add_attribute(Attribute::Dim),
+            }
+        });
+        table.add_row(cells);
     }
     table.to_string()
 }
@@ -387,19 +443,63 @@ mod tests {
 
     // ---- table helper ----
 
+    /// Drop ANSI SGR (`ESC [ … m`) sequences so the *printable* layout can be
+    /// compared.
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for e in chars.by_ref() {
+                    if e == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn sample_rows() -> Vec<Vec<TableCell>> {
+        vec![
+            vec![
+                TableCell::plain("1"),
+                TableCell::plain("foo-abc"),
+                TableCell::styled("running", CellStyle::Green),
+            ],
+            vec![
+                TableCell::plain("2"),
+                TableCell::plain("bar-xyz"),
+                TableCell::styled("stopped", CellStyle::Dim),
+            ],
+        ]
+    }
+
     #[test]
     fn it_renders_a_plain_table_without_ansi() {
-        let table = render_table(
-            &["#", "INSTANCE", "STATE"],
-            &[
-                vec!["1".into(), "foo-abc".into(), "running".into()],
-                vec!["2".into(), "bar-xyz".into(), "stopped".into()],
-            ],
-        );
-        assert!(!has_ansi(&table), "comfy-table output carries no ANSI");
+        let table = render_table(&["#", "INSTANCE", "STATE"], &sample_rows(), false);
+        assert!(!has_ansi(&table), "no ANSI with color off");
         assert!(table.contains("INSTANCE"), "header present: {table}");
         assert!(table.contains("foo-abc") && table.contains("bar-xyz"));
         // Borderless: no box-drawing glyphs from the NOTHING preset.
         assert!(!table.contains('│') && !table.contains('─'));
+    }
+
+    #[test]
+    fn it_keeps_columns_aligned_when_a_cell_is_colored() {
+        // The whole point of styling cells *through* comfy-table: the colored
+        // table, with its ANSI removed, must be byte-identical to the plain one —
+        // i.e. color changes only the SGR bytes, never the column layout.
+        let headers = ["#", "INSTANCE", "STATE"];
+        let plain = render_table(&headers, &sample_rows(), false);
+        let colored = render_table(&headers, &sample_rows(), true);
+        assert!(has_ansi(&colored), "color on must emit ANSI even off-TTY");
+        assert_eq!(
+            strip_ansi(&colored),
+            plain,
+            "a colored cell must not shift any column"
+        );
     }
 }

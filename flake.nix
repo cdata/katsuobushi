@@ -176,18 +176,18 @@
           workspaceRoot = ./.;
           projectId = "cdata/katsuobushi";
         };
-        # The guest controller server (katsuobushi-sandbox-control). The host
+        # The guest controller server (katsuobushi-sandbox-guest). The host
         # client was retired into `katsuctl sandbox prompt`; the guest `report`
         # tool is a shell app built inside lib.sandbox, not a Rust crate.
-        controlCrates.katsuobushi-sandbox-control = rust.buildCrate {
-          pname = "katsuobushi-sandbox-control";
-          cargoExtraArgs = "--package katsuobushi-sandbox-control";
+        controlCrates.katsuobushi-sandbox-guest = rust.buildCrate {
+          pname = "katsuobushi-sandbox-guest";
+          cargoExtraArgs = "--package katsuobushi-sandbox-guest";
         };
         # Host-side sandbox controller (design/katsuctl.md). Built the same way;
         # stays in `packages` (= controlCrates) and goes on the devshell PATH.
         controlCrates.katsuctl = rust.buildCrate {
           pname = "katsuctl";
-          cargoExtraArgs = "--package katsuctl";
+          cargoExtraArgs = "--package katsuobushi-controller";
         };
 
         menu = makeMenu {
