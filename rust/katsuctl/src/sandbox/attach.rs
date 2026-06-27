@@ -258,19 +258,27 @@ mod tests {
         // default `run` result is a zero exit).
         host.with_alive_sock(PathBuf::from("/run/katsuobushi/inst-abc/katsuobushi.sock"));
         let mut rng = FakeRng::new(&[1, 2]);
+        // A real runtime dir, so emit takes the production atomic-create path
+        // (the script lands on disk; the Host seam is not used for the write).
+        let dir = std::env::temp_dir().join(format!(
+            "katsuctl-attach-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
 
-        let outcome = attach_with(
-            &host,
-            &mut rng,
-            Path::new("/run/user/1000"),
-            &spec,
-            "inst-abc",
-            2222,
-        )
-        .expect("planning should succeed");
+        let outcome = attach_with(&host, &mut rng, &dir, &spec, "inst-abc", 2222)
+            .expect("planning should succeed");
 
         assert!(matches!(outcome, Outcome::Emitted));
-        assert!(wrote_a_script(&host), "a script must be emitted on success");
+        // Exactly one .sh script was emitted under the runtime dir.
+        let scripts: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read scratch dir")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "sh"))
+            .collect();
+        assert_eq!(scripts.len(), 1, "a script must be emitted on success");
+        let _ = std::fs::remove_dir_all(&dir);
 
         // The probes happened in order: QMP liveness, then the no-PTY ssh
         // has-session with the pinned key path and port.

@@ -46,11 +46,19 @@
 //! the surface here reads as `dead_code` until then.
 #![allow(dead_code)]
 
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 use crate::sandbox::host::{Host, Rng};
+
+/// How many fresh random names [`create_exclusive`] tries before giving up — a
+/// small bound, since an `EEXIST` against a 64-bit-random name is astronomically
+/// unlikely and a persistent one means the directory is hostile/broken.
+const CREATE_TRIES: usize = 16;
 
 /// The fixed header every emitted recipe opens with: the `bash` shebang and the
 /// strict-mode pragma. Kept as one constant so the golden snapshots pin it.
@@ -141,22 +149,77 @@ fn temp_script_path(dir: &Path, rng: &mut impl Rng) -> PathBuf {
     ))
 }
 
+/// Create the script file **atomically and exclusively** under `dir` and write
+/// `bytes` into it, returning the path it landed at.
+///
+/// The safety property `mktemp` buys us (design §14.7) is the atomic
+/// `O_CREAT|O_EXCL` create: [`std::fs::OpenOptions::create_new`] fails outright
+/// if the path already exists, so an attacker-planted symlink or pre-existing
+/// file at the (unpredictable, [`temp_script_path`]-named) target can never be
+/// *followed* or *truncated* — unlike a plain `std::fs::write`, which would do
+/// both. The file is created mode `0600` via [`OpenOptionsExt::mode`] so the
+/// recipe is never world-readable, even under the world-writable
+/// `$XDG_RUNTIME_DIR→/tmp` fallback.
+///
+/// On the (astronomically unlikely) `EEXIST` collision against the random name
+/// we retry with a fresh draw, up to [`CREATE_TRIES`] times, then surface the
+/// error rather than spin forever.
+fn create_exclusive(dir: &Path, rng: &mut impl Rng, bytes: &[u8]) -> io::Result<PathBuf> {
+    let mut last_err = None;
+    for _ in 0..CREATE_TRIES {
+        let path = temp_script_path(dir, rng);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true) // O_CREAT | O_EXCL — never follows/truncates an existing entry.
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(bytes)?;
+                return Ok(path);
+            }
+            // The only retryable case: the random name was already taken. Draw a
+            // fresh one and try again.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last_err = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| io::Error::from(io::ErrorKind::AlreadyExists)))
+}
+
 /// Write `recipe` to an anonymous temp file under `dir`, returning the path.
 ///
-/// File-writing goes through the [`Host`] seam (design §7.1) so a seam test can
-/// assert the exact recipe contents without a real `exec`. The path is unique
-/// per [`temp_script_path`]; cleanup is best-effort and not entangled with
-/// instance lifecycle (design §8.1).
+/// Creation is the atomic-exclusive [`create_exclusive`] (`O_EXCL`, mode 0600),
+/// so a planted symlink/file can never be followed or truncated (design §8.1,
+/// §14.7). The path is unique per [`temp_script_path`]; cleanup is best-effort
+/// and not entangled with instance lifecycle.
+///
+/// The [`Host`] seam (design §7.1) is retained only as the **test injection
+/// point**: it is reached solely when `dir` does not exist, which in production
+/// never happens — [`script_runtime_dir`] always resolves a real tmpfs/`/tmp`
+/// path, so the atomic create is always the path taken. (A missing `dir` makes
+/// `host.write` fail too, so no insecure file is ever produced in production;
+/// the branch exists so the `FakeHost`-driven seam tests, which pass a synthetic
+/// `dir`, can still observe the emitted recipe.)
 pub fn write_script(
     host: &dyn Host,
     dir: &Path,
     rng: &mut impl Rng,
     recipe: &Recipe,
 ) -> Result<PathBuf> {
-    let path = temp_script_path(dir, rng);
-    host.write(&path, recipe.render().as_bytes())
-        .with_context(|| format!("writing emitted script to {}", path.display()))?;
-    Ok(path)
+    let bytes = recipe.render().into_bytes();
+    match create_exclusive(dir, rng, &bytes) {
+        Ok(path) => Ok(path),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let path = temp_script_path(dir, rng);
+            host.write(&path, &bytes)
+                .with_context(|| format!("writing emitted script to {}", path.display()))?;
+            Ok(path)
+        }
+        Err(e) => {
+            Err(e).with_context(|| format!("creating emitted script under {}", dir.display()))
+        }
+    }
 }
 
 /// The full emit handoff (design §8.1): run the probe-dependent `plan`, and only
@@ -301,8 +364,12 @@ mod tests {
 
     #[test]
     fn it_writes_the_recipe_through_the_host_seam() {
+        // A dir whose parent does not exist makes the atomic create report
+        // `NotFound`, so `write_script` falls back to the Host seam — the only
+        // way a `FakeHost` can observe the emitted recipe. Production resolves a
+        // real runtime dir and never takes this branch (see [`write_script`]).
         let host = FakeHost::new();
-        let dir = Path::new("/run/user/1000");
+        let dir = Path::new("/katsuctl-no-such-runtime-dir-9z8x7y/run");
         let mut rng = FakeRng::new(&[1, 2]);
         let recipe = trivial_recipe();
 
@@ -318,14 +385,30 @@ mod tests {
 
     #[test]
     fn it_prints_the_path_and_writes_on_a_successful_plan() {
+        // A real dir takes the production atomic path: the recipe is written to
+        // an exclusive temp file (not the Host seam). Verify the file exists on
+        // disk with the rendered recipe, and that the seam was never used.
         let host = FakeHost::new();
+        let dir = scratch_dir("emit-print");
         let mut rng = FakeRng::new(&[1, 2]);
-        emit(&host, Path::new("/run/user/1000"), &mut rng, || {
-            Ok(trivial_recipe())
-        })
-        .expect("emit should succeed");
-        // A single Write happened (the path also went to stdout).
-        assert!(matches!(host.calls().as_slice(), [Call::Write(_, _)]));
+        let recipe = trivial_recipe();
+
+        emit(&host, &dir, &mut rng, || Ok(recipe.clone())).expect("emit should succeed");
+
+        // Exactly one .sh script was written under the dir, carrying the recipe.
+        let scripts: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read scratch dir")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "sh"))
+            .collect();
+        assert_eq!(scripts.len(), 1, "exactly one script emitted");
+        assert_eq!(
+            std::fs::read(&scripts[0]).expect("read script"),
+            recipe.render().into_bytes()
+        );
+        assert!(host.calls().is_empty(), "atomic path, never the Host seam");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -376,6 +459,120 @@ mod tests {
             .status()
             .expect("bash should run the emitted script");
         assert!(status.success(), "emitted recipe execs cleanly");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- atomic O_EXCL + 0600 hardening (design §8.1, §14.7) ----
+
+    /// A fresh, unique scratch directory for a real-filesystem test.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "katsuctl-emit-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn it_creates_the_script_with_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A real dir, so the atomic create path runs (not the FakeHost fallback).
+        let host = FakeHost::new();
+        let dir = scratch_dir("mode");
+        let mut rng = FakeRng::new(&[0xa1b2_c3d4, 0xe5f6_0718]);
+
+        let path = write_script(&host, &dir, &mut rng, &trivial_recipe()).expect("write");
+
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "script must be created mode 0600, got {:o}",
+            mode & 0o777
+        );
+        // The atomic create handled the write itself — the Host seam was not used.
+        assert!(
+            host.calls().is_empty(),
+            "a real runtime dir takes the atomic path, never host.write"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn it_errs_without_following_an_existing_regular_file() {
+        let dir = scratch_dir("exists");
+        // A single repeating draw means every retry recomputes the *same* name,
+        // so the planted file collides on all [`CREATE_TRIES`] attempts.
+        let target = temp_script_path(&dir, &mut FakeRng::new(&[0x0000_0001]));
+        std::fs::write(&target, b"PRE-EXISTING - MUST NOT BE TRUNCATED").expect("plant");
+
+        let mut rng = FakeRng::new(&[0x0000_0001]);
+        let err = create_exclusive(&dir, &mut rng, b"new recipe bytes")
+            .expect_err("must not clobber an existing file");
+
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        // Byte-for-byte intact: O_EXCL never opened it for truncation/writing.
+        assert_eq!(
+            std::fs::read(&target).expect("read back"),
+            b"PRE-EXISTING - MUST NOT BE TRUNCATED"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn it_errs_without_following_a_planted_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = scratch_dir("symlink");
+        let linkname = temp_script_path(&dir, &mut FakeRng::new(&[0x0000_0002]));
+        // A *dangling* symlink at the target name: were the create to follow it,
+        // it would create `victim`. O_EXCL must refuse the symlink outright.
+        let victim = dir.join("victim-should-stay-absent");
+        symlink(&victim, &linkname).expect("plant symlink");
+
+        let mut rng = FakeRng::new(&[0x0000_0002]);
+        let err = create_exclusive(&dir, &mut rng, b"recipe bytes")
+            .expect_err("must not follow a symlink at the target");
+
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(
+            !victim.exists(),
+            "the symlink target must never be followed/created"
+        );
+        // The symlink itself is untouched (not replaced by a regular file).
+        assert!(std::fs::symlink_metadata(&linkname)
+            .expect("lstat")
+            .file_type()
+            .is_symlink());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn it_retries_past_a_name_collision() {
+        let dir = scratch_dir("retry");
+        // First attempt draws (A,A'), which we pre-occupy; the second draws
+        // (B,B') and must land cleanly there.
+        let taken = temp_script_path(&dir, &mut FakeRng::new(&[0xAAAA_0001, 0xAAAA_0002]));
+        std::fs::write(&taken, b"taken").expect("occupy first name");
+
+        let mut rng = FakeRng::new(&[0xAAAA_0001, 0xAAAA_0002, 0xBBBB_0003, 0xBBBB_0004]);
+        let path = create_exclusive(&dir, &mut rng, b"recipe-bytes")
+            .expect("retry must find the free second name");
+
+        assert_ne!(path, taken, "must not reuse the occupied name");
+        assert_eq!(std::fs::read(&path).expect("read new"), b"recipe-bytes");
+        assert_eq!(
+            std::fs::read(&taken).expect("read taken"),
+            b"taken",
+            "the collided file is left untouched"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
