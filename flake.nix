@@ -184,6 +184,12 @@
           pname = "katsuobushi-sandbox-control";
           cargoExtraArgs = "--package katsuobushi-sandbox-control";
         };
+        # Host-side sandbox controller (design/katsuctl.md). Built the same way;
+        # stays in `packages` (= controlCrates) and goes on the devshell PATH.
+        controlCrates.katsuctl = rust.buildCrate {
+          pname = "katsuctl";
+          cargoExtraArgs = "--package katsuctl";
+        };
 
         menu = makeMenu {
           title = "Katsuobushi";
@@ -205,7 +211,10 @@
             # Used by the sandbox lifecycle commands (QMP over the qemu monitor)
             # and by the sandbox controller spike harness.
             pkgs.socat
-          ];
+          ]
+          # `katsuctl` on the PATH for power users (additive). Linux-only, like
+          # the sandbox controller crate it lives beside (tokio-vsock gate).
+          ++ pkgs.lib.optionals isLinux [ controlCrates.katsuctl ];
           shellHook = rust.rustEnvironmentHook + makeDevShellHook menu;
         };
       }

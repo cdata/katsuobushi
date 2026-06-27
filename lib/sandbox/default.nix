@@ -1261,6 +1261,60 @@ let
 
   runner = guestSystem.config.microvm.declaredRunner;
 
+  # Nix→Rust instance spec (design/katsuctl.md §5)
+  #
+  # One JSON spec rendered at flake-eval time and handed to `katsuctl` via
+  # `--config`. Rust owns the schema (rust/katsuctl/src/sandbox/spec.rs — every
+  # struct `#[serde(deny_unknown_fields)]`, camelCase keys, specVersion checked
+  # on load); this is the single source of truth that must mirror it key-for-key.
+  # It is built from the SAME let-bindings the runner uses today (projectId,
+  # agentUser, importHostStoreDb, validatedContext, secrets, runner, the pinned
+  # tool packages) — no duplicated values — so the spec and the remaining shell
+  # can never drift. `roots` carries the `$XDG_*` templates verbatim; `katsuctl`
+  # expands them in Rust (resolve_roots) with the same `:-` fallbacks the runner
+  # uses (:1321-1322), rather than baking a user's absolute home path into the
+  # store. `sqlite3` is gated on importHostStoreDb exactly as the runner's
+  # runtimeInputs are (:1285) — null (Tools.sqlite3 = None) when off.
+  katsuctlSpec = pkgs.writeText "katsuctl-sandbox-spec.json" (
+    builtins.toJSON {
+      specVersion = 1;
+      inherit projectId agentUser importHostStoreDb;
+      roots = {
+        stateGlob = "$XDG_STATE_HOME/katsuobushi/${projectId}";
+        runtimeGlob = "$XDG_RUNTIME_DIR/katsuobushi/${projectId}";
+      };
+      tools = {
+        git = "${pkgs.git}/bin/git";
+        ssh = "${pkgs.openssh}/bin/ssh";
+        sshKeygen = "${pkgs.openssh}/bin/ssh-keygen";
+        tmux = "${pkgs.tmux}/bin/tmux";
+        rsync = "${pkgs.rsync}/bin/rsync";
+        sqlite3 = if importHostStoreDb then "${pkgs.sqlite.bin}/bin/sqlite3" else null;
+        bash = "${pkgs.bash}/bin/bash";
+      };
+      runner = "${runner}/bin/microvm-run";
+      diskImages = [
+        "rw-store.img"
+        "nix-db.img"
+        "scratch.img"
+      ];
+      context = validatedContext;
+      secrets = lib.mapAttrsToList (name: spec: {
+        inherit name;
+        source =
+          if spec ? fromEnv then
+            { fromEnv = spec.fromEnv; }
+          else if spec ? fromFile then
+            { fromFile = spec.fromFile; }
+          else
+            throw "katsuobushi.lib.sandbox: secret ${name} needs fromEnv or fromFile.";
+        dest = "cred-${name}";
+      }) secrets;
+      vsockPort = 1024;
+      hostCid = 2;
+    }
+  );
+
   # Host-side wrapper (the `nix run .#sandbox` app)
   #
   # Resolves the instance, builds the per-instance bare mirror + working-tree
@@ -1942,6 +1996,10 @@ in
   };
 
   inherit menuCommands;
+
+  # The Nix-rendered instance spec, exposed so the menu-command rewrites
+  # (design/katsuctl.md §9 step 3) can pass it to `katsuctl --config`.
+  inherit katsuctlSpec;
 
   # Building the guest image so CI catches a broken sandbox config.
   checks.sandbox = runner;
