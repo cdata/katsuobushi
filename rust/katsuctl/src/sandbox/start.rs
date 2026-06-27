@@ -648,7 +648,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
 
     // ---- mode-specific tail ----
     match plan.mode {
-        Mode::Agent => agent_tail(&mut r, &runner, &console_log, config, plan),
+        Mode::Agent => agent_tail(&mut r, &runner, &console_log, &runtime_root, config, plan),
         Mode::Interactive => interactive_tail(
             &mut r,
             &ssh,
@@ -678,7 +678,14 @@ fn mode_word(mode: Mode) -> &'static str {
 /// subcommand so `start` reuses the one streaming/readiness implementation
 /// (design §11) rather than duplicating vsock logic; without a prompt, exit 0 and
 /// let the wrapper return.
-fn agent_tail(r: &mut Recipe, runner: &str, console_log: &Path, config: &Path, plan: &Plan) {
+fn agent_tail(
+    r: &mut Recipe,
+    runner: &str,
+    console_log: &Path,
+    runtime_root: &Path,
+    config: &Path,
+    plan: &Plan,
+) {
     let cid = plan.vsock_cid.expect("agent mode always allocates a CID");
     r.blank()
         .comment("Agent mode: detach a lingering VM (setsid) that outlives this script.");
@@ -694,7 +701,18 @@ fn agent_tail(r: &mut Recipe, runner: &str, console_log: &Path, config: &Path, p
     ));
     match &plan.prompt {
         Some(text) => {
-            r.comment("Deliver the first turn by tail-calling the prompt subcommand (it bakes in the readiness wait).");
+            // The VM was just launched detached above; wait for qemu to bind its
+            // QMP socket so the `prompt` tail-call's liveness check sees the
+            // instance as RUNNING (not paused — which would trigger a spurious
+            // resume). qemu's `server,nowait` monitor socket appears within a
+            // second or two; prompt then does its own channel readiness-wait.
+            let qmp_sock = runtime_root.join("katsuobushi.sock");
+            r.comment("Wait for the VM's QMP monitor socket before delivering the first turn.");
+            r.line(format!(
+                "for _ in $(seq 1 120); do [ -S {} ] && break; sleep 0.5; done",
+                dq(&qmp_sock)
+            ));
+            r.comment("Deliver the first turn by tail-calling the prompt subcommand (it bakes in the channel readiness wait).");
             r.line(format!(
                 "exec katsuctl sandbox --config {} prompt \"{}\" {}",
                 dq(config),

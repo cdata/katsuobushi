@@ -44,5 +44,7 @@ setsid /nix/store/microvm/bin/microvm-run > "/state/katsuobushi/cdata/katsuobush
 vm=$!
 disown "$vm" 2>/dev/null || true
 echo "sandbox: agent instance '20260627-120000-4242' running (cid 4242)."
-# Deliver the first turn by tail-calling the prompt subcommand (it bakes in the readiness wait).
+# Wait for the VM's QMP monitor socket before delivering the first turn.
+for _ in $(seq 1 120); do [ -S "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/katsuobushi.sock" ] && break; sleep 0.5; done
+# Deliver the first turn by tail-calling the prompt subcommand (it bakes in the channel readiness wait).
 exec katsuctl sandbox --config "/nix/store/katsuctl-sandbox-spec.json" prompt "20260627-120000-4242" 'fix the bug in foo'\''s "bar" path'
