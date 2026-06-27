@@ -1135,6 +1135,7 @@ let
           git
           coreutils
           rsync
+          jq
         ];
         serviceConfig = {
           Type = "oneshot";
@@ -1152,7 +1153,10 @@ let
             echo "no sync share present; skipping workspace setup"
             exit 0
           fi
-          instance="$(cat ${shareMount}/instance 2>/dev/null || echo unknown)"
+          # Prefer the consolidated instance.json (#004); fall back to the legacy
+          # scalar share file, then a hardcoded default, so both old and new hosts boot.
+          instance="$(jq -r '.name // empty' ${shareMount}/instance.json 2>/dev/null || true)"
+          [ -n "$instance" ] || instance="$(cat ${shareMount}/instance 2>/dev/null || echo unknown)"
 
           # The bare mirror comes over a 9p share owned by the host user; git
           # refuses to operate on a repo it considers "dubiously owned" unless we
@@ -1206,6 +1210,7 @@ let
         path = with pkgs; [
           coreutils
           util-linux
+          jq
         ];
         serviceConfig = {
           Type = "oneshot";
@@ -1238,7 +1243,10 @@ let
         # (it owns the tmux session).
         script = ''
           set -u
-          mode="$(cat ${shareMount}/mode 2>/dev/null || echo interactive)"
+          # Prefer the consolidated instance.json (#004); fall back to the legacy
+          # scalar share file, then a hardcoded default, so both old and new hosts boot.
+          mode="$(jq -r '.mode // empty' ${shareMount}/instance.json 2>/dev/null || true)"
+          [ -n "$mode" ] || mode="$(cat ${shareMount}/mode 2>/dev/null || echo interactive)"
           if [ "$mode" != "agent" ]; then
             exit 0
           fi
