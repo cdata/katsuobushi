@@ -1,0 +1,11 @@
+---
+source: rust/katsuctl/src/sandbox/emit.rs
+expression: snapshot_recipe(&trivial_recipe())
+---
+#!/usr/bin/env bash
+set -euo pipefail
+
+# trivial smoke recipe for the emit harness
+echo "hello from katsuctl"
+
+mkdir -p "/run/example/katsuobushi"

@@ -8,6 +8,7 @@ use crate::{Global, SandboxArgs, SandboxCommand};
 use anyhow::Result;
 
 mod attach;
+pub mod emit;
 mod fetch;
 pub mod host;
 pub mod output;
