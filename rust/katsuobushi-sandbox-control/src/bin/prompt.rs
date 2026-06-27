@@ -10,9 +10,7 @@
 
 use anyhow::{bail, Context as _};
 use clap::Parser;
-use katsuobushi_sandbox_control::protocol::{
-    GuestMessage, HostMessage, Prompt, Status, VSOCK_PORT,
-};
+use katsuobushi_protocol::{GuestMessage, HostMessage, Prompt, Status, VSOCK_PORT};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 #[derive(Parser)]

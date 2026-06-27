@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use katsuobushi_sandbox_control::protocol::{
+use katsuobushi_protocol::{
     GuestMessage, HostMessage, Report, ReportLine, VMADDR_CID_HOST, VSOCK_PORT,
 };
 use rmcp::model::{

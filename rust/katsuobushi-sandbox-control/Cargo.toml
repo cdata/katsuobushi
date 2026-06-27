@@ -4,8 +4,8 @@ version.workspace = true
 edition = "2021"
 description = "Host↔guest sandbox controller for Katsuobushi agent mode: channel server + host client."
 
-# Shared wire types live in the lib target (src/protocol.rs via src/lib.rs); both
-# binaries link it, so the host and guest sides cannot drift.
+# Shared wire types live in the standalone `katsuobushi-protocol` crate; both
+# binaries depend on it, so the host and guest sides cannot drift.
 [lib]
 name = "katsuobushi_sandbox_control"
 path = "src/lib.rs"
@@ -21,6 +21,7 @@ name = "katsuobushi-sandbox-prompt"
 path = "src/bin/prompt.rs"
 
 [dependencies]
+katsuobushi-protocol = { path = "../katsuobushi-protocol" }
 rmcp.workspace = true
 tokio-vsock.workspace = true
 tokio.workspace = true
