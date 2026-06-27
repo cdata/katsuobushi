@@ -1905,31 +1905,10 @@ EOF
     };
     "sandbox:stop" = {
       description = "Suspend or remove an instance";
+      # Business logic now lives in katsuctl (design/katsuctl.md §2.2); this
+      # wrapper just hands off, passing the Nix-rendered spec via --config.
       command = ''
-        ${instanceHelpers}
-        remove="no"
-        if [ "''${1:-}" = "--remove" ]; then remove="yes"; shift; fi
-        inst="''${1:-}"
-        # Guard hard: an empty instance would expand the paths below to the whole
-        # project state dir and remove every instance.
-        [ -n "$inst" ] || { echo "usage: sandbox:stop [--remove] <instance|#>" >&2; exit 2; }
-        inst="$(_resolve_instance "$inst")" || exit 1
-        sock="${runtimeGlob}/$inst/katsuobushi.sock"
-        if [ -S "$sock" ]; then
-          # QMP requires capability negotiation before any command is accepted.
-          { echo '{"execute":"qmp_capabilities"}'; echo '{"execute":"quit"}'; sleep 1; } \
-            | ${pkgs.socat}/bin/socat - "UNIX-CONNECT:$sock" >/dev/null 2>&1 || true
-        fi
-        # The launching process tears down its own instance on exit, but a stop
-        # requested from elsewhere (or after that process is gone) must do it
-        # too. Unnamed instances are ephemeral and always removed; named ones are
-        # kept (restartable) unless --remove is given to discard them.
-        if [ "$remove" = "yes" ] || [ ! -e "${stateGlob}/$inst/.named" ]; then
-          rm -rf "${stateGlob}/$inst" "${runtimeGlob}/$inst"
-          echo "stopped and removed $inst"
-        else
-          echo "stopped $inst (named; kept — restart: sandbox:start --name $inst, discard: sandbox:stop --remove $inst)"
-        fi
+        exec katsuctl sandbox --config ${katsuctlSpec} stop "$@"
       '';
     };
     "sandbox:attach" = {
