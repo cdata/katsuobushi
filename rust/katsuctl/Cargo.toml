@@ -17,3 +17,6 @@ tokio.workspace = true
 tokio-vsock.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Output/UX foundation (design/katsuctl.md §13, issue #007): status tables + color.
+comfy-table.workspace = true
+owo-colors.workspace = true
