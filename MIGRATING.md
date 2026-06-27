@@ -8,6 +8,45 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.1.10
+
+### `lib.sandbox`: writable scratch is now disk-backed — `storeOverlaySize` is removed
+
+The guest's writable scratch — the writable `/nix/store` overlay, the workspace
+clone and its build artifacts, the `cargo`/`rustup`/XDG caches, and the guest
+Nix database — now lives on per-instance **sparse disk images** instead of a
+tmpfs. This lifts the old cap (a fraction of `mem`) that let a single Rust
+`target/` exhaust guest RAM: capacity now scales with host disk, and peak RAM
+tracks the working set. The guest root `/` stays a tmpfs.
+
+**Action required only if you set `storeOverlaySize`.** That single tmpfs-size
+string is gone, replaced by three image sizes (in MiB, sparse):
+`storeVolumeSize` (default `16384`), `scratchVolumeSize` (default `32768`), and
+`dbVolumeSize` (default `4096`). Rename and re-express in MiB — e.g.
+`storeOverlaySize = "8G"` → `storeVolumeSize = 8192`. If you never set it, no
+action is needed; the defaults are generous and the images are sparse, so host
+disk usage tracks real content rather than these caps.
+
+Two behavioral notes, no action:
+
+- A **named** instance keeps its images across a stop/restart, so warm build
+  caches survive a pause. As a consequence, its guest Nix database is seeded
+  from the host **once** (on first launch) and then accumulates the agent's own
+  in-VM registrations; a resumed instance therefore does **not** pick up host
+  paths built _after_ its first launch. Discard it with `sandbox:stop --remove`
+  to re-seed from a fresh host snapshot. Ephemeral instances seed every launch
+  as before.
+- Prompting a **paused** instance now auto-starts it (see below), so its
+  disk-backed caches are warm when the work resumes.
+
+### `sandbox:prompt` auto-starts a paused instance — no action required
+
+Prompting a named instance that was stopped (but kept) now restarts it — booting
+and arming the channel (~30–60s) before delivering the turn — instead of hanging
+against the powered-off VM. The live conversation does not survive a pause (the
+VM's RAM is gone); only the pushed branch does, so the resumed agent begins a
+fresh session on top of its branch. Phrase such a prompt to stand on its own.
+
 ## 0.1.9
 
 No action required. Adds `sandbox:attach` and numeric instance references; both

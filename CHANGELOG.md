@@ -5,6 +5,47 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.1.10] — 2026-06-26
+
+A sandbox release with one consumer-facing breaking change: the guest's writable
+scratch is now disk-backed instead of RAM-backed, and the single
+`storeOverlaySize` argument is replaced by three sparse-image sizes. Also adds
+auto-start when prompting a paused instance. See
+[`MIGRATING.md`](MIGRATING.md#0110).
+
+### Added
+
+- **`sandbox:prompt` auto-starts a paused instance.** Prompting a named instance
+  that was stopped (but kept) now restarts it — booting and arming the channel
+  (~30–60s) before delivering the turn — instead of hanging against the
+  powered-off VM. A pause discards the VM's RAM, so the live conversation does
+  not survive it; only the pushed branch does, and the resumed agent begins a
+  fresh session on top of its branch.
+
+### Changed
+
+- **Writable scratch is disk-backed, not RAM-backed.** The writable `/nix/store`
+  overlay, the workspace clone (with build artifacts), the relocated
+  `cargo`/`rustup`/XDG caches, and the guest Nix database now live on
+  per-instance sparse disk images instead of tmpfs. Capacity scales with host
+  disk rather than a fraction of `mem`, so a Rust `target/` can no longer exhaust
+  guest RAM; the guest root `/` stays a tmpfs. A **named** instance keeps these
+  images across a stop/restart, so warm build caches (and host-path
+  registrations) survive a pause; ephemeral instances get fresh images each
+  launch.
+- **`importHostStoreDb`: the guest Nix database now persists and is seeded
+  once.** On its own persistent volume, the host-DB snapshot is applied a single
+  time per named instance (gated on a marker) and then accumulates the agent's
+  in-VM registrations — keeping it consistent with the persistent store overlay
+  across a restart, rather than re-seeding every boot.
+
+### Removed
+
+- **`storeOverlaySize` is replaced by `storeVolumeSize` / `scratchVolumeSize` /
+  `dbVolumeSize`.** The old single tmpfs-size string is gone; the three new
+  arguments size the disk images (in MiB, sparse). Defaults: 16384 / 32768 /
+  4096. See [`MIGRATING.md`](MIGRATING.md#0110).
+
 ## [0.1.9] — 2026-06-26
 
 A sandbox-ergonomics release: instances are now numbered, and there is a
