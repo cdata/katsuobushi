@@ -49,10 +49,7 @@ fresh session on top of its branch. Phrase such a prompt to stand on its own.
 
 ## 0.1.9
 
-No action required. Adds `sandbox:attach` and numeric instance references; both
-are additive. One cosmetic change: `sandbox:status`'s instance listing now leads
-with a `#` index column, so any tooling that parses that table by column
-position should account for the extra leading field.
+No action required.
 
 ## 0.1.8
 
