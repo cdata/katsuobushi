@@ -56,6 +56,11 @@ pub trait Host {
     fn write(&self, p: &Path, bytes: &[u8]) -> io::Result<()>;
     /// Whether a path exists.
     fn exists(&self, p: &Path) -> bool;
+    /// List the immediate subdirectory names of `p` (each a directory entry's
+    /// file name), in arbitrary order. Non-directory entries are skipped. The
+    /// instance-index seam: routes `resolve.rs`'s enumeration through the host so
+    /// it is `FakeHost`-testable (design §7.1).
+    fn list_dir(&self, p: &Path) -> io::Result<Vec<String>>;
     /// Whether a loopback TCP port is free — the [`pick_port`] predicate (:1488).
     fn port_is_free(&self, port: u16) -> bool;
     /// Whether a qemu QMP monitor is listening at `sock` (native QMP, #006).
@@ -124,6 +129,21 @@ impl Host for HostImpl {
 
     fn exists(&self, p: &Path) -> bool {
         p.exists()
+    }
+
+    fn list_dir(&self, p: &Path) -> io::Result<Vec<String>> {
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(p)? {
+            let entry = entry?;
+            // Only directories are instances; a non-directory entry's type read
+            // failing is treated as "not a directory" and skipped.
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                if let Some(name) = entry.file_name().to_str() {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        Ok(names)
     }
 
     fn port_is_free(&self, port: u16) -> bool {
@@ -250,6 +270,8 @@ pub enum Call {
     Write(PathBuf, Vec<u8>),
     /// `exists(path)`.
     Exists(PathBuf),
+    /// `list_dir(path)`.
+    ListDir(PathBuf),
     /// `port_is_free(port)`.
     PortIsFree(u16),
     /// `qmp_alive(sock)`.
@@ -262,9 +284,10 @@ pub enum Call {
 /// results set up per test. Uses `RefCell` interior mutability because the
 /// trait methods take `&self`.
 ///
-/// Result conventions: `run`/`read`/`write` pop from a per-method queue (so a
-/// test can script success then failure), defaulting to a benign success when
-/// the queue is empty. `exists`/`port_is_free`/`qmp_alive` answer from a set of
+/// Result conventions: `run`/`read`/`write`/`list_dir` pop from a per-method
+/// queue (so a test can script success then failure), defaulting to a benign
+/// result when the queue is empty (`list_dir` defaults to `NotFound`, mirroring
+/// a missing state root). `exists`/`port_is_free`/`qmp_alive` answer from a set of
 /// "true" inputs (anything not in the set is `false`). `vsock_connect` cannot
 /// fabricate a live [`VsockStream`], so it records the call and returns an
 /// error — seam tests assert the connect was *attempted*; the byte round-trip
@@ -275,6 +298,7 @@ pub struct FakeHost {
     run_results: RefCell<VecDeque<io::Result<Output>>>,
     read_results: RefCell<VecDeque<io::Result<Vec<u8>>>>,
     write_results: RefCell<VecDeque<io::Result<()>>>,
+    list_dir_results: RefCell<VecDeque<io::Result<Vec<String>>>>,
     existing: HashSet<PathBuf>,
     free_ports: HashSet<u16>,
     alive_socks: HashSet<PathBuf>,
@@ -301,6 +325,12 @@ impl FakeHost {
     /// Script the next `write` result.
     pub fn push_write(&mut self, result: io::Result<()>) -> &mut Self {
         self.write_results.get_mut().push_back(result);
+        self
+    }
+
+    /// Script the next `list_dir` result.
+    pub fn push_list_dir(&mut self, result: io::Result<Vec<String>>) -> &mut Self {
+        self.list_dir_results.get_mut().push_back(result);
         self
     }
 
@@ -370,6 +400,14 @@ impl Host for FakeHost {
     fn exists(&self, p: &Path) -> bool {
         self.calls.borrow_mut().push(Call::Exists(p.to_path_buf()));
         self.existing.contains(p)
+    }
+
+    fn list_dir(&self, p: &Path) -> io::Result<Vec<String>> {
+        self.calls.borrow_mut().push(Call::ListDir(p.to_path_buf()));
+        self.list_dir_results
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_else(|| Err(io::Error::from(io::ErrorKind::NotFound)))
     }
 
     fn port_is_free(&self, port: u16) -> bool {
@@ -469,7 +507,8 @@ mod tests {
         host.with_existing(state.clone())
             .with_free_port(20_000)
             .with_alive_sock(sock.clone())
-            .push_read(Ok(b"agent-123".to_vec()));
+            .push_read(Ok(b"agent-123".to_vec()))
+            .push_list_dir(Ok(vec!["inst-a".to_string(), "inst-b".to_string()]));
 
         host.write(&state, b"agent-123").unwrap();
         assert_eq!(host.read(&state).unwrap(), b"agent-123");
@@ -477,6 +516,10 @@ mod tests {
         cmd.arg("clone").arg("--bare");
         host.run(&cmd).unwrap();
         assert!(host.exists(&state));
+        assert_eq!(
+            host.list_dir(Path::new("/state")).unwrap(),
+            vec!["inst-a".to_string(), "inst-b".to_string()]
+        );
         assert!(host.port_is_free(20_000));
         assert!(!host.port_is_free(20_001));
         assert!(host.qmp_alive(&sock));
@@ -493,6 +536,7 @@ mod tests {
                     "--bare".to_string(),
                 ]),
                 Call::Exists(state.clone()),
+                Call::ListDir(PathBuf::from("/state")),
                 Call::PortIsFree(20_000),
                 Call::PortIsFree(20_001),
                 Call::QmpAlive(sock.clone()),

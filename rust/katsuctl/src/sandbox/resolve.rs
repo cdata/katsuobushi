@@ -21,8 +21,15 @@ use crate::sandbox::host::Host;
 /// existing state directory (error if not). Mirrors `_resolve_instance` /
 /// `_list_instances` (lib/sandbox/default.nix:1680-1710).
 pub fn resolve_instance(state_glob: &Path, host: &impl Host, arg: &str) -> Result<String> {
+    // An empty selector would otherwise fall into the literal-name branch and
+    // resolve to the state root itself (`Path::join("")`), failing only later at
+    // the git layer. Reject it up front with a usage-style error, mirroring the
+    // old wrapper guard (lib/sandbox/default.nix:1903).
+    if arg.is_empty() {
+        bail!("usage: an instance name or 1-based index is required (see sandbox:status)");
+    }
     if is_index(arg) {
-        return resolve_index(state_glob, arg);
+        return resolve_index(state_glob, host, arg);
     }
     // A literal name must have a state directory — checked through the seam so a
     // test can answer it without a real filesystem.
@@ -40,8 +47,8 @@ fn is_index(arg: &str) -> bool {
 }
 
 /// Map a 1-based `arg` index onto the sorted listing.
-fn resolve_index(state_glob: &Path, arg: &str) -> Result<String> {
-    let instances = list_instances(state_glob)?;
+fn resolve_index(state_glob: &Path, host: &impl Host, arg: &str) -> Result<String> {
+    let instances = list_instances(state_glob, host)?;
     // A digit string larger than `usize` is necessarily out of range.
     let index: usize = arg
         .parse()
@@ -57,12 +64,13 @@ fn resolve_index(state_glob: &Path, arg: &str) -> Result<String> {
 
 /// Enumerate the immediate subdirectories of `state_glob` (each is an instance
 /// name), sorted by raw bytes — the Rust equivalent of `_list_instances`'
-/// `for d in glob/*/ … | LC_ALL=C sort` (lib/sandbox/default.nix:1681-1687). A
-/// missing root is an empty list, not an error (matching the shell's
-/// `[ -d ] || return 0`).
-fn list_instances(state_glob: &Path) -> Result<Vec<String>> {
-    let entries = match std::fs::read_dir(state_glob) {
-        Ok(entries) => entries,
+/// `for d in glob/*/ … | LC_ALL=C sort` (lib/sandbox/default.nix:1681-1687).
+/// Routed through the [`Host`] seam (rather than `std::fs` directly) so index
+/// resolution is `FakeHost`-testable. A missing root is an empty list, not an
+/// error (matching the shell's `[ -d ] || return 0`).
+fn list_instances(state_glob: &Path, host: &impl Host) -> Result<Vec<String>> {
+    let mut names = match host.list_dir(state_glob) {
+        Ok(names) => names,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => {
             return Err(e).with_context(|| {
@@ -71,16 +79,10 @@ fn list_instances(state_glob: &Path) -> Result<Vec<String>> {
         }
     };
 
-    let mut names = Vec::new();
-    for entry in entries {
-        let entry =
-            entry.with_context(|| format!("reading an entry under {}", state_glob.display()))?;
-        if entry.file_type().is_ok_and(|t| t.is_dir()) {
-            if let Some(name) = entry.file_name().to_str() {
-                names.push(name.to_string());
-            }
-        }
-    }
+    // The shell glob `"${stateGlob}"/*/` excludes dot-prefixed directories;
+    // `read_dir` does not, so drop them here to keep byte-sorted 1-based indices
+    // aligned with `_list_instances` (lib/sandbox/default.nix:1683).
+    names.retain(|name| !name.starts_with('.'));
     // `LC_ALL=C sort` is byte ordering; sort the UTF-8 names by their raw bytes
     // so this matches the shell listing the indices are numbered against.
     names.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
@@ -90,20 +92,12 @@ fn list_instances(state_glob: &Path) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::host::FakeHost;
+    use crate::sandbox::host::{Call, FakeHost};
     use std::path::PathBuf;
 
-    /// A fresh, empty temp state root containing the named (initially unsorted)
-    /// instance directories. Labelled per test so concurrent runs never collide.
-    fn temp_state(label: &str, dirs: &[&str]) -> PathBuf {
-        let base =
-            std::env::temp_dir().join(format!("katsuctl-resolve-{}-{}", std::process::id(), label));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).expect("create temp state root");
-        for d in dirs {
-            std::fs::create_dir_all(base.join(d)).expect("create instance dir");
-        }
-        base
+    /// Names as an owned `Vec<String>`, the `list_dir` return shape.
+    fn entries(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
@@ -128,31 +122,65 @@ mod tests {
 
     #[test]
     fn it_resolves_an_in_range_index_in_byte_order() {
-        // On-disk order is irrelevant: resolution sorts by bytes first.
-        let state = temp_state("in-range", &["inst-c", "inst-a", "inst-b"]);
-        let host = FakeHost::new();
-        assert_eq!(resolve_instance(&state, &host, "1").unwrap(), "inst-a");
+        // Listing order is irrelevant: resolution sorts by bytes first. Driven
+        // entirely through the seam — no real filesystem.
+        let state = PathBuf::from("/state/cdata/katsuobushi");
+        let mut host = FakeHost::new();
+        host.push_list_dir(Ok(entries(&["inst-c", "inst-a", "inst-b"])));
         assert_eq!(resolve_instance(&state, &host, "2").unwrap(), "inst-b");
-        assert_eq!(resolve_instance(&state, &host, "3").unwrap(), "inst-c");
-        let _ = std::fs::remove_dir_all(&state);
+        // The index path goes through the host seam, not `std::fs`.
+        assert_eq!(host.calls(), vec![Call::ListDir(state)]);
     }
 
     #[test]
     fn it_errors_on_an_out_of_range_index() {
-        let state = temp_state("out-of-range", &["inst-a", "inst-b"]);
-        let host = FakeHost::new();
+        let state = PathBuf::from("/state/cdata/katsuobushi");
+        let mut host = FakeHost::new();
+        host.push_list_dir(Ok(entries(&["inst-a", "inst-b"])));
         let err = resolve_instance(&state, &host, "5").expect_err("index past the end must fail");
         assert!(format!("{err:#}").contains("index 5"));
+    }
+
+    #[test]
+    fn it_rejects_a_zero_index_as_out_of_range() {
         // 1-based: index 0 is never valid.
+        let state = PathBuf::from("/state/cdata/katsuobushi");
+        let mut host = FakeHost::new();
+        host.push_list_dir(Ok(entries(&["inst-a"])));
         assert!(resolve_instance(&state, &host, "0").is_err());
-        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn it_ignores_dot_prefixed_directories_when_indexing() {
+        // The shell glob excludes dotdirs, so they must not occupy an index slot:
+        // index 1 is the first non-dot entry in byte order.
+        let state = PathBuf::from("/state/cdata/katsuobushi");
+        let mut host = FakeHost::new();
+        // One scripted listing per resolve call (the fake's queue pops once each).
+        host.push_list_dir(Ok(entries(&[".hidden", "inst-a", ".git", "inst-b"])))
+            .push_list_dir(Ok(entries(&[".hidden", "inst-a", ".git", "inst-b"])));
+        assert_eq!(resolve_instance(&state, &host, "1").unwrap(), "inst-a");
+        assert_eq!(resolve_instance(&state, &host, "2").unwrap(), "inst-b");
     }
 
     #[test]
     fn it_treats_a_missing_state_root_as_zero_instances() {
+        // An unscripted `list_dir` queue yields `NotFound`, which resolves to an
+        // empty listing — every index is then out of range.
         let state = PathBuf::from("/state/does/not/exist");
         let host = FakeHost::new();
         let err = resolve_instance(&state, &host, "1").expect_err("no instances -> out of range");
         assert!(format!("{err:#}").contains("index 1"));
+    }
+
+    #[test]
+    fn it_rejects_an_empty_selector_with_a_usage_error() {
+        // An empty arg must not resolve to the state root; it fails cleanly here.
+        let state = PathBuf::from("/state/cdata/katsuobushi");
+        let host = FakeHost::new();
+        let err = resolve_instance(&state, &host, "").expect_err("empty selector must fail");
+        assert!(format!("{err:#}").contains("required"));
+        // Nothing was probed through the seam — the guard short-circuits.
+        assert!(host.calls().is_empty());
     }
 }
