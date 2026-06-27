@@ -1,0 +1,57 @@
+---
+source: rust/katsuctl/src/sandbox/start.rs
+expression: "render(&spec, &plan(\"20260627-120000-4242\", false, Mode::Agent))"
+---
+#!/usr/bin/env bash
+set -euo pipefail
+
+# katsuctl sandbox start: set up and boot agent instance '20260627-120000-4242'
+mkdir -p "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242" "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
+chmod 700 "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
+chmod 700 "/state/katsuobushi"
+
+# Per-instance bare git mirror + seeded branch (the guest clones it and pushes back).
+/nix/store/git/bin/git clone --bare "/home/user/project" "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/sync.git" >/dev/null 2>&1
+/nix/store/git/bin/git -C "/home/user/project" push --quiet "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/sync.git" "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0:refs/heads/sandbox/20260627-120000-4242" --force
+chmod -R a+rwX "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/sync.git"
+
+# Snapshot the host Nix DB so the guest reuses host-built paths (non-fatal).
+hostdb="${NIX_STATE_DIR:-/nix/var/nix}/db/db.sqlite"
+/nix/store/sqlite/bin/sqlite3 "$hostdb" ".backup '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/.nix-db.sqlite.tmp'" 2>/dev/null && mv -f "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/.nix-db.sqlite.tmp" "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/nix-db.sqlite" || true
+
+# Stage declared untracked context (rsync --safe-links drops escaping symlinks).
+rm -rf "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/context"
+mkdir -p "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/context"
+[ -e "/home/user/project/dist/build.tar" ] && { mkdir -p "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/context/dist"; /nix/store/rsync/bin/rsync -a --safe-links "/home/user/project/dist/build.tar" "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/context/dist"/; } || true
+[ -e "/home/user/project/data/seed.json" ] && { mkdir -p "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/context/data"; /nix/store/rsync/bin/rsync -a --safe-links "/home/user/project/data/seed.json" "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/context/data"/; } || true
+
+# Declared secrets, staged as references — the value is re-read at runtime, never baked in.
+if [ ! -r "/run/host-secrets/extra" ]; then
+  echo "sandbox: required secret EXTRA_TOKEN not readable at /run/host-secrets/extra." >&2
+  exit 1
+fi
+install -m 0600 "/run/host-secrets/extra" "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/cred-EXTRA_TOKEN"
+export KATSU_CRED_EXTRA_TOKEN="/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/cred-EXTRA_TOKEN"
+
+# Ephemeral ssh keypair (private key stays in the runtime tmpfs; pubkey travels in the share).
+[ -f "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id" ] || /nix/store/openssh/bin/ssh-keygen -t ed25519 -N "" -f "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id" -q
+cp "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id.pub" "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/authorized_keys"
+
+# Per-instance launch environment for the microvm runner.
+export KATSU_STATE_DIR="/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
+export KATSU_SSH_PORT=22042
+export KATSU_VSOCK_CID=4242
+
+# Back each guest disk image from the persistent state dir via a runtime symlink.
+ln -sfn "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/rw-store.img" "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/rw-store.img"
+ln -sfn "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/nix-db.img" "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/nix-db.img"
+ln -sfn "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/scratch.img" "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/scratch.img"
+cd "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
+
+# Agent mode: detach a lingering VM (setsid) that outlives this script.
+setsid /nix/store/microvm/bin/microvm-run > "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/console.log" 2>&1 < /dev/null &
+vm=$!
+disown "$vm" 2>/dev/null || true
+echo "sandbox: agent instance '20260627-120000-4242' running (cid 4242)."
+echo "sandbox: prompt it with: sandbox:prompt 20260627-120000-4242 \"<text>\""
+exit 0

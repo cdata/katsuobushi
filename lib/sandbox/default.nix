@@ -206,6 +206,14 @@ let
     pname = "katsuobushi-sandbox-control";
     cargoExtraArgs = "--package katsuobushi-sandbox-control";
   };
+  # Host-side controller (design/katsuctl.md), built from the same workspace.
+  # `nix run .#sandbox` runs outside the devshell, where `katsuctl` is not on
+  # PATH, so apps.sandbox references this binary explicitly (and puts it on PATH
+  # so the emitted agent-start tail-call `exec katsuctl … prompt` resolves too).
+  katsuctlPkg = controlRust.buildCrate {
+    pname = "katsuctl";
+    cargoExtraArgs = "--package katsuctl";
+  };
 
   # vsock + control-socket constants. The guest server listens on AF_VSOCK; the
   # `report` command and server rendezvous on a guest-local unix socket under a
@@ -1757,7 +1765,16 @@ EOF
   menuCommands = {
     "sandbox:start" = {
       description = "Launch an agent sandbox";
-      command = "${sandboxRunner}/bin/sandbox \"$@\"";
+      # Business logic now lives in katsuctl (design/katsuctl.md §8): katsuctl
+      # makes every probe-dependent decision (naming, port/CID allocation, branch
+      # seed), writes instance.json, and emits a flat setup+boot recipe, printing
+      # only its path. This wrapper is the documented emit+exec form — a planning
+      # failure exits nonzero with no path, so the `exec` is reached only on a
+      # clean emit (design §8.1).
+      command = ''
+        script="$(katsuctl sandbox --config ${katsuctlSpec} start "$@")" || exit
+        exec ${pkgs.bash}/bin/bash "$script"
+      '';
     };
     "sandbox:prompt" = {
       description = "Send a prompt to an agent instance (auto-starting a paused one)";
@@ -1810,10 +1827,20 @@ EOF
   };
 in
 {
-  # `nix run .#sandbox` needs an app; lifecycle helpers are menu commands.
+  # `nix run .#sandbox` needs an app; lifecycle helpers are menu commands. Its
+  # program is the documented emit+exec wrapper around `katsuctl sandbox start`
+  # (design/katsuctl.md §8.1, §9 step 3): katsuctl makes every probe-dependent
+  # decision, writes instance.json, and prints the path of a flat setup+boot
+  # recipe; the wrapper `exec`s bash on it (a planning failure exits nonzero with
+  # no path, so the `exec` runs only on a clean emit). katsuctl is put on PATH so
+  # the emitted agent-start tail-call `exec katsuctl … prompt` resolves as well.
   apps.sandbox = {
     type = "app";
-    program = "${sandboxRunner}/bin/sandbox";
+    program = "${pkgs.writeShellScript "sandbox" ''
+      export PATH="${katsuctlPkg}/bin:$PATH"
+      script="$(katsuctl sandbox --config ${katsuctlSpec} start "$@")" || exit
+      exec ${pkgs.bash}/bin/bash "$script"
+    ''}";
     meta.description = "Launch an ephemeral Katsuobushi agent sandbox VM";
   };
 
