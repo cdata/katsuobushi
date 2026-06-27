@@ -13,6 +13,7 @@ pub mod host;
 pub mod output;
 mod prompt;
 pub mod qmp;
+pub mod resolve;
 pub mod spec;
 mod start;
 mod status;

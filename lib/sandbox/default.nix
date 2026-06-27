@@ -1897,13 +1897,10 @@ EOF
     };
     "sandbox:fetch" = {
       description = "Fetch a sandbox's branch into this repo";
+      # Business logic now lives in katsuctl (design/katsuctl.md §2.2); this
+      # wrapper just hands off, passing the Nix-rendered spec via --config.
       command = ''
-        ${instanceHelpers}
-        inst="''${1:-}"
-        [ -n "$inst" ] || { echo "usage: sandbox:fetch <instance|#>" >&2; exit 2; }
-        inst="$(_resolve_instance "$inst")" || exit 1
-        git fetch "${stateGlob}/$inst/sync.git" "sandbox/$inst:sandbox/$inst"
-        echo "fetched sandbox/$inst"
+        exec katsuctl sandbox --config ${katsuctlSpec} fetch "$@"
       '';
     };
     "sandbox:stop" = {
