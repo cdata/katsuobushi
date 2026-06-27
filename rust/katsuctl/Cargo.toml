@@ -20,3 +20,7 @@ serde_json.workspace = true
 # Output/UX foundation (design/katsuctl.md §13, issue #007): status tables + color.
 comfy-table.workspace = true
 owo-colors.workspace = true
+
+[dev-dependencies]
+# Golden snapshot tests for emitted start/attach scripts (design §7.2, issue #013).
+insta.workspace = true

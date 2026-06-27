@@ -26,3 +26,5 @@ clap = { version = "4", features = ["derive"] }
 # katsuctl output/UX: aligned status tables + terminal color (gated; see katsuctl §13).
 comfy-table = "7"
 owo-colors = "4"
+# Dev-only: golden snapshot tests for the emitted start/attach scripts (#013).
+insta = "1"
