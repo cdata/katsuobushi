@@ -1,0 +1,9 @@
+---
+source: rust/katsuctl/src/sandbox/attach.rs
+expression: "attach_recipe(key, 2222, \"agent\").render()"
+---
+#!/usr/bin/env bash
+set -euo pipefail
+
+# katsuctl sandbox attach: hand the terminal to ssh + tmux attach
+exec ssh -i /run/katsuobushi/katsuobushi-20260627-abc123/id -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null agent@127.0.0.1 -t 'TERM=xterm-256color tmux attach -t katsuobushi'

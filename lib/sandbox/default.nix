@@ -1913,52 +1913,14 @@ EOF
     };
     "sandbox:attach" = {
       description = "SSH in and attach to a running agent's tmux session";
+      # Business logic now lives in katsuctl (design/katsuctl.md §8): katsuctl
+      # does the running/has-session probes directly and emits a tiny terminal-
+      # handoff recipe, printing only its path. This wrapper is the documented
+      # emit+exec form — a planning failure exits nonzero with no path, so the
+      # `exec` is reached only on a clean emit (design §8.1).
       command = ''
-        ${instanceHelpers}
-        running() {
-          ${isRunning}
-        }
-        inst="''${1:-}"
-        [ -n "$inst" ] || { echo "usage: sandbox:attach <instance|#>" >&2; exit 2; }
-        inst="$(_resolve_instance "$inst")" || exit 1
-        d="${stateGlob}/$inst"
-        [ -d "$d" ] || { echo "no such instance: $inst" >&2; exit 1; }
-        if ! running "$inst"; then
-          echo "sandbox:attach: '$inst' is not running" >&2
-          exit 1
-        fi
-        portf="$d/ssh-port"
-        [ -r "$portf" ] || { echo "sandbox:attach: no ssh port recorded for '$inst'" >&2; exit 1; }
-        port="$(cat "$portf")"
-        _ssh() {
-          ssh -i "${runtimeGlob}/$inst/id" -p "$port" \
-            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -o LogLevel=ERROR ${agentUser}@127.0.0.1 "$@"
-        }
-        # Pre-check the agent's tmux session exists before allocating a PTY. A
-        # freshly launched VM needs ~30-60s to arm it, an interactive (non
-        # --agent) VM never has one, and a finished agent's session is gone.
-        # Without this guard we would drop the caller into a bare login shell —
-        # which greets with ~/README.md and then exits — i.e. the confusing
-        # "attached, then kicked out right after the README" symptom. `has-session`
-        # runs with no PTY so it stays silent on success (and skips the greeting,
-        # which is gated on an interactive terminal).
-        if ! _ssh 'tmux has-session -t katsuobushi' 2>/dev/null; then
-          echo "sandbox:attach: no live 'katsuobushi' tmux session in '$inst'." >&2
-          echo "  - if it just launched, give it ~30-60s to arm, then retry" >&2
-          echo "  - only --agent instances run one (check: sandbox:status $inst)" >&2
-          exit 1
-        fi
-        # TERM is set in the *remote* command environment rather than forwarded
-        # with ssh's SetEnv (which needs sshd's AcceptEnv): ghostty's default
-        # $TERM (xterm-ghostty) has no terminfo entry in the guest, so tmux aborts
-        # with "missing or unsuitable terminal" the instant it attaches — pin a
-        # universally-present entry instead. -t forces a PTY for the interactive
-        # client; tmux's alternate screen then hides the login greeting for the
-        # life of the session. Not `exec`'d: `_ssh` is a shell function, and
-        # `exec` only replaces the process with an external program (it would
-        # fail with "_ssh: not found"). The wrapping shell just waits on ssh.
-        _ssh -t 'TERM=xterm-256color tmux attach -t katsuobushi'
+        script="$(katsuctl sandbox --config ${katsuctlSpec} attach "$@")" || exit
+        exec ${pkgs.bash}/bin/bash "$script"
       '';
     };
   };
