@@ -10,6 +10,7 @@ use anyhow::Result;
 mod attach;
 mod fetch;
 mod prompt;
+pub mod qmp;
 mod start;
 mod status;
 mod stop;
