@@ -176,10 +176,9 @@
           workspaceRoot = ./.;
           projectId = "cdata/katsuobushi";
         };
-        # One crate, two binaries: the guest controller server
-        # (katsuobushi-sandbox-control) and the host client
-        # (katsuobushi-sandbox-prompt). The guest `report` tool is a shell app
-        # built inside lib.sandbox, not a Rust crate.
+        # The guest controller server (katsuobushi-sandbox-control). The host
+        # client was retired into `katsuctl sandbox prompt`; the guest `report`
+        # tool is a shell app built inside lib.sandbox, not a Rust crate.
         controlCrates.katsuobushi-sandbox-control = rust.buildCrate {
           pname = "katsuobushi-sandbox-control";
           cargoExtraArgs = "--package katsuobushi-sandbox-control";

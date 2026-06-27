@@ -8,6 +8,10 @@ description = "Host-side Katsuobushi sandbox controller (katsuctl <domain> <comm
 # src/main.rs, so no explicit [[bin]] is needed.
 
 [dependencies]
+# Shared wire types (Prompt/Report/GuestMessage/Status) for the vsock control
+# channel — the `prompt` subcommand streams these, so host and guest cannot
+# drift (design/katsuctl.md §3). Path dep on the in-workspace protocol crate.
+katsuobushi-protocol = { path = "../katsuobushi-protocol" }
 clap.workspace = true
 anyhow.workspace = true
 # Inherited now for the upcoming subcommands (design/katsuctl.md §12): tokio for

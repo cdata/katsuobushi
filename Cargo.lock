@@ -494,6 +494,7 @@ dependencies = [
  "clap",
  "comfy-table",
  "insta",
+ "katsuobushi-protocol",
  "owo-colors",
  "serde",
  "serde_json",

@@ -1,6 +1,6 @@
-//! Library half of `katsuobushi-sandbox-control`, consumed by both the guest
-//! server (`katsuobushi-sandbox-control`) and the host client
-//! (`katsuobushi-sandbox-prompt`) binaries in this crate.
+//! Library half of `katsuobushi-sandbox-control`, consumed by the guest server
+//! (`katsuobushi-sandbox-control`) binary in this crate. The host client was
+//! retired into `katsuctl sandbox prompt`.
 //!
 //! The shared wire types now live in the standalone [`katsuobushi_protocol`]
 //! crate so the future host (`katsuctl`) and the guest server can both depend

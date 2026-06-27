@@ -96,8 +96,7 @@ pub fn read(state_dir: &Path, name: &str) -> Result<Instance> {
 /// Parse + version-check `instance.json` bytes. Split out from [`read`] so the
 /// schema and skew checks are unit-testable without touching the filesystem.
 fn from_json_bytes(bytes: &[u8]) -> Result<Instance> {
-    let instance: Instance =
-        serde_json::from_slice(bytes).context("parsing instance.json")?;
+    let instance: Instance = serde_json::from_slice(bytes).context("parsing instance.json")?;
     if instance.instance_version != SUPPORTED_INSTANCE_VERSION {
         bail!(
             "instance.json version {}, this katsuctl supports {} — rebuild your devshell \
@@ -120,8 +119,11 @@ mod tests {
 
     impl TempDir {
         fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir()
-                .join(format!("katsuctl-instance-test-{}-{}", tag, std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "katsuctl-instance-test-{}-{}",
+                tag,
+                std::process::id()
+            ));
             // Clear any stale leftover from a previous crashed run, then create.
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).expect("create temp dir");
@@ -185,7 +187,11 @@ mod tests {
         let instance = agent_instance();
         write(dir.path(), &instance).expect("write should succeed");
         let expected = dir.path().join(&instance.name).join("instance.json");
-        assert!(expected.exists(), "instance.json missing at {}", expected.display());
+        assert!(
+            expected.exists(),
+            "instance.json missing at {}",
+            expected.display()
+        );
     }
 
     #[test]
@@ -227,7 +233,10 @@ mod tests {
         }"#;
         let err = from_json_bytes(json.as_bytes()).expect_err("deny_unknown_fields must fire");
         let msg = format!("{err:#}");
-        assert!(msg.contains("surpriseField"), "should name the field: {msg}");
+        assert!(
+            msg.contains("surpriseField"),
+            "should name the field: {msg}"
+        );
     }
 
     #[test]

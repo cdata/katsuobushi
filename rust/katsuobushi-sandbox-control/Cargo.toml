@@ -2,23 +2,19 @@
 name = "katsuobushi-sandbox-control"
 version.workspace = true
 edition = "2021"
-description = "Host↔guest sandbox controller for Katsuobushi agent mode: channel server + host client."
+description = "Guest-side sandbox controller for Katsuobushi agent mode: the rmcp/channel server."
 
-# Shared wire types live in the standalone `katsuobushi-protocol` crate; both
-# binaries depend on it, so the host and guest sides cannot drift.
+# Shared wire types live in the standalone `katsuobushi-protocol` crate, so the
+# host (`katsuctl`) and guest sides cannot drift.
 [lib]
 name = "katsuobushi_sandbox_control"
 path = "src/lib.rs"
 
-# Guest: the rmcp/channel controller server claude spawns over stdio.
+# Guest: the rmcp/channel controller server claude spawns over stdio. The host
+# client was retired into `katsuctl sandbox prompt`.
 [[bin]]
 name = "katsuobushi-sandbox-control"
 path = "src/bin/server.rs"
-
-# Host: the client backing `sandbox:prompt`.
-[[bin]]
-name = "katsuobushi-sandbox-prompt"
-path = "src/bin/prompt.rs"
 
 [dependencies]
 katsuobushi-protocol = { path = "../katsuobushi-protocol" }
@@ -28,4 +24,7 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+# Retained as a shared workspace dep so Cargo.lock stays in lockstep; the guest
+# server does not parse args today, but keeping the entry avoids a lock churn
+# unrelated to retiring the host client bin.
 clap.workspace = true

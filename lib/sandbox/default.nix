@@ -195,13 +195,13 @@ let
   #
   # Built reproducibly via lib.rust/crane from Katsuobushi's own workspace
   # source. The server + `report` binaries are baked into the guest; the host
-  # client backs the `sandbox:prompt` command. See design/sandbox-agent-mode.md.
+  # client now lives in `katsuctl sandbox prompt`. See design/sandbox-agent-mode.md.
   controlRust = rust {
     inherit pkgs;
     workspaceRoot = controlSrc;
     projectId = "cdata/katsuobushi";
   };
-  # One crate, two binaries: the guest controller server and the host client.
+  # Guest controller server (the host client was retired into katsuctl).
   controlPkg = controlRust.buildCrate {
     pname = "katsuobushi-sandbox-control";
     cargoExtraArgs = "--package katsuobushi-sandbox-control";
@@ -214,7 +214,6 @@ let
   controlSocketDir = "/run/katsuobushi/control";
   reportSocket = "${controlSocketDir}/report.sock";
   controlServerBin = "${controlPkg}/bin/katsuobushi-sandbox-control";
-  controlHostBin = "${controlPkg}/bin/katsuobushi-sandbox-prompt";
 
   # The agent's `report` command — a shell app, not a Rust binary. It just
   # writes one JSON line (the ReportLine wire shape) to the server's guest-local
@@ -1622,18 +1621,12 @@ let
         echo "sandbox: agent instance '$instance' running (cid $cid)."
 
         if [ "$have_prompt" = "yes" ]; then
-          echo "sandbox: waiting for the agent control channel..."
-          ready="no"
-          for _ in $(seq 1 180); do
-            if ${controlHostBin} --cid "$cid" --probe 2>/dev/null; then ready="yes"; break; fi
-            sleep 1
-          done
-          if [ "$ready" = "yes" ]; then
-            echo "sandbox: sending initial prompt"
-            ${controlHostBin} --cid "$cid" "$prompt" || true
-          else
-            echo "sandbox: control channel did not come up in time; send later with: sandbox:prompt $instance \"...\"" >&2
-          fi
+          # The initial-prompt delivery (readiness-wait + vsock streaming) now
+          # lives in `katsuctl sandbox prompt` (design/katsuctl.md §11), which the
+          # native `start` (#015) will tail-call. Until then this shell runner
+          # just points at it — `sandbox:prompt` bakes in the boot-readiness wait,
+          # so deliver the first turn with it once the channel arms.
+          echo "sandbox: deliver the first turn with: sandbox:prompt $instance \"$prompt\"" >&2
         fi
 
         echo "sandbox: prompt it:  sandbox:prompt $instance \"<text>\""
@@ -1768,44 +1761,12 @@ EOF
     };
     "sandbox:prompt" = {
       description = "Send a prompt to an agent instance (auto-starting a paused one)";
+      # Business logic now lives in katsuctl (design/katsuctl.md §11): instance
+      # resolution, the QMP liveness probe, the readiness-wait, vsock streaming,
+      # and the paused-named auto-restart. This wrapper just hands off, passing
+      # the Nix-rendered spec via --config.
       command = ''
-        ${instanceHelpers}
-        running() {
-          ${isRunning}
-        }
-        inst="''${1:-}"
-        shift || true
-        text="''${*:-}"
-        if [ -z "$inst" ] || [ -z "$text" ]; then
-          echo "usage: sandbox:prompt <instance|#> \"<text>\"" >&2
-          exit 2
-        fi
-        inst="$(_resolve_instance "$inst")" || exit 1
-        cidf="${stateGlob}/$inst/vsock-cid"
-        if [ ! -r "$cidf" ]; then
-          echo "sandbox:prompt: no control channel for '$inst' (is it an --agent instance, and running?)" >&2
-          exit 1
-        fi
-        # A paused instance (stopped but kept — i.e. named) still has its state
-        # dir, and so this CID file, on disk; but the VM behind the channel is
-        # powered off, so a direct prompt would just hang against a dead vsock.
-        # Auto-start it instead: `sandbox:start --name <full> --prompt` resumes
-        # the instance from its branch, waits for the channel to arm, and
-        # delivers this text as the first turn of the fresh session. `exec`
-        # hands our stdout/exit status to the runner so the caller sees the same
-        # streamed reports a running poke would give. NB the live conversation
-        # does NOT survive a pause (the VM's RAM is gone) — only the branch
-        # does — so the resumed agent reads its committed work, not the prior
-        # in-VM context; phrase the prompt so a fresh session can act on it.
-        if ! running "$inst"; then
-          if [ -e "${stateGlob}/$inst/.named" ]; then
-            echo "sandbox:prompt: '$inst' is paused — restarting it to deliver this turn (boot + arm ~30-60s)..." >&2
-            exec ${sandboxRunner}/bin/sandbox --agent --name "$inst" --prompt "$text"
-          fi
-          echo "sandbox:prompt: '$inst' is not running and isn't a kept instance, so it can't be resumed." >&2
-          exit 1
-        fi
-        ${controlHostBin} --cid "$(cat "$cidf")" "$text"
+        exec katsuctl sandbox --config ${katsuctlSpec} prompt "$@"
       '';
     };
     "sandbox:status" = {
