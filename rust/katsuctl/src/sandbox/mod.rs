@@ -11,6 +11,7 @@ mod attach;
 mod fetch;
 mod prompt;
 pub mod qmp;
+pub mod spec;
 mod start;
 mod status;
 mod stop;
