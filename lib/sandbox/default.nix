@@ -1802,97 +1802,12 @@ EOF
     };
     "sandbox:status" = {
       description = "List instances, or detail a single instance";
+      # Business logic now lives in katsuctl (design/katsuctl.md §2.2, §13); this
+      # wrapper just hands off, passing the Nix-rendered spec via --config. A bare
+      # `status` still doubles as the launch prerequisite gate (nonzero exit iff a
+      # secret is missing or /dev/vhost-vsock is absent).
       command = ''
-                ${instanceHelpers}
-                running() {
-                  ${isRunning}
-                }
-                root="${stateGlob}"
-                inst="''${1:-}"
-
-                # No instance given: first run the environment sanity check — this
-                # doubles as the prerequisite test, so a clean run (no MISSING rows,
-                # zero exit) means a launch has what it needs. We build the report in
-                # a subshell so we can suppress it entirely when everything is fine:
-                # the env block (including the "ok" context rows) is printed only when
-                # there is at least one problem to act on. The subshell's exit status
-                # carries the problem count back out. Then summarize every instance
-                # with its live VM state and whether it persists across stops.
-                if [ -z "$inst" ]; then
-                  # Capture the report in a subshell, carrying the problem count out
-                  # via its exit status. The `|| errs=$?` is load-bearing: these menu
-                  # commands run under `writeShellApplication`'s `set -euo pipefail`
-                  # with `inherit_errexit`, where a command substitution that exits
-                  # non-zero aborts the whole assignment — so without the `||` a
-                  # missing secret would kill the command before it could report the
-                  # problem or list instances.
-                  errs=0
-                  env_report="$(
-                    errs=0
-                    ${statusSecretChecks}
-                    if [ -e /dev/vhost-vsock ]; then
-                      printf '  %-${toString envLabelWidth}s  %s\n' "vhost-vsock" "ok"
-                    else
-                      printf '  %-${toString envLabelWidth}s  %s\n' "vhost-vsock" "MISSING - agent mode needs it (sudo modprobe vhost_vsock)"
-                      errs=$((errs + 1))
-                    fi
-                    exit "$errs"
-                  )" || errs=$?
-                  if [ "$errs" -gt 0 ]; then
-                    echo "environment:"
-                    printf '%s\n' "$env_report"
-                    echo "  ($errs problem(s) above - resolve before launching)" >&2
-                    echo
-                  fi
-
-                  # Enumerate through `_list_instances` so the leading index
-                  # column matches the number `_resolve_instance` (and thus every
-                  # other command) accepts. The counter lives inside the pipeline
-                  # subshell, which is fine — it is only read to print each row.
-                  rows="$(
-                    n=0
-                    _list_instances | while IFS= read -r i; do
-                      [ -n "$i" ] || continue
-                      n=$((n + 1))
-                      if running "$i"; then s="running"; else s="stopped"; fi
-                      if [ -e "$root/$i/.named" ]; then p="named"; else p="ephemeral"; fi
-                      printf '%s\t%s\t%s\t%s\n' "$n" "$i" "$s" "$p"
-                    done
-                  )"
-                  # "No active sandboxes" means the list is empty - nothing to inspect,
-                  # restart, or remove. If there are any instances (running, or stopped
-                  # leftovers / persistent named ones), list them all instead.
-                  if [ -z "$rows" ]; then
-                    echo "No active sandboxes"
-                  else
-                    { printf '#\tINSTANCE\tSTATE\tPERSIST\n'; printf '%s\n' "$rows"; } | column -t
-                  fi
-                  # Non-zero iff the environment preflight found a problem, so the
-                  # exit status alone is a usable prerequisite gate.
-                  exit "$errs"
-                fi
-
-                # One instance: details, derived live where possible. Accept a
-                # name or an index from the listing above.
-                inst="$(_resolve_instance "$inst")" || exit 1
-                d="$root/$inst"
-                [ -d "$d" ] || { echo "no such instance: $inst" >&2; exit 1; }
-                if running "$inst"; then state="running"; else state="stopped"; fi
-                if [ -e "$d/.named" ]; then persist="named (persistent)"; else persist="ephemeral"; fi
-                echo "instance:   $inst"
-                echo "state:      $state"
-                echo "persistent: $persist"
-                if [ "$state" = "running" ] && [ -f "$d/ssh-port" ]; then
-                  echo "ssh:        ssh -i ${runtimeGlob}/$inst/id -p $(cat "$d/ssh-port") -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${agentUser}@127.0.0.1"
-                  echo "attach:     sandbox:attach $inst (ssh in + attach the agent's tmux session)"
-                fi
-                if git -C "$d/sync.git" rev-parse --verify "refs/heads/sandbox/$inst" >/dev/null 2>&1; then
-                  echo "branch:     sandbox/$inst (fetch: sandbox:fetch $inst)"
-                fi
-                if [ -r "$d/vsock-cid" ]; then
-                  echo "agent:      cid $(cat "$d/vsock-cid") (prompt: sandbox:prompt $inst \"...\")"
-                fi
-                echo "console:    $d/console.log"
+        exec katsuctl sandbox --config ${katsuctlSpec} status "$@"
       '';
     };
     "sandbox:fetch" = {

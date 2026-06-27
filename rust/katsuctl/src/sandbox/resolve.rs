@@ -68,7 +68,12 @@ fn resolve_index(state_glob: &Path, host: &impl Host, arg: &str) -> Result<Strin
 /// Routed through the [`Host`] seam (rather than `std::fs` directly) so index
 /// resolution is `FakeHost`-testable. A missing root is an empty list, not an
 /// error (matching the shell's `[ -d ] || return 0`).
-fn list_instances(state_glob: &Path, host: &impl Host) -> Result<Vec<String>> {
+///
+/// Public so `sandbox status` can number its listing in exactly the order index
+/// resolution counts against — one shared enumeration keeps the `#` printed by
+/// `status` and the index every other command accepts denoting the same instance
+/// (design §13; the `_list_instances`/`_resolve_instance` parity, :1670-1711).
+pub fn list_instances(state_glob: &Path, host: &impl Host) -> Result<Vec<String>> {
     let mut names = match host.list_dir(state_glob) {
         Ok(names) => names,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
