@@ -9,6 +9,7 @@ use anyhow::Result;
 
 mod attach;
 mod fetch;
+pub mod host;
 mod prompt;
 pub mod qmp;
 pub mod spec;

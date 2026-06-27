@@ -14,5 +14,6 @@ anyhow.workspace = true
 # the async vsock/QMP paths (prompt/status/stop), serde for spec/instance
 # (de)serialization. The dispatch stubs in this scaffold do not use them yet.
 tokio.workspace = true
+tokio-vsock.workspace = true
 serde.workspace = true
 serde_json.workspace = true
