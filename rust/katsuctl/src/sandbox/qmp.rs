@@ -19,7 +19,8 @@
 //! the API is unused (but tested) until then.
 #![allow(dead_code)]
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -29,6 +30,11 @@ use anyhow::{Context, Result};
 /// Bound on the connect/greeting wait (mirrors socat's `-T1`). A live qemu
 /// answers instantly; this only caps pathological cases (silent listener).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Cap on draining qemu's QMP replies after sending `quit` — qemu normally
+/// closes the socket within a moment of exiting; this only bounds a wedged
+/// monitor so `quit` can't hang.
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The two newline-delimited JSON commands of the shutdown handshake: QMP
 /// rejects any command before capability negotiation, so `qmp_capabilities`
@@ -61,6 +67,15 @@ pub fn quit(sock_path: &Path) -> Result<()> {
         .write_all(QUIT_HANDSHAKE)
         .context("sending QMP quit handshake")?;
     stream.flush().context("flushing QMP quit handshake")?;
+    // Half-close the write side, then drain qemu's replies to EOF. qemu processes
+    // `quit` and exits, which closes the monitor socket — so this blocks just long
+    // enough for the shutdown to actually take effect rather than dropping the
+    // connection before qemu has read+acted on the command (the old shell held the
+    // socket open with `sleep 1`). The read timeout bounds a wedged monitor.
+    let _ = stream.shutdown(Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(SHUTDOWN_DRAIN_TIMEOUT));
+    let mut drained = Vec::new();
+    let _ = stream.read_to_end(&mut drained);
     Ok(())
 }
 
