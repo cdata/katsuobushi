@@ -8,6 +8,41 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.2.0
+
+### Host sandbox control is now `katsuctl` — `sandbox:*` behavior is unchanged
+
+The host side of the sandbox (`sandbox:start` / `sandbox:prompt` /
+`sandbox:status` / `sandbox:fetch` / `sandbox:stop` / `sandbox:attach`) is
+reimplemented as a tested Rust binary, `katsuctl`, behind the **same** devshell
+command names. **No action for devshell users** — the command names and behavior
+are unchanged, verified end-to-end on a real boot. The win is internal: the host
+logic now lives in compiled, tested Rust instead of an untested shell pile.
+
+### Breaking: the three in-tree Rust crates are renamed
+
+Only relevant if your flake references these crates or their build outputs
+directly:
+
+- `katsuctl` → **`katsuobushi-controller`** — still produces the `katsuctl`
+  binary, and `nix build .#katsuctl` is unchanged.
+- `katsuobushi-protocol` → **`katsuobushi-sandbox-protocol`**.
+- `katsuobushi-sandbox-control` → **`katsuobushi-sandbox-guest`** — its guest
+  controller server binary (and the agent-mode MCP/channel server name) renames
+  with it; the flake output is now `.#katsuobushi-sandbox-guest`.
+
+If you build a specific crate via `nix build .#<crate>`, update the attribute to
+the new name (except `.#katsuctl`, which is unchanged).
+
+### `sandbox:status` no longer lists the SSH and CID columns
+
+The list view (`sandbox:status` with no argument) drops the `SSH` (ssh port) and
+`CID` (vsock CID) columns — they are plumbing you do not type by hand. Both
+remain in the **per-instance detail view** (`sandbox:status <name>`), alongside
+the ready-to-run ssh and `sandbox:prompt` commands, and in the `--json` output.
+Tooling that parsed those two columns from the list table should read the detail
+view or `--json` instead.
+
 ## 0.1.10
 
 ### `lib.sandbox`: writable scratch is now disk-backed — `storeOverlaySize` is removed

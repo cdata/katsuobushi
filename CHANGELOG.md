@@ -5,6 +5,50 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.2.0] — 2026-06-27
+
+The host side of the sandbox is rewritten from an unmaintainable pile of untested
+shell into a compiled, tested Rust binary, **`katsuctl`**. From a devshell user's
+perspective this is a no-op — `sandbox:start`, `sandbox:prompt`, `sandbox:status`,
+`sandbox:fetch`, `sandbox:stop`, and `sandbox:attach` keep their names and
+behavior — but their logic now lives in `katsuctl <domain> <command>` with unit,
+golden-snapshot, and seam-level tests, verified end-to-end against a real KVM
+boot. The three in-tree Rust crates are also renamed for clarity (breaking only
+for anyone depending on them directly — see [`MIGRATING.md`](MIGRATING.md#020)).
+
+### Added
+
+- **`katsuctl` host-side controller** (`katsuctl sandbox <command>`) absorbing all
+  the sandbox host logic: instance naming / ssh-port / vsock-CID / seed-commit
+  decisions made in tested Rust, a Nix-rendered instance spec passed via
+  `--config`, a native QMP client (liveness + quit), a consolidated
+  `instance.json` per-instance metadata file, an emit-script harness for the
+  `start`/`attach` terminal hand-offs, and dual human/`--json` output with strict
+  color gating. Built reproducibly via the flake (`nix build .#katsuctl`).
+
+### Changed
+
+- **The six `sandbox:*` devshell commands are now thin `katsuctl` wrappers** —
+  same names and behavior, but every decision is made in tested Rust and the
+  shell that remains is a flat, generated recipe. Secrets are emitted as
+  references, never values, and the start/attach recipes are golden-snapshotted.
+- **Rust crates renamed** (see [`MIGRATING.md`](MIGRATING.md#020)): the host
+  controller crate `katsuctl` → `katsuobushi-controller` (it still ships the
+  `katsuctl` binary), `katsuobushi-protocol` → `katsuobushi-sandbox-protocol`,
+  and `katsuobushi-sandbox-control` → `katsuobushi-sandbox-guest` (its guest
+  channel-server binary renames with it).
+- **`sandbox:status`** gains an aligned, color-coded table and a `--json` mode.
+  The list shows `# / INSTANCE / STATE / MODE / PERSIST`; the ssh port and vsock
+  CID moved to the per-instance detail view (`sandbox:status <name>`). A bare
+  `status` doubles as the launch prerequisite gate — nonzero exit if a declared
+  secret or `/dev/vhost-vsock` is missing.
+
+### Removed
+
+- **The old host-side shell** — `sandboxRunner`, the `isRunning` QMP probe,
+  `instanceHelpers`, and `statusSecretChecks` — and the standalone
+  `katsuobushi-sandbox-prompt` host-client binary, all replaced by `katsuctl`.
+
 ## [0.1.10] — 2026-06-26
 
 A sandbox release with one consumer-facing breaking change: the guest's writable
