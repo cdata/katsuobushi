@@ -498,6 +498,14 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     ));
     r.line(format!("chmod 700 {}", dq(&runtime_root)));
     r.line(format!("chmod 700 {}", dq(&state_base)));
+    // Open the per-instance share root itself (non-recursive, so the large
+    // image files keep their perms) so the agent-run guest controller can
+    // create entries here — notably turn-state.json (design sandbox-liveness
+    // §6.3). The 9p share is mapped-xattr (files the guest creates are recorded
+    // agent-owned), but a host-created root-owned dir is otherwise unwritable by
+    // the agent; the parent state_base is clamped 700, so this only widens
+    // within the per-instance dir. Mirrors the sync.git push-perm chmod below.
+    r.line(format!("chmod a+rwX {}", dq(&state_root)));
 
     // ---- bare mirror (idempotent) + branch seed + push-perm chmod (:1372-1468) ----
     r.blank().comment(

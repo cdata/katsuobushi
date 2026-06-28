@@ -9,6 +9,7 @@ set -euo pipefail
 mkdir -p "/state/katsuobushi/cdata/katsuobushi/myfeature-0badf00d" "/run/katsuobushi/cdata/katsuobushi/myfeature-0badf00d"
 chmod 700 "/run/katsuobushi/cdata/katsuobushi/myfeature-0badf00d"
 chmod 700 "/state/katsuobushi"
+chmod a+rwX "/state/katsuobushi/cdata/katsuobushi/myfeature-0badf00d"
 
 # Per-instance bare git mirror + seeded branch (the guest clones it and pushes back).
 # resuming named instance from its existing branch (existingbranch789)

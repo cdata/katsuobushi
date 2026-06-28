@@ -9,6 +9,7 @@ set -euo pipefail
 mkdir -p "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242" "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
 chmod 700 "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
 chmod 700 "/state/katsuobushi"
+chmod a+rwX "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
 
 # Per-instance bare git mirror + seeded branch (the guest clones it and pushes back).
 /nix/store/git/bin/git clone --bare "/home/user/project" "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/sync.git" >/dev/null 2>&1
