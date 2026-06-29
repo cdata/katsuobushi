@@ -460,6 +460,11 @@ let
       sleep 2
       if tmux capture-pane -t katsuobushi -p 2>/dev/null | tr -d ' ' | grep -qi 'forlocaldevelopment'; then
         tmux send-keys -t katsuobushi Enter
+        # Probe-independent SessionReady arming signal (§5, §7.1): the dev-
+        # channels prompt has just been dismissed, so the session is live —
+        # emit session-ready directly rather than relying solely on the
+        # SessionStart hook. Best-effort; never wedge boot on the report socket.
+        ${reportApp}/bin/report hook session-ready || true
         break
       fi
     done
@@ -869,9 +874,57 @@ let
       #     This key skips that prompt. NB: the legacy ~/.claude.json
       #     `bypassPermissionsModeAccepted` key does NOT work — Claude migrates
       #     and strips it on startup. (Both validated 2026-06-23.)
+      #
+      # The `hooks` block wires Claude Code's lifecycle events to the `report
+      # hook <event>` subcommand by absolute store path (PATH-independent), so
+      # the dormant session emits real liveness lines into the controller server
+      # (design sandbox-liveness.md §5; the server consumes them via
+      # GuestLocalLine and drives the turn-state machine, #025). All three live in
+      # the managed tier because the #022 probe (real boot 2026-06-28, §11)
+      # confirmed managed-settings hooks ARE honored and that Stop, SessionStart,
+      # and UserPromptSubmit all fire for injected channel turns — so no
+      # degradation/fallback path is active:
+      #   * Stop             → turn-ended    (fires once at turn end)
+      #   * SessionStart     → session-ready (fires once at claude startup)
+      #   * UserPromptSubmit → turn-accepted (fires when a channel turn begins)
+      # Schema: each event maps to a list of { hooks = [ { type; command; } ]; }
+      # groups; Stop/SessionStart/UserPromptSubmit take no matcher (only tool
+      # hooks do).
       environment.etc."claude-code/managed-settings.json".text = builtins.toJSON {
         channelsEnabled = true;
         skipDangerousModePermissionPrompt = true;
+        hooks = {
+          Stop = [
+            {
+              hooks = [
+                {
+                  type = "command";
+                  command = "${reportApp}/bin/report hook turn-ended";
+                }
+              ];
+            }
+          ];
+          SessionStart = [
+            {
+              hooks = [
+                {
+                  type = "command";
+                  command = "${reportApp}/bin/report hook session-ready";
+                }
+              ];
+            }
+          ];
+          UserPromptSubmit = [
+            {
+              hooks = [
+                {
+                  type = "command";
+                  command = "${reportApp}/bin/report hook turn-accepted";
+                }
+              ];
+            }
+          ];
+        };
       };
 
       # nix-daemon downloads via the proxy too, so substituters are reachable
