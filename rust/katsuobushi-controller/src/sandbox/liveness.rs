@@ -93,6 +93,187 @@ impl Liveness {
     }
 }
 
+impl Liveness {
+    /// Read the host-authored record *for `status`* (design §9, §30/#030): unlike
+    /// [`Liveness::load`] — which self-heals a corrupt/missing file to [`Default`]
+    /// for the writer — this returns `None` when the file is missing, unreadable,
+    /// unparseable, or version-skewed, so `status` can tell "no transport record
+    /// yet" apart from "a real, fresh stream". Advisory (§15): a degraded read is
+    /// never an error, it just drops the transport half of the liveness line.
+    pub fn read(host: &impl Host, path: &Path) -> Option<Self> {
+        let bytes = host.read(path).ok()?;
+        let liveness: Self = serde_json::from_slice(&bytes).ok()?;
+        (liveness.liveness_version == SUPPORTED_LIVENESS_VERSION).then_some(liveness)
+    }
+}
+
+/// The `turn-state.json` schema version this build reads (design §6.3, §17).
+pub const SUPPORTED_TURN_STATE_VERSION: u32 = 1;
+
+/// The lifecycle phase persisted to `turn-state.json` (§6.3, §17), mirroring the
+/// guest's authoritative state machine: `in-flight` on inject, `ended-ok` on a
+/// terminal report, `ended-unreported` when the grace window closes with no
+/// terminal report (the §6.2 verdict), `idle` between turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Phase {
+    Idle,
+    InFlight,
+    EndedOk,
+    EndedUnreported,
+}
+
+impl Phase {
+    /// The wire/render token for this phase (`status`'s liveness line shows it
+    /// verbatim, so it doubles as the operator-facing surfacing of §6.2's
+    /// "stopped without reporting").
+    pub fn label(self) -> &'static str {
+        match self {
+            Phase::Idle => "idle",
+            Phase::InFlight => "in-flight",
+            Phase::EndedOk => "ended-ok",
+            Phase::EndedUnreported => "ended-unreported",
+        }
+    }
+
+    /// Whether the turn has finished (clean or unreported) — its age is measured
+    /// from `endedAt`.
+    pub fn is_ended(self) -> bool {
+        matches!(self, Phase::EndedOk | Phase::EndedUnreported)
+    }
+
+    /// Whether a turn is still in flight — its age is measured from
+    /// `lastActivityAt`, and a stale value is how the never-`Stop` hang (§6.2/§8)
+    /// becomes visible out-of-band.
+    pub fn is_in_flight(self) -> bool {
+        matches!(self, Phase::InFlight)
+    }
+}
+
+/// The guest-authored, read-only `turn-state.json` record (design §6.3, §17):
+/// authoritative for turn/agent state and written to the share on every
+/// transition, so `status` reads it out-of-band (no connection needed). The host
+/// only ever *reads* it (#027 owns the host-written [`Liveness`] writer); the
+/// reader is forward-compatible (no `deny_unknown_fields`) so a newer guest can
+/// add fields without breaking an older host's degraded read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnState {
+    /// Schema version (`= SUPPORTED_TURN_STATE_VERSION`).
+    pub turn_state_version: u32,
+    /// The turn this record describes; `None` while `idle` (no turn yet).
+    #[serde(default)]
+    pub turn_id: Option<u64>,
+    /// The lifecycle phase.
+    pub phase: Phase,
+    /// RFC3339 time the first activity was seen (`None` until accepted).
+    #[serde(default)]
+    pub accepted_at: Option<String>,
+    /// RFC3339 time the turn ended (`None` until an ended phase).
+    #[serde(default)]
+    pub ended_at: Option<String>,
+    /// RFC3339 time of the last report/hook (bumped throttled to ≤1/s); empty
+    /// before any activity.
+    #[serde(default)]
+    pub last_activity_at: String,
+}
+
+impl Default for TurnState {
+    fn default() -> Self {
+        Self {
+            turn_state_version: SUPPORTED_TURN_STATE_VERSION,
+            turn_id: None,
+            phase: Phase::Idle,
+            accepted_at: None,
+            ended_at: None,
+            last_activity_at: String::new(),
+        }
+    }
+}
+
+impl TurnState {
+    /// Read the guest-authored record through the [`Host`] seam, returning `None`
+    /// when the file is missing, unreadable, unparseable, or version-skewed.
+    /// Advisory (§15): a degraded read is never an error — `status` simply
+    /// degrades to today's connection-derived behavior.
+    pub fn read(host: &impl Host, path: &Path) -> Option<Self> {
+        let bytes = host.read(path).ok()?;
+        let state: Self = serde_json::from_slice(&bytes).ok()?;
+        (state.turn_state_version == SUPPORTED_TURN_STATE_VERSION).then_some(state)
+    }
+}
+
+/// Parse the exact RFC3339 shape both records use — `YYYY-MM-DDTHH:MM:SSZ`, UTC,
+/// second precision (the `date -u +%Y-%m-%dT%H:%M:%SZ` the host writes and the
+/// guest's matching clock) — into Unix seconds, with **no** `chrono` dependency
+/// (the sandbox has no crates.io access). Anything not matching that shape (a
+/// fractional/offset form, an empty `lastActivityAt`, garbage) returns `None`, so
+/// the age simply isn't rendered — advisory, never an error.
+pub fn parse_rfc3339(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    // Strict fixed-width layout: 19 chars + 'Z'.
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
+    }
+    let num = |lo: usize, hi: usize| -> Option<i64> {
+        let mut v: i64 = 0;
+        for &c in &b[lo..hi] {
+            if !c.is_ascii_digit() {
+                return None;
+            }
+            v = v * 10 + i64::from(c - b'0');
+        }
+        Some(v)
+    };
+    let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (h, mi, s) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || s > 60 {
+        return None;
+    }
+    Some(civil_to_unix(y, mo, d) * 86_400 + h * 3_600 + mi * 60 + s)
+}
+
+/// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's
+/// `days_from_civil`), so [`parse_rfc3339`] needs no calendar crate.
+fn civil_to_unix(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// A compact "how long ago" token (`4s`, `9m`, `2h`, `3d`) for `now - then`,
+/// clamped at zero so a little host/guest clock skew reads as `0s` rather than a
+/// negative age. The caller appends `" ago"`.
+pub fn humanize_ago(now: i64, then: i64) -> String {
+    let d = (now - then).max(0);
+    if d < 60 {
+        format!("{d}s")
+    } else if d < 3_600 {
+        format!("{}m", d / 60)
+    } else if d < 86_400 {
+        format!("{}h", d / 3_600)
+    } else {
+        format!("{}d", d / 86_400)
+    }
+}
+
+/// The current time as Unix seconds, via the host clock seam ([`now_rfc3339`]),
+/// for `status` to take liveness ages against. `None` on any clock-seam failure
+/// (advisory: the line then renders phases without ages).
+pub fn now_unix(host: &impl Host) -> Option<i64> {
+    parse_rfc3339(&now_rfc3339(host).ok()?)
+}
+
 /// Allocate the next monotonic `turn_id`, persisting the bump in `liveness.json`
 /// through the [`Host`] seam (design §7.2 / §9). The id handed out is the current
 /// `nextTurnId` (default 1); `nextTurnId` is incremented and written back, so the
@@ -291,5 +472,162 @@ mod tests {
         let host = FakeHost::new(); // default run → empty stdout
         let err = now_rfc3339(&host).expect_err("empty timestamp must error");
         assert!(format!("{err:#}").contains("no timestamp"), "{err:#}");
+    }
+
+    // ---- the guest-authored turn-state reader (#030) ----
+
+    const TURN_STATE: &str = "/state/cdata/katsuobushi/inst-1/turn-state.json";
+
+    fn turn_state_path() -> PathBuf {
+        PathBuf::from(TURN_STATE)
+    }
+
+    /// A guest-shaped `turn-state.json` payload — exactly the bytes the guest's
+    /// server writes (§17), so the reader is tested against the real wire shape.
+    fn turn_state_bytes(phase: &str, extra: &str) -> Vec<u8> {
+        format!(
+            r#"{{"turnStateVersion":1,"turnId":3,"phase":"{phase}",{extra}"lastActivityAt":"2026-06-28T12:00:00Z"}}"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn it_reads_an_in_flight_turn_state_through_the_seam() {
+        let mut host = FakeHost::new();
+        host.push_read(Ok(turn_state_bytes(
+            "in-flight",
+            r#""acceptedAt":"2026-06-28T11:50:00Z","endedAt":null,"#,
+        )));
+        let ts = TurnState::read(&host, &turn_state_path()).expect("a present record reads");
+        assert_eq!(ts.phase, Phase::InFlight);
+        assert_eq!(ts.turn_id, Some(3));
+        assert_eq!(ts.accepted_at.as_deref(), Some("2026-06-28T11:50:00Z"));
+        assert_eq!(ts.last_activity_at, "2026-06-28T12:00:00Z");
+        // The read goes through the seam at the requested path.
+        assert!(matches!(&host.calls()[0], Call::Read(p) if p == &turn_state_path()));
+    }
+
+    #[test]
+    fn it_reads_the_ended_unreported_phase() {
+        let mut host = FakeHost::new();
+        host.push_read(Ok(turn_state_bytes(
+            "ended-unreported",
+            r#""acceptedAt":"2026-06-28T11:50:00Z","endedAt":"2026-06-28T11:55:00Z","#,
+        )));
+        let ts = TurnState::read(&host, &turn_state_path()).expect("reads");
+        assert_eq!(ts.phase, Phase::EndedUnreported);
+        assert_eq!(ts.ended_at.as_deref(), Some("2026-06-28T11:55:00Z"));
+    }
+
+    #[test]
+    fn it_returns_none_for_a_missing_turn_state_file() {
+        // No scripted read → NotFound → advisory None (degrade, never an error).
+        let host = FakeHost::new();
+        assert!(TurnState::read(&host, &turn_state_path()).is_none());
+    }
+
+    #[test]
+    fn it_returns_none_for_an_unparseable_turn_state_file() {
+        let mut host = FakeHost::new();
+        host.push_read(Ok(b"{ not json".to_vec()));
+        assert!(TurnState::read(&host, &turn_state_path()).is_none());
+    }
+
+    #[test]
+    fn it_returns_none_for_a_version_skewed_turn_state_file() {
+        // A newer/older schema version degrades rather than mis-parsing (§15).
+        let mut host = FakeHost::new();
+        host.push_read(Ok(
+            br#"{"turnStateVersion":2,"phase":"idle","lastActivityAt":""}"#.to_vec(),
+        ));
+        assert!(TurnState::read(&host, &turn_state_path()).is_none());
+    }
+
+    #[test]
+    fn it_tolerates_unknown_forward_compatible_fields() {
+        // A newer guest may add fields; an older host must still read what it knows.
+        let mut host = FakeHost::new();
+        host.push_read(Ok(
+            br#"{"turnStateVersion":1,"phase":"idle","lastActivityAt":"","futureField":7}"#
+                .to_vec(),
+        ));
+        let ts = TurnState::read(&host, &turn_state_path()).expect("forward-compatible read");
+        assert_eq!(ts.phase, Phase::Idle);
+    }
+
+    // ---- the status-facing liveness reader (#030) ----
+
+    #[test]
+    fn it_reads_liveness_for_status_when_fresh() {
+        let mut host = FakeHost::new();
+        host.push_read(Ok(serde_json::to_vec(&Liveness {
+            next_turn_id: 4,
+            last_heartbeat_at: Some("2026-06-28T12:00:00Z".to_string()),
+            stream_active: true,
+            ..Liveness::default()
+        })
+        .unwrap()));
+        let lv = Liveness::read(&host, &path()).expect("a present record reads");
+        assert!(lv.stream_active);
+        assert_eq!(
+            lv.last_heartbeat_at.as_deref(),
+            Some("2026-06-28T12:00:00Z")
+        );
+    }
+
+    #[test]
+    fn it_returns_none_reading_a_missing_or_corrupt_liveness_for_status() {
+        // Unlike `load` (self-heals to default for the writer), `read` degrades to
+        // None so `status` can distinguish "no transport record" from a live one.
+        let host = FakeHost::new();
+        assert!(Liveness::read(&host, &path()).is_none(), "missing → None");
+        let mut host = FakeHost::new();
+        host.push_read(Ok(b"{ not json".to_vec()));
+        assert!(Liveness::read(&host, &path()).is_none(), "corrupt → None");
+    }
+
+    // ---- RFC3339 parse + age formatting (pure) ----
+
+    #[test]
+    fn it_parses_the_rfc3339_shape_both_records_use() {
+        // 2026-06-28T12:00:00Z — cross-checked against a known Unix instant.
+        assert_eq!(parse_rfc3339("2026-06-28T12:00:00Z"), Some(1_782_648_000));
+        // The epoch itself.
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+    }
+
+    #[test]
+    fn it_rejects_malformed_or_empty_timestamps() {
+        for bad in [
+            "",                       // empty lastActivityAt before any activity
+            "2026-06-28",             // date only
+            "2026-06-28T12:00:00",    // missing Z
+            "2026-06-28T12:00:00.5Z", // fractional seconds (different shape)
+            "2026-13-28T12:00:00Z",   // month out of range
+            "not-a-time",
+        ] {
+            assert!(parse_rfc3339(bad).is_none(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn it_humanizes_an_age_into_a_compact_token() {
+        let now = parse_rfc3339("2026-06-28T12:00:00Z").unwrap();
+        assert_eq!(humanize_ago(now, now - 4), "4s");
+        assert_eq!(humanize_ago(now, now - 9 * 60), "9m");
+        assert_eq!(humanize_ago(now, now - 2 * 3_600), "2h");
+        assert_eq!(humanize_ago(now, now - 3 * 86_400), "3d");
+        // Clock skew (then > now) clamps to 0s rather than a negative age.
+        assert_eq!(humanize_ago(now, now + 30), "0s");
+    }
+
+    #[test]
+    fn it_derives_now_unix_through_the_clock_seam() {
+        let mut host = FakeHost::new();
+        host.push_run(Ok(run_output("2026-06-28T12:00:00Z\n")));
+        assert_eq!(now_unix(&host), Some(1_782_648_000));
+        // A failed clock seam degrades to None (no age rendered), never an error.
+        let host = FakeHost::new();
+        assert!(now_unix(&host).is_none());
     }
 }

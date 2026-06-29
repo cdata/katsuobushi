@@ -24,6 +24,7 @@ use serde::Serialize;
 
 use crate::sandbox::host::{Host, HostImpl};
 use crate::sandbox::instance::{self, Mode};
+use crate::sandbox::liveness::{self, Liveness, TurnState};
 use crate::sandbox::output::{render_table, CellStyle, Renderer, TableCell};
 use crate::sandbox::resolve::{list_instances, resolve_instance};
 use crate::sandbox::spec::{
@@ -55,6 +56,18 @@ struct InstanceView {
     port: Option<u16>,
     cid: Option<u32>,
     branch_present: bool,
+    /// The full per-instance liveness line (design §9, #030) — turn/agent state
+    /// from `turn-state.json` plus transport freshness from `liveness.json`,
+    /// corroborated against QMP. `None` when no `turn-state.json` is present
+    /// (degrades to today's connection-derived behavior). Surfaced in the detail
+    /// view and `--json`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    liveness: Option<String>,
+    /// The compact list-column form (`in-flight 9m`); the detail/`--json` line
+    /// carries the full phrase. Not serialized (the full `liveness` field is the
+    /// machine-facing one).
+    #[serde(skip)]
+    liveness_brief: Option<String>,
 }
 
 impl InstanceView {
@@ -80,6 +93,101 @@ impl InstanceView {
             "ephemeral"
         }
     }
+}
+
+// ---- liveness surfacing (the §9/#030 out-of-band turn + transport line) ----
+
+/// The compact age token (`9m`) for `then` measured from `now`, both already
+/// through the host clock seam. `None` when either is absent or unparseable
+/// (advisory: the phase still renders, just without an age).
+fn age_token(now: Option<i64>, then: Option<&str>) -> Option<String> {
+    let now = now?;
+    let then = liveness::parse_rfc3339(then?)?;
+    Some(liveness::humanize_ago(now, then))
+}
+
+/// The age token suffixed with `" ago"` (`9m ago`) for the full liveness line.
+fn age_ago(now: Option<i64>, then: Option<&str>) -> Option<String> {
+    age_token(now, then).map(|t| format!("{t} ago"))
+}
+
+/// Build the full per-instance liveness line (design §9, §10, #030).
+///
+/// Reads **`turn-state.json` first** (the guest-authoritative turn/agent state,
+/// needs no connection); a missing record returns `None` so `status` degrades to
+/// today's behavior. The transport tail is corroborated against QMP (§10): an
+/// active stream is only believed while the VM is up, so a stale `streamActive`
+/// can never mask a dead server — `· no active stream` (VM up, merely idle / a
+/// hung agent) is distinguished from `· vm stopped` (server gone).
+///
+/// Examples:
+/// - `turn 3 ended-unreported 14m ago · no active stream` (unattended §6.2 verdict)
+/// - `turn 3 in-flight · last activity 9m ago · heartbeat 4s ago` (attached)
+fn render_liveness(
+    ts: Option<&TurnState>,
+    lv: Option<&Liveness>,
+    now: Option<i64>,
+    running: bool,
+) -> Option<String> {
+    let ts = ts?;
+    let mut parts: Vec<String> = Vec::new();
+
+    // Head: `turn N <phase>` (the turn id is absent while idle), with an ended
+    // phase carrying its `endedAt` age inline — this is the §6.2 surfacing.
+    let phase = ts.phase.label();
+    let mut head = match ts.turn_id {
+        Some(id) => format!("turn {id} {phase}"),
+        None => phase.to_string(),
+    };
+    if ts.phase.is_ended() {
+        if let Some(age) = age_ago(now, ts.ended_at.as_deref()) {
+            head = format!("{head} {age}");
+        }
+    }
+    parts.push(head);
+
+    // A still-in-flight turn shows its last-activity age; a stale value here is
+    // how the never-`Stop` hung-mid-tool case (§6.2/§8) becomes visible.
+    if ts.phase.is_in_flight() {
+        if let Some(age) = age_ago(now, Some(ts.last_activity_at.as_str())) {
+            parts.push(format!("last activity {age}"));
+        }
+    }
+
+    // Transport tail, corroborated against QMP (§10): only trust an active stream
+    // while the VM is up.
+    let stream_active = running && lv.is_some_and(|l| l.stream_active);
+    if stream_active {
+        match age_ago(now, lv.and_then(|l| l.last_heartbeat_at.as_deref())) {
+            Some(age) => parts.push(format!("heartbeat {age}")),
+            None => parts.push("stream active".to_string()),
+        }
+    } else if running {
+        parts.push("no active stream".to_string());
+    } else {
+        // Neither file is fresh and the VM is down: the server is gone, not idle.
+        parts.push("vm stopped".to_string());
+    }
+
+    Some(parts.join(" · "))
+}
+
+/// The compact list-column form: `<phase> <age>` (age of the relevant edge), or
+/// just `<phase>` when no age is available. `None` (rendered `-`) when there is
+/// no `turn-state.json`.
+fn render_liveness_brief(ts: Option<&TurnState>, now: Option<i64>) -> Option<String> {
+    let ts = ts?;
+    let edge = if ts.phase.is_ended() {
+        ts.ended_at.as_deref()
+    } else if ts.phase.is_in_flight() {
+        Some(ts.last_activity_at.as_str())
+    } else {
+        None
+    };
+    Some(match age_token(now, edge) {
+        Some(age) => format!("{} {age}", ts.phase.label()),
+        None => ts.phase.label().to_string(),
+    })
 }
 
 // ---- preflight (the prerequisite gate, pure over injected lookups) ----
@@ -208,7 +316,10 @@ fn render_list(views: &[InstanceView], r: &Renderer) -> String {
     // not things you type (you drive an instance by name or `#`), so they stay in
     // the detail view (with the actual ssh/prompt commands) and in `--json` for
     // machine consumers — out of the scannable human list.
-    let headers = ["#", "INSTANCE", "STATE", "MODE", "PERSIST"];
+    // LIVENESS is the compact out-of-band turn/agent state (#030) — the column
+    // that makes a swarm's "stopped without reporting" / hung-mid-tool instances
+    // scannable without attaching; `-` when no `turn-state.json` is present.
+    let headers = ["#", "INSTANCE", "STATE", "MODE", "PERSIST", "LIVENESS"];
     let rows: Vec<Vec<TableCell>> = views
         .iter()
         .enumerate()
@@ -224,6 +335,7 @@ fn render_list(views: &[InstanceView], r: &Renderer) -> String {
                 state,
                 TableCell::styled(v.mode_label(), CellStyle::Dim),
                 TableCell::styled(v.persist_label(), CellStyle::Dim),
+                TableCell::styled(v.liveness_brief.as_deref().unwrap_or("-"), CellStyle::Dim),
             ]
         })
         .collect();
@@ -255,6 +367,11 @@ fn render_detail(v: &InstanceView, ssh: Option<&str>, console_log: &str, r: &Ren
         ),
         format!("mode:       {}", v.mode_label()),
     ];
+    // The out-of-band liveness line (#030): turn/agent state + transport
+    // freshness, present only once the guest has written a `turn-state.json`.
+    if let Some(liveness) = &v.liveness {
+        lines.push(format!("liveness:   {liveness}"));
+    }
     if let Some(ssh) = ssh {
         lines.push(format!("ssh:        {ssh}"));
         lines.push(format!(
@@ -283,9 +400,16 @@ fn render_detail(v: &InstanceView, ssh: Option<&str>, console_log: &str, r: &Ren
 /// Derive one instance's summary: liveness from QMP (through the seam), the
 /// scalar metadata from `instance.json` (degrading to unknowns if it is missing
 /// or version-skewed), and branch presence from a pinned `git rev-parse`.
-fn summarize(host: &impl Host, spec: &Spec, roots: &ResolvedRoots, name: &str) -> InstanceView {
+fn summarize(
+    host: &impl Host,
+    spec: &Spec,
+    roots: &ResolvedRoots,
+    name: &str,
+    now: Option<i64>,
+) -> InstanceView {
     let sock = roots.runtime_glob.join(name).join("katsuobushi.sock");
-    let state = if host.qmp_alive(&sock) {
+    let running = host.qmp_alive(&sock);
+    let state = if running {
         State::Running
     } else {
         State::Stopped
@@ -299,6 +423,15 @@ fn summarize(host: &impl Host, spec: &Spec, roots: &ResolvedRoots, name: &str) -
         None => (None, false, None, None),
     };
 
+    // Out-of-band liveness (#030): read the guest-authored `turn-state.json`
+    // first (no connection needed), then the host-written `liveness.json` for
+    // transport freshness. Both are advisory — a missing/old file just degrades.
+    let inst_dir = roots.state_glob.join(name);
+    let turn_state = TurnState::read(host, &inst_dir.join("turn-state.json"));
+    let live = Liveness::read(host, &inst_dir.join("liveness.json"));
+    let liveness = render_liveness(turn_state.as_ref(), live.as_ref(), now, running);
+    let liveness_brief = render_liveness_brief(turn_state.as_ref(), now);
+
     InstanceView {
         name: name.to_string(),
         state,
@@ -307,6 +440,8 @@ fn summarize(host: &impl Host, spec: &Spec, roots: &ResolvedRoots, name: &str) -
         port,
         cid,
         branch_present: branch_present(host, spec, roots, name),
+        liveness,
+        liveness_brief,
     }
 }
 
@@ -349,10 +484,13 @@ fn run_list(
     roots: &ResolvedRoots,
     renderer: &Renderer,
 ) -> Result<()> {
+    // One clock read for the whole fleet, so every instance's liveness ages are
+    // taken against the same `now` (and we shell out to `date` once, not per row).
+    let now = liveness::now_unix(host);
     let names = list_instances(&roots.state_glob, host)?;
     let views: Vec<InstanceView> = names
         .iter()
-        .map(|name| summarize(host, spec, roots, name))
+        .map(|name| summarize(host, spec, roots, name, now))
         .collect();
 
     let pf = preflight(
@@ -402,7 +540,8 @@ fn run_detail(
     instance: &str,
 ) -> Result<()> {
     let inst = resolve_instance(&roots.state_glob, host, instance)?;
-    let view = summarize(host, spec, roots, &inst);
+    let now = liveness::now_unix(host);
+    let view = summarize(host, spec, roots, &inst, now);
 
     // The ssh line only makes sense for a running instance with a known port.
     let ssh = if view.running() {
@@ -469,6 +608,8 @@ mod tests {
             port: None,
             cid: None,
             branch_present: false,
+            liveness: None,
+            liveness_brief: None,
         }
     }
 
@@ -788,7 +929,7 @@ mod tests {
                 .join("katsuobushi.sock"),
         );
 
-        let v = summarize(&host, &spec, &roots, "inst-a");
+        let v = summarize(&host, &spec, &roots, "inst-a", None);
         assert_eq!(v.state, State::Running, "alive socket -> running");
         assert!(v.branch_present, "git rev-parse success -> branch present");
         // No instance.json on the fake fs -> degraded metadata.
@@ -853,7 +994,7 @@ mod tests {
         // Socket not alive; scripted git failure -> no branch.
         let mut host = FakeHost::new();
         host.push_run(Ok(output_failed()));
-        let v = summarize(&host, &spec, &roots, "inst-dead");
+        let v = summarize(&host, &spec, &roots, "inst-dead", None);
         assert_eq!(v.state, State::Stopped);
         assert!(!v.branch_present);
     }
@@ -866,5 +1007,287 @@ mod tests {
             stdout: Vec::new(),
             stderr: Vec::new(),
         }
+    }
+
+    // ---- liveness surfacing (the §9/§10/#030 out-of-band line) ----
+
+    use crate::sandbox::liveness::Phase;
+
+    /// `2026-06-28T12:00:00Z` as Unix seconds — the fixed "now" the liveness
+    /// tests measure ages against.
+    fn now() -> Option<i64> {
+        liveness::parse_rfc3339("2026-06-28T12:00:00Z")
+    }
+
+    /// A guest-shaped `TurnState` for the render tests.
+    fn turn_state(
+        phase: Phase,
+        turn_id: Option<u64>,
+        ended_at: Option<&str>,
+        last_activity_at: &str,
+    ) -> TurnState {
+        TurnState {
+            turn_state_version: 1,
+            turn_id,
+            phase,
+            accepted_at: None,
+            ended_at: ended_at.map(String::from),
+            last_activity_at: last_activity_at.to_string(),
+        }
+    }
+
+    #[test]
+    fn it_surfaces_an_unattended_ended_unreported_turn() {
+        // §6.2 verdict, persisted: ended 14m ago with nobody driving.
+        let state = turn_state(
+            Phase::EndedUnreported,
+            Some(3),
+            Some("2026-06-28T11:46:00Z"),
+            "2026-06-28T11:46:00Z",
+        );
+        let line = render_liveness(Some(&state), None, now(), true).expect("a line");
+        assert_eq!(line, "turn 3 ended-unreported 14m ago · no active stream");
+    }
+
+    #[test]
+    fn it_surfaces_an_attached_in_flight_turn_with_a_fresh_heartbeat() {
+        let state = turn_state(Phase::InFlight, Some(3), None, "2026-06-28T11:51:00Z");
+        let lv = Liveness {
+            next_turn_id: 4,
+            last_heartbeat_at: Some("2026-06-28T11:59:56Z".to_string()),
+            stream_active: true,
+            ..Liveness::default()
+        };
+        let line = render_liveness(Some(&state), Some(&lv), now(), true).expect("a line");
+        assert_eq!(
+            line,
+            "turn 3 in-flight · last activity 9m ago · heartbeat 4s ago"
+        );
+    }
+
+    #[test]
+    fn it_renders_a_clean_ended_ok_turn() {
+        let state = turn_state(
+            Phase::EndedOk,
+            Some(3),
+            Some("2026-06-28T11:57:00Z"),
+            "2026-06-28T11:57:00Z",
+        );
+        let line = render_liveness(Some(&state), None, now(), true).expect("a line");
+        assert_eq!(line, "turn 3 ended-ok 3m ago · no active stream");
+    }
+
+    #[test]
+    fn it_makes_a_hung_mid_tool_turn_visible_via_a_stale_last_activity() {
+        // in-flight with no Stop and a long-stale lastActivityAt (§6.2/§8): the
+        // age is what surfaces the hang, with no connection.
+        let state = turn_state(Phase::InFlight, Some(3), None, "2026-06-28T11:46:00Z");
+        let line = render_liveness(Some(&state), None, now(), true).expect("a line");
+        assert_eq!(
+            line,
+            "turn 3 in-flight · last activity 14m ago · no active stream"
+        );
+    }
+
+    #[test]
+    fn it_distinguishes_a_dead_server_from_an_idle_one_via_qmp() {
+        // §10: a stale in-flight file is ambiguous on its own. QMP corroborates —
+        // VM up ⇒ "no active stream" (idle / hung agent, server alive); VM down ⇒
+        // "vm stopped" (the server is gone, which is why the file went stale).
+        let state = turn_state(Phase::InFlight, Some(3), None, "2026-06-28T11:46:00Z");
+
+        let up = render_liveness(Some(&state), None, now(), true).expect("a line");
+        assert!(up.ends_with("· no active stream"), "VM up ⇒ idle: {up}");
+
+        let down = render_liveness(Some(&state), None, now(), false).expect("a line");
+        assert!(down.ends_with("· vm stopped"), "VM down ⇒ dead: {down}");
+    }
+
+    #[test]
+    fn it_never_believes_an_active_stream_when_the_vm_is_down() {
+        // A stale `streamActive:true` liveness must not mask a dead VM (§10): QMP
+        // wins, so the tail is "vm stopped", not a phantom heartbeat.
+        let state = turn_state(Phase::InFlight, Some(3), None, "2026-06-28T11:46:00Z");
+        let lv = Liveness {
+            last_heartbeat_at: Some("2026-06-28T11:46:00Z".to_string()),
+            stream_active: true,
+            ..Liveness::default()
+        };
+        let line = render_liveness(Some(&state), Some(&lv), now(), false).expect("a line");
+        assert!(line.ends_with("· vm stopped"), "{line}");
+    }
+
+    #[test]
+    fn it_degrades_to_no_line_when_there_is_no_turn_state() {
+        // Missing turn-state.json ⇒ no liveness line, regardless of VM state
+        // (advisory: degrade to today's behavior, never an error).
+        assert!(render_liveness(None, None, now(), true).is_none());
+        assert!(render_liveness(None, None, now(), false).is_none());
+        assert!(render_liveness_brief(None, now()).is_none());
+    }
+
+    #[test]
+    fn it_renders_phases_without_ages_when_the_clock_is_unavailable() {
+        // No `now` (clock seam failed) ⇒ the phase still surfaces, just no ages.
+        let state = turn_state(
+            Phase::EndedUnreported,
+            Some(3),
+            Some("2026-06-28T11:46:00Z"),
+            "2026-06-28T11:46:00Z",
+        );
+        let line = render_liveness(Some(&state), None, None, true).expect("a line");
+        assert_eq!(line, "turn 3 ended-unreported · no active stream");
+    }
+
+    #[test]
+    fn it_renders_the_compact_brief_for_the_list_column() {
+        let in_flight = turn_state(Phase::InFlight, Some(3), None, "2026-06-28T11:51:00Z");
+        assert_eq!(
+            render_liveness_brief(Some(&in_flight), now()).unwrap(),
+            "in-flight 9m"
+        );
+        let unreported = turn_state(
+            Phase::EndedUnreported,
+            Some(3),
+            Some("2026-06-28T11:46:00Z"),
+            "2026-06-28T11:46:00Z",
+        );
+        assert_eq!(
+            render_liveness_brief(Some(&unreported), now()).unwrap(),
+            "ended-unreported 14m"
+        );
+        // Idle has no age edge → just the phase token.
+        let idle = turn_state(Phase::Idle, None, None, "");
+        assert_eq!(render_liveness_brief(Some(&idle), now()).unwrap(), "idle");
+    }
+
+    #[test]
+    fn it_renders_the_liveness_brief_as_a_list_column() {
+        let r = Renderer::new(false, false);
+        let mut v = view("inst-a", State::Running, Some(Mode::Agent), true);
+        v.liveness_brief = Some("ended-unreported 14m".to_string());
+        let table = render_list(&[v], &r);
+        assert!(table.contains("LIVENESS"), "header present: {table}");
+        assert!(
+            table.contains("ended-unreported 14m"),
+            "cell present: {table}"
+        );
+    }
+
+    #[test]
+    fn it_renders_the_liveness_line_in_the_detail_view() {
+        let r = Renderer::new(false, false);
+        let v = InstanceView {
+            liveness: Some("turn 3 ended-unreported 14m ago · no active stream".to_string()),
+            ..view("inst-x", State::Running, Some(Mode::Agent), true)
+        };
+        let text = render_detail(&v, None, "/state/inst-x/console.log", &r);
+        assert!(
+            text.contains("liveness:   turn 3 ended-unreported 14m ago · no active stream"),
+            "{text}"
+        );
+    }
+
+    // ---- summarize reads the durable records out-of-band, no vsock ----
+
+    fn sample_spec() -> Spec {
+        use crate::sandbox::spec::{Roots, Tools};
+        Spec {
+            spec_version: 2,
+            project_id: "cdata/katsuobushi".into(),
+            agent_user: "agent".into(),
+            import_host_store_db: false,
+            roots: Roots {
+                state_glob: PathBuf::from("/state"),
+                runtime_glob: PathBuf::from("/run"),
+            },
+            tools: Tools {
+                git: PathBuf::from("/nix/store/h1-git/bin/git"),
+                ssh: PathBuf::from("/bin/ssh"),
+                ssh_keygen: PathBuf::from("/bin/ssh-keygen"),
+                tmux: PathBuf::from("/bin/tmux"),
+                rsync: PathBuf::from("/bin/rsync"),
+                sqlite3: None,
+                bash: PathBuf::from("/bin/bash"),
+            },
+            runner: PathBuf::from("/bin/microvm-run"),
+            disk_images: vec![],
+            context: vec![],
+            secrets: vec![],
+            vsock_port: 1024,
+            host_cid: 2,
+            heartbeat_secs: 10,
+            heartbeat_miss: 3,
+            progress_stall_secs: 300,
+            delivery_deadline_secs: 20,
+            delivery_retries: 3,
+            ready_gate_secs: 60,
+            stop_grace_ms: 1500,
+        }
+    }
+
+    fn sample_roots() -> ResolvedRoots {
+        ResolvedRoots {
+            state_glob: PathBuf::from("/state"),
+            runtime_glob: PathBuf::from("/run"),
+        }
+    }
+
+    #[test]
+    fn it_summarizes_turn_state_out_of_band_without_a_vsock_connection() {
+        use crate::sandbox::host::Call;
+        // turn-state.json present (in-flight), liveness.json absent, instance.json
+        // absent — `status` still surfaces the agent state with NO connection.
+        let mut host = FakeHost::new();
+        host.with_alive_sock(
+            PathBuf::from("/run")
+                .join("inst-a")
+                .join("katsuobushi.sock"),
+        )
+        .push_read(Ok(
+            br#"{"turnStateVersion":1,"turnId":3,"phase":"in-flight","acceptedAt":"2026-06-28T11:50:00Z","endedAt":null,"lastActivityAt":"2026-06-28T11:46:00Z"}"#
+                .to_vec(),
+        ));
+
+        let v = summarize(&host, &sample_spec(), &sample_roots(), "inst-a", now());
+        let line = v.liveness.expect("a liveness line from turn-state.json");
+        assert_eq!(
+            line,
+            "turn 3 in-flight · last activity 14m ago · no active stream"
+        );
+        assert_eq!(v.liveness_brief.as_deref(), Some("in-flight 14m"));
+
+        // The turn-state read goes through the seam at the per-instance path, and
+        // no vsock connection is ever attempted to surface it.
+        assert!(
+            host.calls()
+                .iter()
+                .any(|c| matches!(c, Call::Read(p) if p.ends_with("turn-state.json"))),
+            "turn-state.json read through the seam: {:?}",
+            host.calls()
+        );
+        assert!(
+            !host
+                .calls()
+                .iter()
+                .any(|c| matches!(c, Call::VsockConnect(..))),
+            "no vsock connection to surface turn state: {:?}",
+            host.calls()
+        );
+    }
+
+    #[test]
+    fn it_summarizes_without_a_liveness_line_when_no_records_exist() {
+        // No turn-state.json (and no liveness.json) ⇒ no line, no error: the view
+        // degrades to exactly today's fields.
+        let mut host = FakeHost::new();
+        host.with_alive_sock(
+            PathBuf::from("/run")
+                .join("inst-a")
+                .join("katsuobushi.sock"),
+        );
+        let v = summarize(&host, &sample_spec(), &sample_roots(), "inst-a", now());
+        assert!(v.liveness.is_none(), "no turn-state ⇒ no liveness line");
+        assert!(v.liveness_brief.is_none());
     }
 }
