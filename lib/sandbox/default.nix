@@ -1114,13 +1114,15 @@ let
         # Graphics: `sandbox:screenshot` runs `ssh agent@… 'grim -'`, a
         # non-interactive remote command that does NOT source /etc/profile, so the
         # loginShellInit export below never reaches it. Set WAYLAND_DISPLAY
-        # server-side instead (sway binds `wayland-1`). XDG_RUNTIME_DIR is already
+        # server-side instead (sway binds `wayland-1`), plus DISPLAY=:0 so X11
+        # clients reach sway's XWayland (it lazily binds `:0` — the first free X
+        # display in this single-compositor guest). XDG_RUNTIME_DIR is already
         # provided to every ssh session by pam_systemd (= /run/user/<uid>, the
         # lingering agent's dir holding the wayland socket), so it needs no help.
         # `mkIf` (not `optionalString ""`) so graphics-off leaves extraConfig
         # unset — an empty string would still append a trailing newline and alter
         # the generated sshd_config.
-        extraConfig = lib.mkIf graphicsCfg.enable "SetEnv WAYLAND_DISPLAY=wayland-1";
+        extraConfig = lib.mkIf graphicsCfg.enable "SetEnv WAYLAND_DISPLAY=wayland-1 DISPLAY=:0";
       };
 
       # Login greeting + per-session secret export + env hygiene
@@ -1153,14 +1155,18 @@ let
       # Graphics: point every login shell (interactive ssh, and the agent-mode
       # `bash -lc` tmux session) at the headless sway compositor, so a workload is
       # just `firefox` / `my-app` with no ceremony. sway binds `wayland-1`
-      # deterministically. XDG_RUNTIME_DIR is set by pam_systemd for ssh logins;
-      # default it for the `runuser`-spawned agent tmux, where pam does not run —
-      # the lingering agent's `/run/user/<uid>` exists from boot. Empty (so the
-      # profile is unchanged) when graphics is off.
+      # deterministically; DISPLAY=:0 covers X11 clients via sway's XWayland (it
+      # lazily binds `:0`, the first free X display here), so a tool that probes
+      # DISPLAY — or any X-only app — works without per-invocation ceremony.
+      # XDG_RUNTIME_DIR is set by pam_systemd for ssh logins; default it for the
+      # `runuser`-spawned agent tmux, where pam does not run — the lingering
+      # agent's `/run/user/<uid>` exists from boot. Empty (so the profile is
+      # unchanged) when graphics is off.
       + lib.optionalString graphicsCfg.enable ''
         : "''${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
         export XDG_RUNTIME_DIR
         export WAYLAND_DISPLAY=wayland-1
+        export DISPLAY=:0
       '';
 
       environment.systemPackages =
@@ -1187,15 +1193,18 @@ let
         ]
         # Graphics (opt-in): the headless compositor (sway, also provides
         # `swaymsg` for the real-boot `get_outputs` check), the screenshot tool the
-        # `sandbox:screenshot` feature itself shells (grim), and the
-        # nested micro-compositor for the game path (gamescope). Absent from
-        # the closure entirely when graphics is off.
+        # `sandbox:screenshot` feature itself shells (grim), the nested
+        # micro-compositor for the game path (gamescope), and the X server sway's
+        # XWayland shim execs so X11 clients reach `DISPLAY=:0` (sway looks for
+        # `Xwayland` on PATH; systemPackages puts it on the user service's PATH).
+        # Absent from the closure entirely when graphics is off.
         ++ lib.optionals graphicsCfg.enable (
           with pkgs;
           [
             sway
             grim
             gamescope
+            xwayland
           ]
         )
         # Consumer-supplied packages, including the agent harness.
