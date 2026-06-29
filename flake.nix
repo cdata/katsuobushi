@@ -203,17 +203,19 @@
       {
         devShells.default = pkgs.mkShell {
           name = "katsuobushi";
-          nativeBuildInputs = menu.commands ++ [
-            markdown.prettier
-            # Toolchain for working on the in-tree sandbox controller crate.
-            rust.rustToolchain
-            # Used by the sandbox lifecycle commands (QMP over the qemu monitor)
-            # and by the sandbox controller spike harness.
-            pkgs.socat
-          ]
-          # `katsuctl` on the PATH for power users (additive). Linux-only, like
-          # the sandbox controller crate it lives beside (tokio-vsock gate).
-          ++ pkgs.lib.optionals isLinux [ controlCrates.katsuctl ];
+          nativeBuildInputs =
+            menu.commands
+            ++ [
+              markdown.prettier
+              # Toolchain for working on the in-tree sandbox controller crate.
+              rust.rustToolchain
+              # Used by the sandbox lifecycle commands (QMP over the qemu monitor)
+              # and by the sandbox controller spike harness.
+              pkgs.socat
+            ]
+            # `katsuctl` on the PATH for power users (additive). Linux-only, like
+            # the sandbox controller crate it lives beside (tokio-vsock gate).
+            ++ pkgs.lib.optionals isLinux [ controlCrates.katsuctl ];
           shellHook = rust.rustEnvironmentHook + makeDevShellHook menu;
         };
       }
