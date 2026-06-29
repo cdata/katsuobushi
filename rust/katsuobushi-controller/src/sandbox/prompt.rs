@@ -228,6 +228,11 @@ where
                     break;
                 }
             }
+            // New liveness variants (§4) decode-and-skip here: this is the
+            // pure-additive phase, so `drive` keeps its current behavior until
+            // the host watchdog rework wires them up. Tolerating them keeps the
+            // decoder forward-compatible with a newer guest.
+            Ok(_) => {}
             Err(e) => eprintln!("· undecodable guest line: {e}"),
         }
     }

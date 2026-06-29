@@ -12,3 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 serde.workspace = true
+
+[dev-dependencies]
+# Round-trip tests assert the exact NDJSON wire shapes (§17).
+serde_json.workspace = true
