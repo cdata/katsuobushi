@@ -1377,7 +1377,10 @@ let
   # runtimeInputs are — null (Tools.sqlite3 = None) when off.
   katsuctlSpec = pkgs.writeText "katsuctl-sandbox-spec.json" (
     builtins.toJSON {
-      specVersion = 2;
+      # Bumped to 3 alongside the Rust SUPPORTED_SPEC_VERSION (graphics schema).
+      # The `graphics` field is omitted here until the full host wiring lands;
+      # katsuctl reads an absent `graphics` as disabled (its `#[serde(default)]`).
+      specVersion = 3;
       inherit projectId agentUser importHostStoreDb;
       # Liveness tunables; inert until a
       # consumer reads them, but plumbed from the one let-binding source so the
