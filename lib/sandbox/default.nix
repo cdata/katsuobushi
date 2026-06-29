@@ -208,7 +208,7 @@ let
   slirpDns = "10.0.2.3";
 
   # Liveness tunables — the single source for both sides. Rendered into the host
-  # spec (katsuctlSpec, specVersion 2) and, for the two the guest reads directly,
+  # spec (katsuctlSpec, specVersion 3) and, for the two the guest reads directly,
   # into the agent env. Inert knobs until a consumer reads them.
   heartbeatSecs = 10; # heartbeat cadence (H)
   heartbeatMiss = 3; # dead after N·H = 30 s of silence (N)
