@@ -54,17 +54,27 @@ pub fn color_enabled(when: ColorWhen, json: bool, stdout_is_tty: bool, no_color:
     }
 }
 
-/// One streamed agent report's flavor — the four `protocol::Status` variants,
-/// mapped here to a glyph + color (design §13: `working`=dim, `done`=green ✓,
-/// `blocked`=yellow ⚠, `info`=blue). Kept local rather than depending on
-/// `katsuobushi-sandbox-protocol`; the `prompt` subcommand maps `Status` → this when it
-/// renders a stream.
+/// One streamed report's flavor — the four `protocol::Status` variants plus the
+/// three watchdog verdicts the `prompt` `drive` raises (design/sandbox-liveness.md
+/// §16), each mapped here to a glyph + color (design §13: `working`=dim,
+/// `done`=green ✓, `blocked`=yellow ⚠, `info`=blue). Kept local rather than
+/// depending on `katsuobushi-sandbox-protocol`; the `prompt` subcommand maps
+/// `Status` → this when it renders a stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReportKind {
     Working,
     Done,
     Blocked,
     Info,
+    /// `TurnCompleted{reported:false}` (§6.2): the agent stopped without a
+    /// terminal report — a warning (⚠), not a faked success.
+    Stopped,
+    /// The progress-stall notice (§8): no progress for the stall window. Surfaced
+    /// once per episode, dim ⚠ — awareness, never a kill.
+    Stalled,
+    /// Transport dead / resend exhausted (§7.2, §8): the turn could not be driven
+    /// at all — an error (✗).
+    Lost,
 }
 
 /// The shared output handle: a subcommand emits either a typed value
@@ -185,6 +195,9 @@ impl Renderer {
             ReportKind::Done => self.green(&format!("✓ {text}")),
             ReportKind::Blocked => self.yellow(&format!("⚠ {text}")),
             ReportKind::Info => self.blue(text),
+            ReportKind::Stopped => self.yellow(&format!("⚠ {text}")),
+            ReportKind::Stalled => self.dim(&format!("⚠ {text}")),
+            ReportKind::Lost => self.red(&format!("✗ {text}")),
         }
     }
 
@@ -374,6 +387,28 @@ mod tests {
             ReportKind::Blocked,
             ReportKind::Info,
         ] {
+            assert!(!has_ansi(&r.report(kind, "x")), "report {kind:?} plain");
+        }
+    }
+
+    #[test]
+    fn it_renders_watchdog_kinds_with_glyphs_without_ansi_when_color_off() {
+        // The three liveness verdicts (design/sandbox-liveness.md §16): Stopped
+        // and Stalled warn (⚠), Lost errors (✗); glyphs survive gating.
+        let r = Renderer::new(false, false);
+        assert_eq!(
+            r.report(ReportKind::Stopped, "agent stopped without reporting"),
+            "⚠ agent stopped without reporting"
+        );
+        assert_eq!(
+            r.report(ReportKind::Stalled, "no progress"),
+            "⚠ no progress"
+        );
+        assert_eq!(
+            r.report(ReportKind::Lost, "transport dead"),
+            "✗ transport dead"
+        );
+        for kind in [ReportKind::Stopped, ReportKind::Stalled, ReportKind::Lost] {
             assert!(!has_ansi(&r.report(kind, "x")), "report {kind:?} plain");
         }
     }
