@@ -660,22 +660,25 @@ fn build_recipe(
     // Only touched when graphics is opted in; the default (`enable=false`,
     // `gpu=[]`) emits nothing here, byte-for-byte today's no-graphics recipe.
     if spec.graphics.enable {
-        // §13.3 boundary notice: virglrenderer parses the guest's GPU command
-        // stream inside the host QEMU process, so enabling graphics widens the
-        // host-facing attack surface. Stated plainly at launch, mirroring the
-        // `sandbox:`-prefixed warnings the rest of this recipe emits to stderr.
-        r.line(
-            "echo \"sandbox: graphics: GPU command stream parsed by virglrenderer in the host \
-             QEMU process — host-facing attack surface widened.\" >&2",
-        );
         match gfx::resolve_gpu(&spec.graphics.gpu, host) {
             // A usable hardware rung: hand the node + venus flag to extraArgsScript.
             Resolution::Gpu { node, .. } => {
+                // §13.3 boundary notice — emitted ONLY on a hardware rung, because
+                // virglrenderer parses the guest's GPU command stream inside the
+                // host QEMU process exactly when one resolves. The software rung
+                // (below) keeps the full original boundary (§7.3/§13.1), so the
+                // notice would be factually wrong there. Mirrors the `sandbox:`-
+                // prefixed warnings the rest of this recipe emits to stderr.
+                r.line(
+                    "echo \"sandbox: graphics: GPU command stream parsed by virglrenderer in the \
+                     host QEMU process — host-facing attack surface widened.\" >&2",
+                );
                 r.line(format!("export KATSU_GFX_RENDERNODE={}", dq(&node)));
                 r.line("export KATSU_GFX_VENUS=1".to_string());
             }
             // The software rung is in-guest llvmpipe — no host render node, so no
-            // GPU env at all (extraArgsScript then emits no virtio-gpu device).
+            // GPU env at all (extraArgsScript then emits no virtio-gpu device), and
+            // no virglrenderer in the loop ⇒ no §13 boundary notice (§7.3).
             Resolution::Software => {}
             // The ladder exhausted with no `software` tail: fail loud rather than
             // silently boot GPU-less (the project's deliberate choice, §7.2).

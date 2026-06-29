@@ -24,7 +24,6 @@ cp "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id.pub" "/state/kats
 export KATSU_STATE_DIR="/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
 export KATSU_SSH_PORT=22042
 export KATSU_VSOCK_CID=4242
-echo "sandbox: graphics: GPU command stream parsed by virglrenderer in the host QEMU process — host-facing attack surface widened." >&2
 
 # Back each guest disk image from the persistent state dir via a runtime symlink.
 ln -sfn "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/rw-store.img" "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/rw-store.img"
