@@ -246,6 +246,21 @@ let
       socat
     ];
     text = ''
+      if [ "''${1:-}" = "hook" ]; then
+        event="''${2:-}"
+        case "$event" in
+          session-ready | turn-accepted | turn-ended) ;;
+          *)
+            echo "usage: report hook <session-ready|turn-accepted|turn-ended>" >&2
+            exit 2
+            ;;
+        esac
+        # turn-ended → turnended (HookEvent serializes rename_all = "lowercase")
+        ev="$(printf '%s' "$event" | tr -d '-')"
+        printf '%s\n' "$(jq -nc --arg e "$ev" '{event:$e}')" \
+          | socat - "UNIX-CONNECT:''${KATSU_REPORT_SOCK:-${reportSocket}}" || true
+        exit 0
+      fi
       status="''${1:-}"
       text="''${2:-}"
       turn="''${3:-}"
