@@ -239,6 +239,29 @@ let
   };
   graphicsCfg = lib.recursiveUpdate graphicsDefaults graphics;
 
+  # The QEMU that actually launches a graphics instance (§14.5). microvm's qemu
+  # runner (lib/runners/qemu.nix) wraps `microvm.qemu.package` in
+  # `minimizeQemuClosureSize`, which — whenever `microvm.optimize.enable` (the
+  # default) and microvm's OWN `graphics.enable` is off — does
+  # `qemu.override { nixosTestRunner = true; }`. In nixpkgs that flag flips the
+  # GL feature defaults off (`sdlSupport`/`openGLSupport ? … && !nixosTestRunner`,
+  # `virglSupport ? openGLSupport`), yielding a `qemu-*-for-vm-tests` build whose
+  # only `-display` backends are `none`/`dbus` and whose virtio-gpu is plain
+  # `virtio-gpu-pci` — so a graphics launch dies at
+  #   -display egl-headless,…: Parameter 'type' does not accept value 'egl-headless'
+  # (caught only on the #042 real boot — eval/build can't see it). We can't avoid
+  # the strip without microvm's `graphics.enable` (which forces a gtk window, no
+  # headless) or disabling `optimize` (broad boot-config changes). Instead PIN the
+  # two GL flags on the package so the chained `nixosTestRunner = true` override
+  # can't reset them: `egl-headless` needs `openGLSupport`, `virtio-gpu-gl-pci`
+  # needs `virglSupport`. Based on the OUTER `pkgs.qemu_kvm` (host-cpu-only, KVM,
+  # smaller than the full qemu); captured before the guestModule's `pkgs` arg
+  # shadows it. NB: this is a non-cached variant → a one-time from-source build.
+  graphicsQemu = pkgs.qemu_kvm.override {
+    openGLSupport = true;
+    virglSupport = true;
+  };
+
   # Headless-sway config (referenced only when graphics.enable). One virtual
   # output sized from graphicsCfg.output; sway is launched with `-c` so ONLY this
   # file loads — no default keybindings/bar, because this is a headless render
@@ -682,11 +705,13 @@ let
     # `software` rung and a graphics-off instance export neither var, so no GPU
     # device is emitted and the boundary is unchanged (design §7.3/§18).
     # `-sandbox on` (qemu seccomp) is cheap defense-in-depth for the widened GPU
-    # surface (§13.3); its boot-safety and the opengl/virgl-enabled qemu-package
-    # check (§13.3/§14.5) are validated on a real boot in #042 — not here, as this
-    # VM has no nested KVM.
+    # surface (§13.3); confirmed not to break microvm boot (#042 real boot).
+    # The venus (Vulkan) path additionally requires `blob=true` + a `hostmem`
+    # window — without them qemu refuses the device: "venus requires enabled blob
+    # and hostmem options" (found on the #042 real boot). 8G matches the §15 mem
+    # floor; it is a host memory *window* for blob resources, not a guest alloc.
     if [ -n "''${KATSU_GFX_RENDERNODE:-}" ]; then
-      venus=""; [ -n "''${KATSU_GFX_VENUS:-}" ] && venus=",venus=on"
+      venus=""; [ -n "''${KATSU_GFX_VENUS:-}" ] && venus=",venus=on,blob=true,hostmem=8G"
       args="$args -device virtio-gpu-gl-pci$venus"
       args="$args -display egl-headless,rendernode=''${KATSU_GFX_RENDERNODE}"
       args="$args -sandbox on"
@@ -712,13 +737,11 @@ let
       # Boot/runner shape.
       microvm = {
         hypervisor = "qemu";
-        # QEMU package: microvm.nix defaults `microvm.qemu.package` to
-        # `pkgs.qemu_kvm` on Linux. That build is NOT stripped of graphics — at
-        # this flake's nixpkgs pin its closure links virglrenderer-1.3.0,
-        # libepoxy, mesa-libgbm, gtk, and spice (verified at eval offline), so the
-        # `virtio-gpu-gl-pci` device and `egl-headless` display the graphics path
-        # needs are present. No override required (§14.5); #042 confirms the
-        # opengl/virgl device set on a real launched VM.
+        # QEMU package (§14.5). When graphics is on, use the GL-flag-pinned
+        # `graphicsQemu` (see above) so microvm's closure-minimizer can't strip
+        # `egl-headless`/`virtio-gpu-gl-pci`. `mkIf` so a graphics-off guest keeps
+        # microvm's lean default, byte-for-byte.
+        qemu.package = lib.mkIf graphicsCfg.enable graphicsQemu;
         inherit vcpu mem;
         # No static interfaces: the NIC (with its per-instance hostfwd port) is
         # emitted by extraArgsScript so parallel instances do not collide.
