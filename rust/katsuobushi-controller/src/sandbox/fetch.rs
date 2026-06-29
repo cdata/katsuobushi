@@ -25,8 +25,8 @@ pub fn run(config: &Path, instance: &str, global: Global) -> Result<()> {
 /// the seam, and return the line to print (machine-readable when `json`).
 ///
 /// The invocation is exactly today's shell:
-/// `git fetch <stateGlob>/<inst>/sync.git sandbox/<inst>:sandbox/<inst>`
-///, with `git` taken from `spec.tools.git`.
+/// `git fetch <stateGlob>/<inst>/sync.git sandbox/<inst>:sandbox/<inst>`,
+/// with `git` taken from `spec.tools.git`.
 fn fetch_with(host: &impl Host, spec: &Spec, instance: &str, json: bool) -> Result<String> {
     let roots = resolve_roots(&spec.roots)?;
     let inst = resolve_instance(&roots.state_glob, host, instance)?;

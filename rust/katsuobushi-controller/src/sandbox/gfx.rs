@@ -1,12 +1,12 @@
-//! GPU selection — the role-preference ladder (§7).
+//! GPU selection — the role-preference ladder.
 //!
 //! Config exposes an ordered preference list of GPU *roles*
 //! ([`GpuRole`](crate::sandbox::spec::GpuRole), e.g. `[integrated, discrete,
 //! software]`). [`resolve_gpu`] walks that list and picks the first rung that is
 //! satisfiable on this host: a render node that classifies as the requested role
 //! *and* is openable by the QEMU uid, or the always-available `software` floor.
-//! The resolved choice drives both the launch path (#036, `start.rs`) and the
-//! preflight row (#037, `status.rs`), so the algorithm lives here once.
+//! The resolved choice drives both the launch path (`start.rs`) and the
+//! preflight row (`status.rs`), so the algorithm lives here once.
 //!
 //! The world is reached only through the [`Host`] seam ([`render_nodes`] /
 //! [`can_open`]), so the resolver is exercised end to end against the `FakeHost`
@@ -24,29 +24,29 @@ use std::path::{Path, PathBuf};
 use crate::sandbox::host::Host;
 use crate::sandbox::spec::GpuRole;
 
-/// The outcome of resolving the `gpu` role ladder against a host (§7.2).
+/// The outcome of resolving the `gpu` role ladder against a host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
     /// A usable hardware GPU rung: the runner exports
     /// `KATSU_GFX_RENDERNODE=<node>` and (when `venus`) `KATSU_GFX_VENUS=1`, and
     /// `extraArgsScript` emits the `virtio-gpu-gl` + `egl-headless` lines. `role`
-    /// is the rung this node satisfied (§7.2), surfaced verbatim in the §12/§18
-    /// preflight row.
+    /// is the rung this node satisfied, surfaced verbatim in the preflight row.
     Gpu {
         node: PathBuf,
         role: GpuRole,
         venus: bool,
     },
     /// The `software` rung: Mesa llvmpipe in-guest, **no GPU device and no host
-    /// render node at all** (§7.3). The runner exports nothing GPU-related.
+    /// render node at all**, which removes the guest→host virglrenderer attack
+    /// surface entirely. The runner exports nothing GPU-related.
     Software,
     /// The list was exhausted with no `software` tail: no usable GPU and no
-    /// fallback ⇒ a hard error at launch / a `MISSING` preflight row (§12). This
+    /// fallback ⇒ a hard error at launch / a `MISSING` preflight row. This
     /// is a project's deliberate "fail loud, never silently slow" choice.
     Unavailable,
 }
 
-/// Resolve the ordered GPU role preference list against `host` (§7.2).
+/// Resolve the ordered GPU role preference list against `host`.
 ///
 /// Walks `prefs` in order, first match wins:
 /// - `software` is always satisfiable ⇒ [`Resolution::Software`];
@@ -57,7 +57,9 @@ pub enum Resolution {
 /// - exhausting the list with no `software` tail ⇒ [`Resolution::Unavailable`].
 ///
 /// A node present but *not* openable does not satisfy its role, so the walk
-/// continues to the next preferred role (the §14.3 permission prerequisite).
+/// continues to the next preferred role (render nodes are portably
+/// `root:render 0660`, so the QEMU uid cannot open one unless it is in the
+/// `render` group).
 pub fn resolve_gpu(prefs: &[GpuRole], host: &dyn Host) -> Resolution {
     resolve_gpu_with(prefs, host, classify)
 }
@@ -108,12 +110,12 @@ fn resolve_gpu_with(
 /// the two on the hosts we target.
 const DISCRETE_VRAM_MIN: u64 = 1 << 30;
 
-/// Classify a render node as `integrated` or `discrete` (§7.4) — the one fiddly
+/// Classify a render node as `integrated` or `discrete` — the one fiddly
 /// bit of selection. Returns only [`GpuRole::Integrated`] or
 /// [`GpuRole::Discrete`]; a render node is always real hardware, never the
 /// `software` rung.
 ///
-/// This is the **zero-dependency sysfs heuristic** (§7.4 option 2): it reads
+/// This is the **zero-dependency sysfs heuristic**: it reads
 /// `/sys/class/drm/<node>/device/{boot_vga,mem_info_vram_total,driver}` and never
 /// shells out. The signals, in priority order:
 ///
@@ -128,7 +130,7 @@ const DISCRETE_VRAM_MIN: u64 = 1 << 30;
 /// 4. Fallback ⇒ `integrated`, the safer, lower-power rung that is always present
 ///    on an APU host.
 ///
-/// **Escalation path (§7.4 option 1).** The authoritative signal is the Vulkan/GL
+/// **Escalation path.** The authoritative signal is the Vulkan/GL
 /// device type (`VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU` vs `…_DISCRETE_GPU`). If
 /// a real host misclassifies under the sysfs heuristic, escalate to shelling a
 /// tiny probe (`vulkaninfo`/`drm_info`) and mapping the device type →
@@ -280,7 +282,7 @@ mod tests {
     #[test]
     fn it_returns_unavailable_with_no_software_tail() {
         // A security-pinned-but-GPU-less host: the list exhausts with no
-        // `software` rung ⇒ fail loud (§7.2).
+        // `software` rung ⇒ fail loud.
         let host = FakeHost::new();
         let res = resolve_gpu_with(
             &[GpuRole::Integrated, GpuRole::Discrete],
@@ -293,7 +295,7 @@ mod tests {
     #[test]
     fn it_skips_an_unopenable_preferred_node_for_the_next_role() {
         // The integrated node is present but the QEMU uid cannot open it (not in
-        // the `render` group, §14.3); the discrete node is openable. `integrated`
+        // the `render` group); the discrete node is openable. `integrated`
         // must be skipped and `discrete` chosen.
         let mut host = FakeHost::new();
         host.with_render_node(INTEGRATED)
@@ -331,7 +333,7 @@ mod tests {
     #[test]
     fn it_short_circuits_at_software_ignoring_later_roles() {
         // A `software`-first list resolves to software even with usable GPUs
-        // present — the maximal-isolation pin (§7.3).
+        // present — the maximal-isolation pin.
         let host = both_nodes_openable();
         let res = resolve_gpu_with(
             &[GpuRole::Software, GpuRole::Integrated],

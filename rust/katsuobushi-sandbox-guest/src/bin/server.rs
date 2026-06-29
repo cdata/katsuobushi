@@ -621,7 +621,7 @@ async fn run_control(peer: Peer<RoleServer>, ctl: Arc<Control>) -> anyhow::Resul
         eprintln!("katsuobushi-control: control on vsock:*:{VSOCK_PORT}");
         loop {
             let (stream, peer_addr) = listener.accept().await.context("accept vsock")?;
-            //: only the host (CID 2) may inject prompts. An in-guest
+            // Only the host (CID 2) may inject prompts. An in-guest
             // loopback peer is CID 1, so the unprivileged agent cannot poke its
             // own session.
             if peer_addr.cid() != VMADDR_CID_HOST {

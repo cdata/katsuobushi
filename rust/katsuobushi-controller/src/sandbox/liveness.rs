@@ -418,8 +418,8 @@ mod tests {
 
     #[test]
     fn it_writes_liveness_atomically_via_temp_then_rename() {
-        //: the record must land atomically — write a temp sibling, then rename
-        // it over the target — so 's out-of-band reader never sees a torn file.
+        // The record must land atomically — write a temp sibling, then rename
+        // it over the target — so an out-of-band reader never sees a torn file.
         let host = FakeHost::new();
         Liveness::default()
             .store(&host, &path())

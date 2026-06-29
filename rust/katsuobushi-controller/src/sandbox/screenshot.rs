@@ -1,6 +1,6 @@
 //! `katsuctl sandbox screenshot` — the one host-visible graphical capability.
 //!
-//! Stateless framebuffer grab (§10): on-demand `grim -` run as the agent user
+//! Stateless framebuffer grab: on-demand `grim -` run as the agent user
 //! over the **existing loopback ssh hostfwd** — no daemon, no new port, no new
 //! channel. The compositor is already running as that user, so
 //! `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` are already correct in the ssh session;
@@ -8,7 +8,7 @@
 //! back to host stdout, which we land at the requested path (or pass through to
 //! host stdout for `-`).
 //!
-//! Two documented behaviors (§10):
+//! Two documented behaviors:
 //!  1. It captures the *composited* sway output — the focused app + windows. A
 //!     pure **Layer-0** workload that renders entirely offscreen (its own
 //!     FBO/swapchain) and never puts a surface on the compositor screenshots as
@@ -19,8 +19,9 @@
 //!     instance"* up front rather than letting a cryptic `grim` error surface.
 //!
 //! The ssh invocation mirrors `attach.rs` (pinned `spec.tools.ssh`, the
-//! per-instance key, and the no-known-hosts options); real-capture validation is
-//! #042, so the tests here stay hermetic — they assert the command line and the
+//! per-instance key, and the no-known-hosts options); real capture is verified
+//! separately on a real boot, so the tests here stay hermetic — they assert the
+//! command line and the
 //! stdout-vs-file routing without booting a VM.
 
 use std::io::Write;
@@ -76,7 +77,7 @@ fn resolve_destination(path: Option<&str>, inst: &str, ts: &str) -> Destination 
 }
 
 /// Guard on the graphics opt-in, then run `grim -` over ssh and return the PNG
-/// bytes. A disabled instance fails here with the clear message (§10.2) instead
+/// bytes. A disabled instance fails here with the clear message instead
 /// of a cryptic `grim` error; a nonzero ssh/grim exit surfaces its stderr.
 fn capture(
     host: &impl Host,
@@ -138,7 +139,7 @@ fn deliver(host: &impl Host, dest: &Destination, png: &[u8]) -> Result<()> {
         Destination::File(path) => {
             host.write(path, png)
                 .with_context(|| format!("writing screenshot to {}", path.display()))?;
-            // A Layer-0 offscreen workload screenshots as blank (§10) — note it so
+            // A Layer-0 offscreen workload screenshots as blank — note it so
             // a blank PNG is not mistaken for a bug.
             eprintln!(
                 "wrote {} (a pure offscreen Layer-0 workload captures as blank — grim sees \

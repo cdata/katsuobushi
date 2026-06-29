@@ -55,9 +55,9 @@ pub fn color_enabled(when: ColorWhen, json: bool, stdout_is_tty: bool, no_color:
 }
 
 /// One streamed report's flavor — the four `protocol::Status` variants plus the
-/// three watchdog verdicts the `prompt` `drive` raises (
-/// ), each mapped here to a glyph + color (: `working`=dim,
-/// `done`=green ✓, `blocked`=yellow ⚠, `info`=blue). Kept local rather than
+/// three watchdog verdicts the `prompt` `drive` raises,
+/// each mapped here to a glyph + color: `working`=dim,
+/// `done`=green ✓, `blocked`=yellow ⚠, `info`=blue. Kept local rather than
 /// depending on `katsuobushi-sandbox-protocol`; the `prompt` subcommand maps
 /// `Status` → this when it renders a stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,7 +214,7 @@ impl Renderer {
         }
     }
 
-    /// Print a rendered error to stderr and exit nonzero (: `--json`
+    /// Print a rendered error to stderr and exit nonzero (`--json`
     /// errors exit nonzero too). Minimal exit-code wiring — the real per-command
     /// error mapping grows as the subcommands land.
     pub fn fail(&self, kind: &str, message: &str) -> ! {

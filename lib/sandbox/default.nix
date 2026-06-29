@@ -138,15 +138,15 @@ defaults:
   #
   # Disabled by default — a graphics-off instance is byte-for-byte what ships
   # today (no spec `graphics` key, no GPU args). When `enable`, the host renders
-  # the §18 spec block and (once the runner resolves a GPU rung at launch)
-  # splices a `virtio-gpu-gl` device + headless EGL backend into qemu.
+  # the spec's `graphics` block (camelCase: enable, gpu[], output{width,height,
+  # refresh}) and (once the runner resolves a GPU rung at launch) splices a
+  # `virtio-gpu-gl` device + headless EGL backend into qemu.
   #   gpu    — ordered role-preference list, resolved host-side; the first
   #            present+openable rung wins. The `software` tail is the llvmpipe
-  #            (Tier A) floor that removes the GPU device entirely (see
-  #            design/sandbox-graphics.md §7).
-  #   output — the headless sway virtual output (the guest display stack lands in
-  #            #040; this only carries the dimensions through the spec).
-  # Partial attrsets are accepted: anything unset falls back to the §19 defaults
+  #            (Tier A) floor that removes the GPU device entirely.
+  #   output — the headless sway virtual output (the guest display stack lands
+  #            separately; this only carries the dimensions through the spec).
+  # Partial attrsets are accepted: anything unset falls back to the defaults
   # below (so `graphics = { enable = true; }` gets the full default gpu/output).
   graphics ? {
     enable = false;
@@ -220,7 +220,7 @@ let
 
   secretNames = builtins.attrNames secrets;
 
-  # Graphics config, normalized over the §19 defaults. `recursiveUpdate` merges a
+  # Graphics config, normalized over the defaults. `recursiveUpdate` merges a
   # partial consumer attrset (e.g. `{ enable = true; }`, or one that overrides
   # only `output.width`) onto the defaults; the `gpu` list is replaced wholesale,
   # never element-merged, which is what an ordered preference list wants.
@@ -239,7 +239,8 @@ let
   };
   graphicsCfg = lib.recursiveUpdate graphicsDefaults graphics;
 
-  # The QEMU that actually launches a graphics instance (§14.5). microvm's qemu
+  # The QEMU that actually launches a graphics instance — it must be the
+  # opengl/virgl-enabled build, since microvm's default strips that. microvm's qemu
   # runner (lib/runners/qemu.nix) wraps `microvm.qemu.package` in
   # `minimizeQemuClosureSize`, which — whenever `microvm.optimize.enable` (the
   # default) and microvm's OWN `graphics.enable` is off — does
@@ -249,7 +250,7 @@ let
   # only `-display` backends are `none`/`dbus` and whose virtio-gpu is plain
   # `virtio-gpu-pci` — so a graphics launch dies at
   #   -display egl-headless,…: Parameter 'type' does not accept value 'egl-headless'
-  # (caught only on the #042 real boot — eval/build can't see it). We can't avoid
+  # (caught only on a real boot — eval/build can't see it). We can't avoid
   # the strip without microvm's `graphics.enable` (which forces a gtk window, no
   # headless) or disabling `optimize` (broad boot-config changes). Instead PIN the
   # two GL flags on the package so the chained `nixosTestRunner = true` override
@@ -703,13 +704,14 @@ let
     # KATSU_GFX_RENDERNODE (and KATSU_GFX_VENUS=1 for the venus path), so splice a
     # virtio-gpu-gl device + a headless EGL backend bound to that render node. The
     # `software` rung and a graphics-off instance export neither var, so no GPU
-    # device is emitted and the boundary is unchanged (design §7.3/§18).
+    # device is emitted and the boundary is unchanged.
     # `-sandbox on` (qemu seccomp) is cheap defense-in-depth for the widened GPU
-    # surface (§13.3); confirmed not to break microvm boot (#042 real boot).
+    # surface; confirmed not to break microvm boot on a real boot.
     # The venus (Vulkan) path additionally requires `blob=true` + a `hostmem`
     # window — without them qemu refuses the device: "venus requires enabled blob
-    # and hostmem options" (found on the #042 real boot). 8G matches the §15 mem
-    # floor; it is a host memory *window* for blob resources, not a guest alloc.
+    # and hostmem options" (found on a real boot). 8G matches the recommended
+    # 8 GiB mem floor; it is a host memory *window* for blob resources, not a
+    # guest alloc.
     if [ -n "''${KATSU_GFX_RENDERNODE:-}" ]; then
       venus=""; [ -n "''${KATSU_GFX_VENUS:-}" ] && venus=",venus=on,blob=true,hostmem=8G"
       args="$args -device virtio-gpu-gl-pci$venus"
@@ -737,7 +739,7 @@ let
       # Boot/runner shape.
       microvm = {
         hypervisor = "qemu";
-        # QEMU package (§14.5). When graphics is on, use the GL-flag-pinned
+        # QEMU package. When graphics is on, use the GL-flag-pinned
         # `graphicsQemu` (see above) so microvm's closure-minimizer can't strip
         # `egl-headless`/`virtio-gpu-gl-pci`. `mkIf` so a graphics-off guest keeps
         # microvm's lean default, byte-for-byte.
@@ -836,7 +838,7 @@ let
       # Graphics: the PCI `virtio-gpu-gl` device the host splices in is normally
       # auto-probed by the in-tree `virtio_gpu` DRM driver, but pin it so `card0`/
       # `renderD128` are guaranteed present for sway/Mesa regardless of probe
-      # order (design §14.4). Appended only when graphics.enable, so a graphics-off
+      # order. Appended only when graphics.enable, so a graphics-off
       # guest's module list is byte-for-byte unchanged.
       boot.kernelModules = [
         "vmw_vsock_virtio_transport"
@@ -845,11 +847,11 @@ let
 
       # Graphics: Mesa userspace for the guest GPU — the virtio Vulkan ICD
       # (`libvulkan_virtio.so`), the `virtio_gpu` Gallium GL driver, and llvmpipe
-      # for the `software` rung (design §14.4). `mkIf` so a graphics-off guest
+      # for the `software` rung. `mkIf` so a graphics-off guest
       # never pulls in `hardware.graphics` (default off ⇒ identical eval).
       hardware.graphics.enable = lib.mkIf graphicsCfg.enable true;
 
-      # Headless sway — the guest display stack (design §8)
+      # Headless sway — the guest display stack (wlroots family)
       #
       # A systemd *user* service under the unprivileged agent (NOT a system
       # service) so the compositor stays inside the agent's blast radius —
@@ -859,9 +861,10 @@ let
       # `WLR_HEADLESS_OUTPUTS=1` create one virtual output (`HEADLESS-1`, sized by
       # swayConfig from graphicsCfg.output); on a GPU rung wlroots renders through
       # the virtio render node, on the `software` rung through llvmpipe. sway
-      # binds the `wayland-1` socket the env/ssh exports advertise. Whether the
-      # real boot brings it up and exports a usable display is the HITL #042 check
-      # (this VM has no nested KVM); here it only needs to evaluate and build.
+      # binds the `wayland-1` socket the env/ssh exports advertise. Whether it
+      # brings the compositor up and exports a usable display is confirmed by
+      # end-to-end validation on a real boot (this VM has no nested KVM); here it
+      # only needs to evaluate and build.
       systemd.user.services.katsuobushi-sway = lib.mkIf graphicsCfg.enable {
         description = "Katsuobushi headless sway compositor (agent display stack)";
         wantedBy = [ "default.target" ];
@@ -1116,7 +1119,7 @@ let
         # lingering agent's dir holding the wayland socket), so it needs no help.
         # `mkIf` (not `optionalString ""`) so graphics-off leaves extraConfig
         # unset — an empty string would still append a trailing newline and alter
-        # the generated sshd_config (§8 #038).
+        # the generated sshd_config.
         extraConfig = lib.mkIf graphicsCfg.enable "SetEnv WAYLAND_DISPLAY=wayland-1";
       };
 
@@ -1183,9 +1186,9 @@ let
           reportApp
         ]
         # Graphics (opt-in): the headless compositor (sway, also provides
-        # `swaymsg` for the #042 `get_outputs` check), the screenshot tool the
-        # `sandbox:screenshot` feature itself shells (grim, §8.2/§10), and the
-        # nested micro-compositor for the game path (gamescope, §8.2). Absent from
+        # `swaymsg` for the real-boot `get_outputs` check), the screenshot tool the
+        # `sandbox:screenshot` feature itself shells (grim), and the
+        # nested micro-compositor for the game path (gamescope). Absent from
         # the closure entirely when graphics is off.
         ++ lib.optionals graphicsCfg.enable (
           with pkgs;
@@ -1622,9 +1625,10 @@ let
         hostCid = 2;
       }
       // lib.optionalAttrs graphicsCfg.enable {
-        # §18 shape, camelCase, emitted only when enabled (so a graphics-off spec
-        # is unchanged apart from the already-bumped specVersion). The host-side
-        # GPU resolver (start.rs) consumes `gpu`; the guest display stack (#040)
+        # The spec graphics block (camelCase: enable, gpu[], output{width,height,
+        # refresh}), emitted only when enabled (so a graphics-off spec is
+        # unchanged apart from the already-bumped specVersion). The host-side
+        # GPU resolver (start.rs) consumes `gpu`; the guest display stack
         # consumes `output`.
         graphics = {
           enable = true;

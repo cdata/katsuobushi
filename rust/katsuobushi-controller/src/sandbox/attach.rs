@@ -31,7 +31,7 @@ enum Outcome {
     /// A recipe was written and its path printed (the wrapper will `exec` it).
     Emitted,
     /// A pre-check failed; the caller prints this to stderr and exits nonzero
-    /// **without** emitting a script (: planning failure → no path).
+    /// **without** emitting a script (a planning failure → no path).
     Guidance(String),
 }
 
@@ -149,8 +149,8 @@ fn no_session(inst: &str) -> String {
     )
 }
 
-/// The shared "what to do next" lines both pre-check failures end with
-///: a freshly launched VM needs ~30-60s to
+/// The shared "what to do next" lines both pre-check failures end with:
+/// a freshly launched VM needs ~30-60s to
 /// arm the session, and only `--agent` instances ever run one.
 fn guidance_tail(inst: &str) -> String {
     format!(

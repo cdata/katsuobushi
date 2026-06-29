@@ -68,10 +68,10 @@ pub trait Host {
     /// Connect to the guest control server over vsock.
     fn vsock_connect(&self, cid: u32, port: u32) -> io::Result<VsockStream>;
     /// Enumerate the host render nodes (`/dev/dri/renderD*`), sorted. The seam
-    /// the §7.2 GPU resolver and §12 preflight both stand on; a host with no DRI
-    /// subsystem yields `[]`, not an error.
+    /// the GPU resolver and the `sandbox:status` preflight both stand on; a host
+    /// with no DRI subsystem yields `[]`, not an error.
     fn render_nodes(&self) -> io::Result<Vec<PathBuf>>;
-    /// Whether the calling uid can `open(O_RDWR)` a render node — the §14.3
+    /// Whether the calling uid can `open(O_RDWR)` a render node — the
     /// permission prerequisite (portable nodes are `root:render 0660`, and the
     /// operator may not be in `render`). A non-destructive probe: it opens for
     /// read+write and immediately closes, issuing no ioctl.
