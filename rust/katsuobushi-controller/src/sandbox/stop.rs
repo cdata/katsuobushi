@@ -1,7 +1,7 @@
 //! `katsuctl sandbox stop` — power an instance off over native QMP, then
-//! conditionally remove its state/runtime dirs (design/katsuctl.md §2.2/§2.3).
+//! conditionally remove its state/runtime dirs.
 //!
-//! Replaces the shell at lib/sandbox/default.nix (the `sandbox:stop` command):
+//! Replaces the shell at (the `sandbox:stop` command):
 //! the empty-instance guard (a destructive `rm` must never expand to the whole
 //! state root), the `qmp_capabilities`+`quit` handshake, and the
 //! named-vs-ephemeral removal policy.

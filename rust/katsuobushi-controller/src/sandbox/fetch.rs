@@ -1,6 +1,6 @@
 //! `katsuctl sandbox fetch` — pull the work-product branch (the sandbox branch)
-//! into the host repo (design/katsuctl.md §2.2, "act directly"). Replaces the
-//! shell at lib/sandbox/default.nix:1898-1908: a single resolved `git fetch`.
+//! into the host repo ("act directly"). Replaces the
+//! shell at: a single resolved `git fetch`.
 
 use std::path::Path;
 use std::process::Command;
@@ -26,7 +26,7 @@ pub fn run(config: &Path, instance: &str, global: Global) -> Result<()> {
 ///
 /// The invocation is exactly today's shell:
 /// `git fetch <stateGlob>/<inst>/sync.git sandbox/<inst>:sandbox/<inst>`
-/// (lib/sandbox/default.nix:1905), with `git` taken from `spec.tools.git`.
+///, with `git` taken from `spec.tools.git`.
 fn fetch_with(host: &impl Host, spec: &Spec, instance: &str, json: bool) -> Result<String> {
     let roots = resolve_roots(&spec.roots)?;
     let inst = resolve_instance(&roots.state_glob, host, instance)?;

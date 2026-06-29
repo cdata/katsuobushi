@@ -1,18 +1,18 @@
-//! `katsuctl sandbox status` — list all instances or detail one (design §13, §7).
+//! `katsuctl sandbox status` — list all instances or detail one.
 //!
-//! Replaces the shell `sandbox:status` command (lib/sandbox/default.nix:1803-1896):
-//! the byte-sorted instance listing (`_list_instances`, :1681-1687), the live
-//! `column -t` table (:1868), the per-instance detail view (:1882-1895), and the
+//! Replaces the shell `sandbox:status` command:
+//! the byte-sorted instance listing (`_list_instances`), the live
+//! `column -t` table, the per-instance detail view, and the
 //! secret + `/dev/vhost-vsock` preflight (`statusSecretChecks` + the vhost row,
-//! :1727-1755, :1833-1838). A bare `status` (list mode) doubles as the launch
+//! ). A bare `status` (list mode) doubles as the launch
 //! prerequisite gate: it exits **nonzero** iff any declared secret is missing or
-//! `vhost-vsock` is absent (:1870-1872).
+//! `vhost-vsock` is absent.
 //!
 //! The pure pieces — the preflight decision over a declared `secrets` set, the
 //! table formatting, and the index↔name ordering — are factored out of the
 //! world-touching derivation so they are unit-testable without a live VM: the
 //! preflight takes injected env/file/vhost lookups, and the renderers take
-//! already-derived [`InstanceView`]s (design §7.2 tier 1). Liveness, the
+//! already-derived [`InstanceView`]s (tier 1). Liveness, the
 //! `instance.json` read, and the branch probe go through the host seam / the
 //! `instance` model exactly as `stop`/`fetch` do.
 
@@ -32,8 +32,8 @@ use crate::sandbox::spec::{
 };
 use crate::Global;
 
-/// Whether an instance's VM is up — derived live from QMP, never stored
-/// (design §6/§14.5). Serializes lowercase for the `--json` `state` field.
+/// Whether an instance's VM is up — derived live from QMP, never stored.
+/// Serializes lowercase for the `--json` `state` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum State {
@@ -42,7 +42,7 @@ enum State {
 }
 
 /// One instance's derived summary — the unit of both the list array and the
-/// detail object in `--json` (design §13: name, state, mode, named, port, cid,
+/// detail object in `--json` (: name, state, mode, named, port, cid,
 /// branch-present). `mode`/`port`/`cid` are `Option` because an instance whose
 /// `instance.json` is missing or unreadable still lists (degraded), and only
 /// agent instances carry a CID.
@@ -56,7 +56,7 @@ struct InstanceView {
     port: Option<u16>,
     cid: Option<u32>,
     branch_present: bool,
-    /// The full per-instance liveness line (design §9, #030) — turn/agent state
+    /// The full per-instance liveness line — turn/agent state
     /// from `turn-state.json` plus transport freshness from `liveness.json`,
     /// corroborated against QMP. `None` when no `turn-state.json` is present
     /// (degrades to today's connection-derived behavior). Surfaced in the detail
@@ -95,7 +95,7 @@ impl InstanceView {
     }
 }
 
-// ---- liveness surfacing (the §9/#030 out-of-band turn + transport line) ----
+// ---- liveness surfacing (the / out-of-band turn + transport line) ----
 
 /// The compact age token (`9m`) for `then` measured from `now`, both already
 /// through the host clock seam. `None` when either is absent or unparseable
@@ -111,17 +111,17 @@ fn age_ago(now: Option<i64>, then: Option<&str>) -> Option<String> {
     age_token(now, then).map(|t| format!("{t} ago"))
 }
 
-/// Build the full per-instance liveness line (design §9, §10, #030).
+/// Build the full per-instance liveness line.
 ///
 /// Reads **`turn-state.json` first** (the guest-authoritative turn/agent state,
 /// needs no connection); a missing record returns `None` so `status` degrades to
-/// today's behavior. The transport tail is corroborated against QMP (§10): an
+/// today's behavior. The transport tail is corroborated against QMP: an
 /// active stream is only believed while the VM is up, so a stale `streamActive`
 /// can never mask a dead server — `· no active stream` (VM up, merely idle / a
 /// hung agent) is distinguished from `· vm stopped` (server gone).
 ///
 /// Examples:
-/// - `turn 3 ended-unreported 14m ago · no active stream` (unattended §6.2 verdict)
+/// - `turn 3 ended-unreported 14m ago · no active stream` (unattended verdict)
 /// - `turn 3 in-flight · last activity 9m ago · heartbeat 4s ago` (attached)
 fn render_liveness(
     ts: Option<&TurnState>,
@@ -133,7 +133,7 @@ fn render_liveness(
     let mut parts: Vec<String> = Vec::new();
 
     // Head: `turn N <phase>` (the turn id is absent while idle), with an ended
-    // phase carrying its `endedAt` age inline — this is the §6.2 surfacing.
+    // phase carrying its `endedAt` age inline — this is the surfacing.
     let phase = ts.phase.label();
     let mut head = match ts.turn_id {
         Some(id) => format!("turn {id} {phase}"),
@@ -147,14 +147,14 @@ fn render_liveness(
     parts.push(head);
 
     // A still-in-flight turn shows its last-activity age; a stale value here is
-    // how the never-`Stop` hung-mid-tool case (§6.2/§8) becomes visible.
+    // how the never-`Stop` hung-mid-tool case becomes visible.
     if ts.phase.is_in_flight() {
         if let Some(age) = age_ago(now, Some(ts.last_activity_at.as_str())) {
             parts.push(format!("last activity {age}"));
         }
     }
 
-    // Transport tail, corroborated against QMP (§10): only trust an active stream
+    // Transport tail, corroborated against QMP: only trust an active stream
     // while the VM is up.
     let stream_active = running && lv.is_some_and(|l| l.stream_active);
     if stream_active {
@@ -223,7 +223,7 @@ impl Preflight {
 /// Re-check each declared secret at its *host* source and `/dev/vhost-vsock`,
 /// pure over injected lookups so the gate decision is unit-testable without a
 /// real env or filesystem (mirrors `statusSecretChecks` + the vhost row,
-/// lib/sandbox/default.nix:1727-1755, :1833-1838).
+/// ).
 ///
 /// A `FromEnv` secret passes iff its host env var is set and non-empty; a
 /// `FromFile` secret passes iff its file is readable. The `CLAUDE_CODE_OAUTH_TOKEN`
@@ -281,7 +281,7 @@ fn preflight(
     Preflight { rows }
 }
 
-/// Render the preflight as a clean checklist (design §13). The glyph is plain
+/// Render the preflight as a clean checklist. The glyph is plain
 /// Unicode (✓/⚠) and survives color gating; only its coloring is gated, so with
 /// color off this is `✓ label  detail` / `⚠ label  detail`. Labels are padded to
 /// the widest so the detail column aligns, mirroring the shell's `%-Ns`.
@@ -305,8 +305,8 @@ fn render_preflight(pf: &Preflight, r: &Renderer) -> String {
 
 // ---- the list table (pure over already-derived views) ----
 
-/// Render the instance table — the `comfy-table` replacement for `column -t`
-/// (design §13; lib/sandbox/default.nix:1868). Rows are numbered 1..n in the
+/// Render the instance table — the `comfy-table` replacement for `column -t`.
+/// Rows are numbered 1..n in the
 /// order given, which is the byte-sorted [`list_instances`] order so the `#`
 /// column matches the index every other command accepts. State is color-coded
 /// (running=green, stopped=dim) via styled cells the borderless table colors
@@ -316,7 +316,7 @@ fn render_list(views: &[InstanceView], r: &Renderer) -> String {
     // not things you type (you drive an instance by name or `#`), so they stay in
     // the detail view (with the actual ssh/prompt commands) and in `--json` for
     // machine consumers — out of the scannable human list.
-    // LIVENESS is the compact out-of-band turn/agent state (#030) — the column
+    // LIVENESS is the compact out-of-band turn/agent state — the column
     // that makes a swarm's "stopped without reporting" / hung-mid-tool instances
     // scannable without attaching; `-` when no `turn-state.json` is present.
     let headers = ["#", "INSTANCE", "STATE", "MODE", "PERSIST", "LIVENESS"];
@@ -344,8 +344,7 @@ fn render_list(views: &[InstanceView], r: &Renderer) -> String {
 
 // ---- the detail view (pure over the derived view + computed strings) ----
 
-/// Render the single-instance detail block (design §13; the current fields at
-/// lib/sandbox/default.nix:1882-1895). The `ssh`/`attach` lines appear only when
+/// Render the single-instance detail block. The `ssh`/`attach` lines appear only when
 /// running with a known port, `branch` only when the sandbox ref exists, and
 /// `agent` only for an instance carrying a CID.
 fn render_detail(v: &InstanceView, ssh: Option<&str>, console_log: &str, r: &Renderer) -> String {
@@ -367,7 +366,7 @@ fn render_detail(v: &InstanceView, ssh: Option<&str>, console_log: &str, r: &Ren
         ),
         format!("mode:       {}", v.mode_label()),
     ];
-    // The out-of-band liveness line (#030): turn/agent state + transport
+    // The out-of-band liveness line: turn/agent state + transport
     // freshness, present only once the guest has written a `turn-state.json`.
     if let Some(liveness) = &v.liveness {
         lines.push(format!("liveness:   {liveness}"));
@@ -423,7 +422,7 @@ fn summarize(
         None => (None, false, None, None),
     };
 
-    // Out-of-band liveness (#030): read the guest-authored `turn-state.json`
+    // Out-of-band liveness: read the guest-authored `turn-state.json`
     // first (no connection needed), then the host-written `liveness.json` for
     // transport freshness. Both are advisory — a missing/old file just degrades.
     let inst_dir = roots.state_glob.join(name);
@@ -446,8 +445,8 @@ fn summarize(
 }
 
 /// Whether `refs/heads/sandbox/<name>` exists in the instance's bare mirror —
-/// the Rust form of the shell's `git -C $d/sync.git rev-parse --verify` probe
-/// (lib/sandbox/default.nix:1889). A missing mirror (or any git error) is simply
+/// the Rust form of a `git -C $d/sync.git rev-parse --verify` probe.
+/// A missing mirror (or any git error) is simply
 /// "no branch", never a hard failure.
 fn branch_present(host: &impl Host, spec: &Spec, roots: &ResolvedRoots, name: &str) -> bool {
     let sync_git = roots.state_glob.join(name).join("sync.git");
@@ -477,7 +476,7 @@ pub fn run(config: &Path, instance: Option<String>, global: Global) -> Result<()
 
 /// List mode: derive every instance, run the preflight gate, render, and exit
 /// nonzero iff the preflight found a problem (the launch prerequisite gate,
-/// lib/sandbox/default.nix:1821-1872).
+/// ).
 fn run_list(
     host: &impl Host,
     spec: &Spec,
@@ -1009,7 +1008,7 @@ mod tests {
         }
     }
 
-    // ---- liveness surfacing (the §9/§10/#030 out-of-band line) ----
+    // ---- liveness surfacing (the // out-of-band line) ----
 
     use crate::sandbox::liveness::Phase;
 
@@ -1038,7 +1037,7 @@ mod tests {
 
     #[test]
     fn it_surfaces_an_unattended_ended_unreported_turn() {
-        // §6.2 verdict, persisted: ended 14m ago with nobody driving.
+        // verdict, persisted: ended 14m ago with nobody driving.
         let state = turn_state(
             Phase::EndedUnreported,
             Some(3),
@@ -1079,7 +1078,7 @@ mod tests {
 
     #[test]
     fn it_makes_a_hung_mid_tool_turn_visible_via_a_stale_last_activity() {
-        // in-flight with no Stop and a long-stale lastActivityAt (§6.2/§8): the
+        // in-flight with no Stop and a long-stale lastActivityAt: the
         // age is what surfaces the hang, with no connection.
         let state = turn_state(Phase::InFlight, Some(3), None, "2026-06-28T11:46:00Z");
         let line = render_liveness(Some(&state), None, now(), true).expect("a line");
@@ -1091,7 +1090,7 @@ mod tests {
 
     #[test]
     fn it_distinguishes_a_dead_server_from_an_idle_one_via_qmp() {
-        // §10: a stale in-flight file is ambiguous on its own. QMP corroborates —
+        //: a stale in-flight file is ambiguous on its own. QMP corroborates —
         // VM up ⇒ "no active stream" (idle / hung agent, server alive); VM down ⇒
         // "vm stopped" (the server is gone, which is why the file went stale).
         let state = turn_state(Phase::InFlight, Some(3), None, "2026-06-28T11:46:00Z");
@@ -1105,7 +1104,7 @@ mod tests {
 
     #[test]
     fn it_never_believes_an_active_stream_when_the_vm_is_down() {
-        // A stale `streamActive:true` liveness must not mask a dead VM (§10): QMP
+        // A stale `streamActive:true` liveness must not mask a dead VM: QMP
         // wins, so the tail is "vm stopped", not a phantom heartbeat.
         let state = turn_state(Phase::InFlight, Some(3), None, "2026-06-28T11:46:00Z");
         let lv = Liveness {

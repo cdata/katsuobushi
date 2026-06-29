@@ -4,7 +4,7 @@
   # Katsuobushi carries the sandbox infra (microvm.nix) as a transitive input,
   # so this flake declares only nixpkgs, flake-utils, and katsuobushi — plus any
   # *project-data* sources you want pinned (reference repos, dotfiles). Those
-  # stay consumer-declared; they are not absorbed by the toolkit (design 4.16).
+  # stay consumer-declared; they are not absorbed by the toolkit.
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";

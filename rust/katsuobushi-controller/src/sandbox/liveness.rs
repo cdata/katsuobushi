@@ -1,22 +1,21 @@
-//! Host-side per-instance transport record — `liveness.json`
-//! (design/sandbox-liveness.md §9).
+//! Host-side per-instance transport record — `liveness.json`.
 //!
-//! Two host-owned facts live here, both connection-scoped to an attached `drive`
-//! (design §9):
+//! Two host-owned facts live here, both connection-scoped to an attached
+//! `drive`:
 //!
 //! - the **transport heartbeat** freshness (`lastHeartbeatAt` / `streamActive`),
 //!   written by the `prompt` watchdog as `Heartbeat`s arrive — *silently*, a file
-//!   write that never echoes to the orchestrator (design §8.1);
+//!   write that never echoes to the orchestrator;
 //! - the **turn-id counter** (`nextTurnId`), the monotonic id [`alloc_turn_id`]
 //!   hands each turn. Because the file lives in the persistent state dir, a named
 //!   instance's counter continues across `prompt` invocations → no id reuse,
-//!   which keeps the guest's `turn_id` dedupe correct (design §7.2).
+//!   which keeps the guest's `turn_id` dedupe correct.
 //!
 //! Reads and writes go through the [`Host`] seam, and timestamps the host stamps
 //! go through the host clock seam ([`now_rfc3339`], mirroring `start.rs`'s
 //! `now_timestamp`), so the whole record is `FakeHost`-testable without a VM or a
-//! real clock (design §9, §12). The companion guest-authored `turn-state.json`
-//! (§6.3) is a separate record read out-of-band by `status`; it is not written
+//! real clock. The companion guest-authored `turn-state.json`
+//! is a separate record read out-of-band by `status`; it is not written
 //! here.
 
 use std::path::Path;
@@ -27,10 +26,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::sandbox::host::Host;
 
-/// The `liveness.json` schema version this build writes/reads (design §9, §17).
+/// The `liveness.json` schema version this build writes/reads.
 pub const SUPPORTED_LIVENESS_VERSION: u32 = 1;
 
-/// The host-authored `liveness.json` record (design §9, §17). Lives beside
+/// The host-authored `liveness.json` record. Lives beside
 /// `instance.json` at `<stateGlob>/<inst>/liveness.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -74,9 +73,9 @@ impl Liveness {
 
     /// Write the record through the [`Host`] seam atomically: serialize to a temp
     /// sibling, then rename over the target (rename is atomic within a
-    /// filesystem). #030's `status` reads this file out-of-band, so a reader must
+    /// filesystem). 's `status` reads this file out-of-band, so a reader must
     /// never observe a torn write, and a crash mid-write must not clobber
-    /// `nextTurnId` (design §9 — same temp+rename the guest uses for
+    /// `nextTurnId` (— same temp+rename the guest uses for
     /// turn-state.json). Rewritten at most once per second by the watchdog touch.
     pub fn store(&self, host: &impl Host, path: &Path) -> Result<()> {
         let bytes = serde_json::to_vec(self).context("serializing liveness.json")?;
@@ -94,11 +93,11 @@ impl Liveness {
 }
 
 impl Liveness {
-    /// Read the host-authored record *for `status`* (design §9, §30/#030): unlike
+    /// Read the host-authored record *for `status`*: unlike
     /// [`Liveness::load`] — which self-heals a corrupt/missing file to [`Default`]
     /// for the writer — this returns `None` when the file is missing, unreadable,
     /// unparseable, or version-skewed, so `status` can tell "no transport record
-    /// yet" apart from "a real, fresh stream". Advisory (§15): a degraded read is
+    /// yet" apart from "a real, fresh stream". Advisory: a degraded read is
     /// never an error, it just drops the transport half of the liveness line.
     pub fn read(host: &impl Host, path: &Path) -> Option<Self> {
         let bytes = host.read(path).ok()?;
@@ -107,13 +106,13 @@ impl Liveness {
     }
 }
 
-/// The `turn-state.json` schema version this build reads (design §6.3, §17).
+/// The `turn-state.json` schema version this build reads.
 pub const SUPPORTED_TURN_STATE_VERSION: u32 = 1;
 
-/// The lifecycle phase persisted to `turn-state.json` (§6.3, §17), mirroring the
+/// The lifecycle phase persisted to `turn-state.json`, mirroring the
 /// guest's authoritative state machine: `in-flight` on inject, `ended-ok` on a
 /// terminal report, `ended-unreported` when the grace window closes with no
-/// terminal report (the §6.2 verdict), `idle` between turns.
+/// terminal report (the verdict), `idle` between turns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Phase {
@@ -125,7 +124,7 @@ pub enum Phase {
 
 impl Phase {
     /// The wire/render token for this phase (`status`'s liveness line shows it
-    /// verbatim, so it doubles as the operator-facing surfacing of §6.2's
+    /// verbatim, so it doubles as the operator-facing surfacing of 's
     /// "stopped without reporting").
     pub fn label(self) -> &'static str {
         match self {
@@ -143,17 +142,17 @@ impl Phase {
     }
 
     /// Whether a turn is still in flight — its age is measured from
-    /// `lastActivityAt`, and a stale value is how the never-`Stop` hang (§6.2/§8)
+    /// `lastActivityAt`, and a stale value is how the never-`Stop` hang
     /// becomes visible out-of-band.
     pub fn is_in_flight(self) -> bool {
         matches!(self, Phase::InFlight)
     }
 }
 
-/// The guest-authored, read-only `turn-state.json` record (design §6.3, §17):
+/// The guest-authored, read-only `turn-state.json` record:
 /// authoritative for turn/agent state and written to the share on every
 /// transition, so `status` reads it out-of-band (no connection needed). The host
-/// only ever *reads* it (#027 owns the host-written [`Liveness`] writer); the
+/// only ever *reads* it (owns the host-written [`Liveness`] writer); the
 /// reader is forward-compatible (no `deny_unknown_fields`) so a newer guest can
 /// add fields without breaking an older host's degraded read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,7 +193,7 @@ impl Default for TurnState {
 impl TurnState {
     /// Read the guest-authored record through the [`Host`] seam, returning `None`
     /// when the file is missing, unreadable, unparseable, or version-skewed.
-    /// Advisory (§15): a degraded read is never an error — `status` simply
+    /// Advisory: a degraded read is never an error — `status` simply
     /// degrades to today's connection-derived behavior.
     pub fn read(host: &impl Host, path: &Path) -> Option<Self> {
         let bytes = host.read(path).ok()?;
@@ -275,7 +274,7 @@ pub fn now_unix(host: &impl Host) -> Option<i64> {
 }
 
 /// Allocate the next monotonic `turn_id`, persisting the bump in `liveness.json`
-/// through the [`Host`] seam (design §7.2 / §9). The id handed out is the current
+/// through the [`Host`] seam. The id handed out is the current
 /// `nextTurnId` (default 1); `nextTurnId` is incremented and written back, so the
 /// counter survives across `prompt` invocations. A resend reuses the *same* id
 /// (which the guest dedupes), while two distinct turns can never collide.
@@ -289,7 +288,7 @@ pub fn alloc_turn_id(host: &impl Host, path: &Path) -> Result<u64> {
 
 /// The current UTC time as an RFC3339 string, produced through the host clock
 /// seam (`date -u`, mirroring `start.rs`'s `now_timestamp`) so liveness writes
-/// stay `FakeHost`-testable (design §9). The silent heartbeat touch is best-
+/// stay `FakeHost`-testable. The silent heartbeat touch is best-
 /// effort and swallows the error: a missing timestamp never fails a turn.
 pub fn now_rfc3339(host: &impl Host) -> Result<String> {
     let mut cmd = Command::new("date");
@@ -348,7 +347,7 @@ mod tests {
     #[test]
     fn it_resumes_the_turn_id_counter_from_the_persisted_file() {
         // A persisted nextTurnId of 4 → hands out 4, persists 5 (no reuse across
-        // invocations, the §7.2 guarantee for a named instance).
+        // invocations, the guarantee for a named instance).
         let mut host = FakeHost::new();
         host.push_read(Ok(serde_json::to_vec(&Liveness {
             next_turn_id: 4,
@@ -392,7 +391,7 @@ mod tests {
     fn it_round_trips_a_heartbeat_touch_through_the_seam() {
         // Load → stamp lastHeartbeatAt via the clock seam → store: the written
         // record carries the timestamp and streamActive, exactly the watchdog
-        // touch path (design §8.1/§9), all without a VM or a real clock.
+        // touch path, all without a VM or a real clock.
         let mut host = FakeHost::new();
         host.push_read(Ok(serde_json::to_vec(&Liveness {
             next_turn_id: 3,
@@ -419,8 +418,8 @@ mod tests {
 
     #[test]
     fn it_writes_liveness_atomically_via_temp_then_rename() {
-        // §9: the record must land atomically — write a temp sibling, then rename
-        // it over the target — so #030's out-of-band reader never sees a torn file.
+        //: the record must land atomically — write a temp sibling, then rename
+        // it over the target — so 's out-of-band reader never sees a torn file.
         let host = FakeHost::new();
         Liveness::default()
             .store(&host, &path())
@@ -474,7 +473,7 @@ mod tests {
         assert!(format!("{err:#}").contains("no timestamp"), "{err:#}");
     }
 
-    // ---- the guest-authored turn-state reader (#030) ----
+    // ---- the guest-authored turn-state reader ----
 
     const TURN_STATE: &str = "/state/cdata/katsuobushi/inst-1/turn-state.json";
 
@@ -483,7 +482,7 @@ mod tests {
     }
 
     /// A guest-shaped `turn-state.json` payload — exactly the bytes the guest's
-    /// server writes (§17), so the reader is tested against the real wire shape.
+    /// server writes, so the reader is tested against the real wire shape.
     fn turn_state_bytes(phase: &str, extra: &str) -> Vec<u8> {
         format!(
             r#"{{"turnStateVersion":1,"turnId":3,"phase":"{phase}",{extra}"lastActivityAt":"2026-06-28T12:00:00Z"}}"#
@@ -535,7 +534,7 @@ mod tests {
 
     #[test]
     fn it_returns_none_for_a_version_skewed_turn_state_file() {
-        // A newer/older schema version degrades rather than mis-parsing (§15).
+        // A newer/older schema version degrades rather than mis-parsing.
         let mut host = FakeHost::new();
         host.push_read(Ok(
             br#"{"turnStateVersion":2,"phase":"idle","lastActivityAt":""}"#.to_vec(),
@@ -555,7 +554,7 @@ mod tests {
         assert_eq!(ts.phase, Phase::Idle);
     }
 
-    // ---- the status-facing liveness reader (#030) ----
+    // ---- the status-facing liveness reader ----
 
     #[test]
     fn it_reads_liveness_for_status_when_fresh() {

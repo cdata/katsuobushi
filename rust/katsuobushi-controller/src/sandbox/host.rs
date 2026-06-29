@@ -1,36 +1,32 @@
-//! The host IO seam (design/katsuctl.md §7.1, §2.3).
+//! The host IO seam.
 //!
 //! Everything `katsuctl` does that touches the world — spawning the spec's
 //! pinned tools, the filesystem, TCP port probing, QMP liveness, and the vsock
 //! control connection — goes through [`Host`]. Production ([`HostImpl`]) shells
 //! out to the exact store-path binaries Nix supplies and uses real sockets;
 //! tests drive a [`FakeHost`] that records every call and returns canned
-//! results, so every subcommand is exercisable without booting a VM (the three
-//! test tiers, §7.2).
+//! results, so every subcommand is exercisable without booting a VM.
 //!
 //! Two probe-dependent decisions become *pure* once the world is behind the
-//! seam: [`pick_cid`] (vsock CID allocation, lib/sandbox/default.nix:1346-1370)
-//! and [`pick_port`] (free loopback port, :1483-1493). Both take an injected
+//! seam: [`pick_cid`] (vsock CID allocation)
+//! and [`pick_port`] (free loopback port). Both take an injected
 //! predicate / RNG, so their loop-and-retry logic is unit-testable with a
 //! deterministic fake.
 //!
-//! ## Deviations from the literal design
+//! ## Implementation notes
 //!
-//! - **RNG.** The design sketch types the helpers against `rand::RngCore`, but
-//!   `rand` is not vendored and the sandbox has no crates.io access. This module
-//!   defines a tiny local [`Rng`] trait instead: production [`OsRng`] is a
-//!   `std`-only generator seeded from `/dev/urandom` (falling back to a
-//!   `SystemTime`+pid hash), and tests use a scripted [`FakeRng`].
+//! - **RNG.** These helpers would naturally take `rand::RngCore`, but `rand` is
+//!   not vendored and the sandbox has no crates.io access. This module defines a
+//!   tiny local [`Rng`] trait instead: production [`OsRng`] is a `std`-only
+//!   generator seeded from `/dev/urandom` (falling back to a `SystemTime`+pid
+//!   hash), and tests use a scripted [`FakeRng`].
 //! - **`vsock_connect`.** The rest of the seam is synchronous, but a
 //!   [`tokio_vsock::VsockStream`] is an async resource bound to a runtime. To
 //!   keep the trait sync (and object-safe) [`HostImpl`] owns a current-thread
 //!   tokio runtime and `block_on`s the connect; the returned stream stays valid
-//!   for the lifetime of the `HostImpl` (and its runtime). The future `prompt`
-//!   path drives bytes over the stream; that wire round-trip is covered by the
-//!   one true end-to-end gate (`checks.sandbox`, §7.2), not these unit tests.
-//!
-//! Lands ahead of its callers (the subcommands migrate command-by-command,
-//! design §12), so most of the surface here is `dead_code` until then.
+//!   for the lifetime of the `HostImpl` (and its runtime). The wire round-trip
+//!   over the stream is covered by the end-to-end gate (`checks.sandbox`), not
+//!   these unit tests.
 #![allow(dead_code)]
 
 use std::cell::RefCell;
@@ -42,13 +38,12 @@ use std::process::{Command, Output};
 use anyhow::{bail, Result};
 use tokio_vsock::{VsockAddr, VsockStream};
 
-/// Everything `katsuctl` does that touches the world goes through this trait
-/// (design §7.1). Production shells out to `spec.tools.*` and the real
-/// filesystem/sockets; tests use a fake that records calls and returns canned
-/// results.
+/// Everything `katsuctl` does that touches the world goes through this trait.
+/// Production shells out to `spec.tools.*` and the real filesystem/sockets;
+/// tests use a fake that records calls and returns canned results.
 pub trait Host {
     /// Spawn a (pinned) tool to completion and capture its output. Callers build
-    /// the [`Command`] around a store-path program from `spec.tools.*` (§2.3).
+    /// the [`Command`] around a store-path program from `spec.tools.*`.
     fn run(&self, cmd: &Command) -> io::Result<Output>;
     /// Read a file whole.
     fn read(&self, p: &Path) -> io::Result<Vec<u8>>;
@@ -56,20 +51,20 @@ pub trait Host {
     fn write(&self, p: &Path, bytes: &[u8]) -> io::Result<()>;
     /// Rename `from` to `to` (atomically within a filesystem). Paired with
     /// [`write`](Host::write) to a temp sibling, this gives an atomic file
-    /// update — a reader never observes a torn write (design §9).
+    /// update — a reader never observes a torn write.
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
     /// Whether a path exists.
     fn exists(&self, p: &Path) -> bool;
     /// List the immediate subdirectory names of `p` (each a directory entry's
     /// file name), in arbitrary order. Non-directory entries are skipped. The
     /// instance-index seam: routes `resolve.rs`'s enumeration through the host so
-    /// it is `FakeHost`-testable (design §7.1).
+    /// it is `FakeHost`-testable.
     fn list_dir(&self, p: &Path) -> io::Result<Vec<String>>;
-    /// Whether a loopback TCP port is free — the [`pick_port`] predicate (:1488).
+    /// Whether a loopback TCP port is free — the [`pick_port`] predicate.
     fn port_is_free(&self, port: u16) -> bool;
-    /// Whether a qemu QMP monitor is listening at `sock` (native QMP, #006).
+    /// Whether a qemu QMP monitor is listening at `sock` (native QMP).
     fn qmp_alive(&self, sock: &Path) -> bool;
-    /// Connect to the guest control server over vsock (design §2.3).
+    /// Connect to the guest control server over vsock.
     fn vsock_connect(&self, cid: u32, port: u32) -> io::Result<VsockStream>;
 }
 
@@ -156,13 +151,13 @@ impl Host for HostImpl {
 
     fn port_is_free(&self, port: u16) -> bool {
         // Free iff we can claim it: a successful bind on loopback. Mirrors the
-        // shell probe (`/dev/tcp` connect inverted) at :1488 — binding is the
+        // shell probe (`/dev/tcp` connect inverted) at — binding is the
         // host-side analogue and avoids a phantom connect to a foreign listener.
         std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
     }
 
     fn qmp_alive(&self, sock: &Path) -> bool {
-        // The native QMP module (#006) is the one true liveness probe (§2.3).
+        // The native QMP module is the one true liveness probe.
         crate::sandbox::qmp::is_alive(sock)
     }
 
@@ -227,20 +222,20 @@ fn os_seed() -> u64 {
 }
 
 /// Lowest vsock CID an instance may claim — 0..=2 are reserved (hypervisor,
-/// local, host), so the modulus leaves room to add 3 (:1359, design §7.1).
+/// local, host), so the modulus leaves room to add 3.
 const CID_SPAN: u32 = 2_147_483_640;
 /// First reserved-free CID.
 const CID_BASE: u32 = 3;
-/// Bound on allocation attempts before giving up (:1357).
+/// Bound on allocation attempts before giving up.
 const ALLOC_TRIES: usize = 100;
 
-/// Lowest loopback port [`pick_port`] hands out (:1488).
+/// Lowest loopback port [`pick_port`] hands out.
 const PORT_BASE: u16 = 20_000;
-/// Size of the loopback port window, `[PORT_BASE, PORT_BASE + PORT_SPAN)` (:1488).
+/// Size of the loopback port window, `[PORT_BASE, PORT_BASE + PORT_SPAN)`.
 const PORT_SPAN: u32 = 20_000;
 
 /// Allocate a vsock CID not already claimed by a sibling instance — a pure loop
-/// over an injected RNG (design §7.1; default.nix:1346-1370). Tries up to
+/// over an injected RNG (default.nix). Tries up to
 /// [`ALLOC_TRIES`] times, skipping CIDs in `used`, and bails if every draw
 /// collides (a host that has somehow exhausted the space).
 pub fn pick_cid(used: &HashSet<u32>, rng: &mut impl Rng) -> Result<u32> {
@@ -254,7 +249,7 @@ pub fn pick_cid(used: &HashSet<u32>, rng: &mut impl Rng) -> Result<u32> {
 }
 
 /// Pick a free loopback port — a pure loop over an injected `is_free` predicate
-/// and RNG (design §7.1; default.nix:1483-1493). Draws from `[20000, 40000)`,
+/// and RNG (default.nix). Draws from `[20000, 40000)`,
 /// returning the first the predicate accepts; bails after [`ALLOC_TRIES`]
 /// rejections.
 pub fn pick_port(is_free: impl Fn(u16) -> bool, rng: &mut impl Rng) -> Result<u16> {
@@ -301,7 +296,7 @@ pub enum Call {
 /// "true" inputs (anything not in the set is `false`). `vsock_connect` cannot
 /// fabricate a live [`VsockStream`], so it records the call and returns an
 /// error — seam tests assert the connect was *attempted*; the byte round-trip
-/// is the e2e gate's job (§7.2).
+/// is the e2e gate's job.
 #[derive(Default)]
 pub struct FakeHost {
     calls: RefCell<Vec<Call>>,

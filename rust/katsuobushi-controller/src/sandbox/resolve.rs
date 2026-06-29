@@ -1,12 +1,12 @@
-//! Shared instance resolution (design/katsuctl.md §4, issue #005).
+//! Shared instance resolution.
 //!
 //! Every sandbox subcommand that takes an `<instance>` argument resolves it the
 //! same way the prior-art shell did (`instanceHelpers`,
-//! lib/sandbox/default.nix:1680-1710): an all-digit argument is a 1-based index
+//! ): an all-digit argument is a 1-based index
 //! into the state directories sorted in `LC_ALL=C` (byte) order; anything else
 //! is a literal instance name (every real instance name carries a `-`, so names
 //! are never all-digits). Lives in its own module so the concurrently-developed
-//! `instance.json` model (#010/#012) can grow alongside without colliding.
+//! `instance.json` model can grow alongside without colliding.
 
 use std::path::Path;
 
@@ -19,12 +19,12 @@ use crate::sandbox::host::Host;
 /// All-digit `arg` → a 1-based index into the byte-sorted directory listing
 /// (error if out of range). Otherwise `arg` is a literal name and must name an
 /// existing state directory (error if not). Mirrors `_resolve_instance` /
-/// `_list_instances` (lib/sandbox/default.nix:1680-1710).
+/// `_list_instances`.
 pub fn resolve_instance(state_glob: &Path, host: &impl Host, arg: &str) -> Result<String> {
     // An empty selector would otherwise fall into the literal-name branch and
     // resolve to the state root itself (`Path::join("")`), failing only later at
     // the git layer. Reject it up front with a usage-style error, mirroring the
-    // old wrapper guard (lib/sandbox/default.nix:1903).
+    // old wrapper guard.
     if arg.is_empty() {
         bail!("usage: an instance name or 1-based index is required (see sandbox:status)");
     }
@@ -41,7 +41,7 @@ pub fn resolve_instance(state_glob: &Path, host: &impl Host, arg: &str) -> Resul
 }
 
 /// An argument is an index iff it is non-empty and all ASCII digits — the same
-/// `*[!0-9]*` test the shell uses (lib/sandbox/default.nix:1692).
+/// `*[!0-9]*` test the shell uses.
 fn is_index(arg: &str) -> bool {
     !arg.is_empty() && arg.bytes().all(|b| b.is_ascii_digit())
 }
@@ -64,7 +64,7 @@ fn resolve_index(state_glob: &Path, host: &impl Host, arg: &str) -> Result<Strin
 
 /// Enumerate the immediate subdirectories of `state_glob` (each is an instance
 /// name), sorted by raw bytes — the Rust equivalent of `_list_instances`'
-/// `for d in glob/*/ … | LC_ALL=C sort` (lib/sandbox/default.nix:1681-1687).
+/// `for d in glob/*/ … | LC_ALL=C sort`.
 /// Routed through the [`Host`] seam (rather than `std::fs` directly) so index
 /// resolution is `FakeHost`-testable. A missing root is an empty list, not an
 /// error (matching the shell's `[ -d ] || return 0`).
@@ -72,7 +72,7 @@ fn resolve_index(state_glob: &Path, host: &impl Host, arg: &str) -> Result<Strin
 /// Public so `sandbox status` can number its listing in exactly the order index
 /// resolution counts against — one shared enumeration keeps the `#` printed by
 /// `status` and the index every other command accepts denoting the same instance
-/// (design §13; the `_list_instances`/`_resolve_instance` parity, :1670-1711).
+/// (the `_list_instances`/`_resolve_instance` parity).
 pub fn list_instances(state_glob: &Path, host: &impl Host) -> Result<Vec<String>> {
     let mut names = match host.list_dir(state_glob) {
         Ok(names) => names,
@@ -86,7 +86,7 @@ pub fn list_instances(state_glob: &Path, host: &impl Host) -> Result<Vec<String>
 
     // The shell glob `"${stateGlob}"/*/` excludes dot-prefixed directories;
     // `read_dir` does not, so drop them here to keep byte-sorted 1-based indices
-    // aligned with `_list_instances` (lib/sandbox/default.nix:1683).
+    // aligned with `_list_instances`.
     names.retain(|name| !name.starts_with('.'));
     // `LC_ALL=C sort` is byte ordering; sort the UTF-8 names by their raw bytes
     // so this matches the shell listing the indices are numbered against.

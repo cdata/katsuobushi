@@ -1,4 +1,4 @@
-//! The shared rendering layer every subcommand emits through (design §13).
+//! The shared rendering layer every subcommand emits through.
 //!
 //! Two output worlds live behind one [`Renderer`]: machine-readable `--json`
 //! and polished human text. The renderer carries the two resolved policy bits —
@@ -6,7 +6,7 @@
 //! so a subcommand never re-derives them; it just asks the renderer to
 //! serialize a value or paint a string.
 //!
-//! ## Strict color gating (design §13, the acceptance core)
+//! ## Strict color gating (the acceptance core)
 //!
 //! Color resolution is a pure function, [`color_enabled`], over four injected
 //! inputs — the `--color` choice, the `--json` flag, whether stdout is a TTY,
@@ -14,8 +14,8 @@
 //! real terminal. The rules:
 //!
 //! - `--json` **always** wins: structured output is never decorated, so a parser
-//!   never has to strip ANSI (and the emitted `start`/`attach` scripts in §13
-//!   stay `exec`-clean).
+//!   never has to strip ANSI (and the emitted `start`/`attach` scripts stay
+//!   `exec`-clean).
 //! - `always` forces color on, `never` forces it off.
 //! - `auto` enables color **only** when stdout is a TTY *and* `NO_COLOR` is
 //!   unset (the [NO_COLOR convention](https://no-color.org): any value, even
@@ -27,7 +27,7 @@
 //! gated.
 //!
 //! Lands ahead of its callers (the subcommands migrate command-by-command,
-//! design §12), so most of the surface here is `dead_code` until then.
+//! ), so most of the surface here is `dead_code` until then.
 #![allow(dead_code)]
 
 use crate::{ColorWhen, Global};
@@ -38,7 +38,7 @@ use serde::Serialize;
 use std::io::IsTerminal;
 
 /// Resolve whether human output may be colored, given the `--color` choice, the
-/// `--json` flag, and the two environment probes (design §13). Pure over its
+/// `--json` flag, and the two environment probes. Pure over its
 /// inputs so the gating matrix is testable without a real terminal — production
 /// callers pass the live `stdout().is_terminal()` / `NO_COLOR` values via
 /// [`Renderer::resolve`].
@@ -55,8 +55,8 @@ pub fn color_enabled(when: ColorWhen, json: bool, stdout_is_tty: bool, no_color:
 }
 
 /// One streamed report's flavor — the four `protocol::Status` variants plus the
-/// three watchdog verdicts the `prompt` `drive` raises (design/sandbox-liveness.md
-/// §16), each mapped here to a glyph + color (design §13: `working`=dim,
+/// three watchdog verdicts the `prompt` `drive` raises (
+/// ), each mapped here to a glyph + color (: `working`=dim,
 /// `done`=green ✓, `blocked`=yellow ⚠, `info`=blue). Kept local rather than
 /// depending on `katsuobushi-sandbox-protocol`; the `prompt` subcommand maps
 /// `Status` → this when it renders a stream.
@@ -66,13 +66,13 @@ pub enum ReportKind {
     Done,
     Blocked,
     Info,
-    /// `TurnCompleted{reported:false}` (§6.2): the agent stopped without a
+    /// `TurnCompleted{reported:false}`: the agent stopped without a
     /// terminal report — a warning (⚠), not a faked success.
     Stopped,
-    /// The progress-stall notice (§8): no progress for the stall window. Surfaced
+    /// The progress-stall notice: no progress for the stall window. Surfaced
     /// once per episode, dim ⚠ — awareness, never a kill.
     Stalled,
-    /// Transport dead / resend exhausted (§7.2, §8): the turn could not be driven
+    /// Transport dead / resend exhausted: the turn could not be driven
     /// at all — an error (✗).
     Lost,
 }
@@ -95,7 +95,7 @@ impl Renderer {
     }
 
     /// Resolve the renderer from the global flags against the live process
-    /// environment — stdout's TTY-ness and `NO_COLOR` (design §13). This is the
+    /// environment — stdout's TTY-ness and `NO_COLOR`. This is the
     /// one place that touches the real terminal/env; the policy itself is the
     /// pure [`color_enabled`].
     pub fn resolve(global: Global) -> Self {
@@ -186,7 +186,7 @@ impl Renderer {
         }
     }
 
-    /// Render one streamed report with its status glyph + color (design §13).
+    /// Render one streamed report with its status glyph + color.
     /// The glyph is plain Unicode and survives gating; only the coloring is
     /// gated, so with color off this is the bare `"✓ text"` / `"⚠ text"` / text.
     pub fn report(&self, kind: ReportKind, text: &str) -> String {
@@ -203,7 +203,7 @@ impl Renderer {
 
     /// Render a structured error: human form is the `error:` prefix (red when
     /// color is on) followed by the message; `--json` form is the
-    /// `{"error": "...", "kind": "..."}` object the skill parses (design §13).
+    /// `{"error": "...", "kind": "..."}` object the skill parses.
     /// Pure — does not print or exit, so it is unit-testable; [`Self::fail`]
     /// wires it to stderr + a nonzero exit.
     pub fn render_error(&self, kind: &str, message: &str) -> String {
@@ -214,9 +214,9 @@ impl Renderer {
         }
     }
 
-    /// Print a rendered error to stderr and exit nonzero (design §13: `--json`
+    /// Print a rendered error to stderr and exit nonzero (: `--json`
     /// errors exit nonzero too). Minimal exit-code wiring — the real per-command
-    /// error mapping grows as the subcommands land (design §12).
+    /// error mapping grows as the subcommands land.
     pub fn fail(&self, kind: &str, message: &str) -> ! {
         eprintln!("{}", self.render_error(kind, message));
         std::process::exit(1);
@@ -260,7 +260,7 @@ impl TableCell {
 }
 
 /// Render an aligned, borderless status table built on `comfy-table` — the
-/// replacement for the old `column -t` (design §13; lib/sandbox/default.nix:1814).
+/// replacement for the old `column -t`.
 /// Width is computed from content (arrangement disabled) rather than the
 /// terminal, so output is deterministic. Color is applied by comfy-table itself
 /// (not baked into the cell strings), so it measures the *printable* width and
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn it_renders_watchdog_kinds_with_glyphs_without_ansi_when_color_off() {
-        // The three liveness verdicts (design/sandbox-liveness.md §16): Stopped
+        // The three liveness verdicts: Stopped
         // and Stalled warn (⚠), Lost errors (✗); glyphs survive gating.
         let r = Renderer::new(false, false);
         assert_eq!(

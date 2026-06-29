@@ -1,24 +1,23 @@
-//! Per-instance state — `instance.json` (design/katsuctl.md §6).
+//! Per-instance state — `instance.json`.
 //!
 //! Today the runner scatters scalar per-instance metadata across tiny files
 //! (`instance`, `mode`, `vsock-cid`, `ssh-port`, and the `.named` marker —
-//! lib/sandbox/default.nix:1341, 1343-1344, 1365, 1493). This folds them into a
+//!, 1343-1344, 1365, 1493). This folds them into a
 //! single versioned `instance.json` that `katsuctl` owns and writes, living at
 //! `<stateGlob>/<name>/instance.json`.
 //!
 //! Rust owns the schema (Nix/guest produce JSON to match), so every struct is
 //! `#[serde(deny_unknown_fields)]` and [`Instance::instance_version`] is checked
 //! on read — a stale reader fails loud rather than silently misbehaving, exactly
-//! as the spec loader does (design §5.1, §14.6 — no migration, sandboxes are
-//! ephemeral).
+//! as the spec loader does (no migration — sandboxes are ephemeral).
 //!
 //! Non-scalar artifacts stay as real files/dirs and are **not** modelled here:
-//! `authorized_keys` (:1481), `console.log` (:1556), `sync.git/` (:1374), and the
-//! disk images (:1510). Guest-side readers move to `instance.json` separately
-//! (#016). Liveness is never stored — it is derived from QMP (`isRunning`,
-//! :1606-1615).
+//! `authorized_keys`, `console.log`, `sync.git/`, and the
+//! disk images. Guest-side readers move to `instance.json` separately
+//!. Liveness is never stored — it is derived from QMP (`isRunning`,
+//! ).
 
-// Read/write land ahead of the subcommands that consume them (design §12
+// Read/write land ahead of the subcommands that consume them (
 // phasing), so they read as dead code until each command migrates.
 #![allow(dead_code)]
 
@@ -28,42 +27,42 @@ use std::path::{Path, PathBuf};
 
 /// The `instance.json` schema version this build of `katsuctl` understands.
 /// Bumped in lockstep with any reader/writer; [`read`] fails loud on any
-/// mismatch (design §6, §14.6 — no multi-version support, no migration).
+/// mismatch (— no multi-version support, no migration).
 pub const SUPPORTED_INSTANCE_VERSION: u32 = 1;
 
-/// The mode a sandbox instance was started in (design §6).
+/// The mode a sandbox instance was started in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
-    /// An interactive instance: a PTY handed to `ssh`+`tmux` (:1514-1546).
+    /// An interactive instance: a PTY handed to `ssh`+`tmux`.
     Interactive,
-    /// A detached agent instance, driven over the vsock control channel (:1550).
+    /// A detached agent instance, driven over the vsock control channel.
     Agent,
 }
 
-/// The consolidated scalar metadata for one sandbox instance (design §6).
+/// The consolidated scalar metadata for one sandbox instance.
 ///
 /// Lives at `<stateGlob>/<name>/instance.json`; written by `katsuctl`, read by
-/// later commands and (eventually, #016) the guest over 9p.
+/// later commands and (eventually) the guest over 9p.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Instance {
     /// Schema version; checked against [`SUPPORTED_INSTANCE_VERSION`] on read.
     pub instance_version: u32,
-    /// The full suffixed instance name (lib/sandbox/default.nix:1314).
+    /// The full suffixed instance name.
     pub name: String,
-    /// Whether the instance is interactive or an agent (:1344).
+    /// Whether the instance is interactive or an agent.
     pub mode: Mode,
-    /// Persistent (`--name`d) instance; replaces the `.named` marker (:1341).
+    /// Persistent (`--name`d) instance; replaces the `.named` marker.
     pub named: bool,
-    /// The host-side ssh port forwarded to the guest (:1493).
+    /// The host-side ssh port forwarded to the guest.
     pub ssh_port: u16,
-    /// The allocated vsock CID — agent mode only, so `None` otherwise (:1365).
+    /// The allocated vsock CID — agent mode only, so `None` otherwise.
     pub vsock_cid: Option<u32>,
 }
 
 /// The `instance.json` path for `name` under the durable state root `state_dir`
-/// (`<state_dir>/<name>/instance.json`, design §6).
+/// (`<state_dir>/<name>/instance.json`).
 fn instance_path(state_dir: &Path, name: &str) -> PathBuf {
     state_dir.join(name).join("instance.json")
 }
@@ -85,7 +84,7 @@ pub fn write(state_dir: &Path, instance: &Instance) -> Result<()> {
 /// Read, parse, and version-check `<state_dir>/<name>/instance.json`.
 ///
 /// Fails loud on an `instanceVersion` mismatch with a "rebuild your devshell"
-/// hint (design §6) — sandboxes are ephemeral, so there is no migration path.
+/// hint — sandboxes are ephemeral, so there is no migration path.
 pub fn read(state_dir: &Path, name: &str) -> Result<Instance> {
     let path = instance_path(state_dir, name);
     let bytes = std::fs::read(&path)
@@ -163,7 +162,7 @@ mod tests {
 
     #[test]
     fn it_round_trips_an_interactive_instance_without_a_cid() {
-        // Interactive instances carry no vsock CID (design §6).
+        // Interactive instances carry no vsock CID.
         let dir = TempDir::new("interactive");
         let instance = Instance {
             name: "katsuobushi-20260627-def456".to_string(),
@@ -182,7 +181,7 @@ mod tests {
 
     #[test]
     fn it_writes_instance_json_at_the_per_instance_path() {
-        // The file lands at <state_dir>/<name>/instance.json (design §6).
+        // The file lands at <state_dir>/<name>/instance.json.
         let dir = TempDir::new("path");
         let instance = agent_instance();
         write(dir.path(), &instance).expect("write should succeed");

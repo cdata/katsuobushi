@@ -1,7 +1,7 @@
-//! `katsuctl sandbox start` — boot a new instance (design/katsuctl.md §8, the big
-//! one). Replaces the shell `sandboxRunner` (lib/sandbox/default.nix:1274-1597).
+//! `katsuctl sandbox start` — boot a new instance (the big one). Replaces the
+//! shell `sandboxRunner`.
 //!
-//! The split is the whole point (design §2.2, §8.2): every **probe-dependent
+//! The split is the whole point: every **probe-dependent
 //! decision** is made *directly* in Rust through the [`Host`] seam — so it is
 //! `FakeHost`-testable without booting a VM — and only the *results* are baked
 //! into a flat, undecorated shell recipe the devshell wrapper `exec`s. The
@@ -9,16 +9,16 @@
 //!
 //! - the instance **name** (ephemeral `<timestamp>-<pid>` vs named
 //!   `<friendly>-<8hex>`, with verbatim resume of an already-suffixed name;
-//!   [`decide_name`], :1302-1318);
-//! - the **ssh port** ([`pick_port`], :1483-1493) and, in agent mode, the **vsock
-//!   CID** ([`pick_cid`] over the sibling instances' recorded CIDs, :1346-1370);
+//!   [`decide_name`]);
+//! - the **ssh port** ([`pick_port`]) and, in agent mode, the **vsock
+//!   CID** ([`pick_cid`] over the sibling instances' recorded CIDs);
 //! - the **seed commit**: a resumed named branch as-is, else `git stash create`
-//!   falling back to `HEAD` ([`resolve_seed`], :1399-1463);
-//! - whether the bare **mirror** must be cloned (it is idempotent, :1435).
+//!   falling back to `HEAD` ([`resolve_seed`]);
+//! - whether the bare **mirror** must be cloned (it is idempotent).
 //!
 //! The emitted recipe (see [`build_recipe`]) then contains only literals and
 //! unconditional commands — its branching was all resolved here. Secrets are
-//! emitted as **references, never values** (design §10): the script re-reads the
+//! emitted as **references, never values**: the script re-reads the
 //! env var / copies the file at runtime, so no plaintext ever transits
 //! `katsuctl` stdout or a golden snapshot.
 
@@ -34,42 +34,42 @@ use crate::sandbox::instance::{self, Instance, Mode, SUPPORTED_INSTANCE_VERSION}
 use crate::sandbox::spec::{load_spec, resolve_roots, ResolvedRoots, SecretSource, Spec};
 use crate::Global;
 
-/// How the instance branch is seeded (design §8.2; lib/sandbox/default.nix:1455-1464).
+/// How the instance branch is seeded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Seed {
     /// Resume a named instance from its existing branch commit — **no** push is
-    /// emitted (the accumulated work is continued as-is, :1457-1459).
+    /// emitted (the accumulated work is continued as-is).
     Resume(String),
-    /// Seed a fresh branch from this commit — the recipe pushes it (:1461-1463).
+    /// Seed a fresh branch from this commit — the recipe pushes it.
     Fresh(String),
 }
 
 /// Every decision `katsuctl` makes before emitting — the act-directly results the
-/// flat recipe is built from (design §8.2). Returned by [`decide`] so the seam
+/// flat recipe is built from. Returned by [`decide`] so the seam
 /// tests can assert each decision without a real boot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Plan {
-    /// Full suffixed instance name (lib/sandbox/default.nix:1314).
+    /// Full suffixed instance name.
     name: String,
-    /// Persistent (`--name`d) instance — replaces the `.named` marker (:1341).
+    /// Persistent (`--name`d) instance — replaces the `.named` marker.
     named: bool,
-    /// Interactive attach vs detached agent (:1344).
+    /// Interactive attach vs detached agent.
     mode: Mode,
-    /// The probed free loopback ssh port (:1493).
+    /// The probed free loopback ssh port.
     ssh_port: u16,
-    /// Agent-mode vsock CID; `None` for interactive (:1365).
+    /// Agent-mode vsock CID; `None` for interactive.
     vsock_cid: Option<u32>,
-    /// The host project root (`git rev-parse --show-toplevel`, :1381).
+    /// The host project root (`git rev-parse --show-toplevel`).
     project: PathBuf,
-    /// Whether the bare mirror is missing and must be cloned (:1435).
+    /// Whether the bare mirror is missing and must be cloned.
     clone_mirror: bool,
-    /// How the branch is seeded (:1455-1464).
+    /// How the branch is seeded.
     seed: Seed,
-    /// The agent-mode initial prompt to tail-call `prompt` with (design §11).
+    /// The agent-mode initial prompt to tail-call `prompt` with.
     prompt: Option<String>,
 }
 
-/// Production entry point (design §8): load the spec, stand up the real host
+/// Production entry point: load the spec, stand up the real host
 /// seam, make every probe-dependent decision in Rust, persist `instance.json`,
 /// then emit the flat recipe (printing only its path for the wrapper to `exec`).
 pub fn run(
@@ -99,7 +99,7 @@ pub fn run(
     )?;
 
     // `--json` *describes* the resolved identity rather than emitting a script
-    // (design §13): the bare form prints a path to `exec`, `--json` says what will
+    //: the bare form prints a path to `exec`, `--json` says what will
     // happen. A power-user/structured caller, so no side effects either.
     if global.json {
         println!("{}", identity_json(&plan));
@@ -107,7 +107,7 @@ pub fn run(
     }
 
     // Persist the consolidated scalar metadata the later commands and the guest
-    // read (design §6) before booting.
+    // read before booting.
     let meta = Instance {
         instance_version: SUPPORTED_INSTANCE_VERSION,
         name: plan.name.clone(),
@@ -125,7 +125,7 @@ pub fn run(
     Ok(())
 }
 
-/// The testable planning core (design §7.2 tier 3): make every probe-dependent
+/// The testable planning core (tier 3): make every probe-dependent
 /// decision through the seam and return them as a [`Plan`]. No filesystem writes
 /// happen here — `instance.json` and the emitted script are side effects [`run`]
 /// performs afterward — so a [`FakeHost`](crate::sandbox::host::FakeHost) drives
@@ -142,7 +142,7 @@ fn decide(
     clock: &str,
     pid: u32,
 ) -> Result<Plan> {
-    // `--prompt` implies agent mode, exactly as the shell runner did (:1357).
+    // `--prompt` implies agent mode, exactly as the shell runner did.
     let mode = if agent || prompt.is_some() {
         Mode::Agent
     } else {
@@ -153,11 +153,11 @@ fn decide(
     // here, before instance.json is written or a recipe is emitted.
     let (full_name, named) = decide_name(name, clock, pid, rng)?;
 
-    // Probe a free loopback port (:1483-1493).
+    // Probe a free loopback port.
     let ssh_port = pick_port(|p| host.port_is_free(p), rng)?;
 
     // Agent mode allocates a vsock CID not claimed by a sibling; a resumed named
-    // instance keeps its already-recorded CID (:1346-1370, :1415-1416).
+    // instance keeps its already-recorded CID.
     let vsock_cid = match mode {
         Mode::Interactive => None,
         Mode::Agent => {
@@ -174,7 +174,7 @@ fn decide(
     let sync_git = state_root.join("sync.git");
     let branch = format!("refs/heads/sandbox/{full_name}");
     // The mirror is reused if it already exists; its absence is what drives the
-    // emitted (idempotent) clone (:1435) and the resume-vs-seed decision (:1456).
+    // emitted (idempotent) clone and the resume-vs-seed decision.
     let mirror_exists = host.exists(&sync_git);
     let seed = resolve_seed(
         host,
@@ -199,16 +199,16 @@ fn decide(
     })
 }
 
-/// Generate the instance name (lib/sandbox/default.nix:1302-1318):
+/// Generate the instance name:
 ///
 /// - **no `--name`** → ephemeral `<timestamp>-<pid>`; a timestamp + pid is unique
-///   enough on its own (:1304);
+///   enough on its own;
 /// - **`--name <friendly>`** → mint a *fresh* instance by appending 8 hex of
 ///   entropy, so a friendly name never silently resumes an older same-named
-///   branch (:1314);
+///   branch;
 /// - **`--name <…-8hex>`** → an already-suffixed full name (copied back from a
 ///   prior launch) is taken **verbatim**, which is how you deliberately resume one
-///   specific instance (:1310-1313).
+///   specific instance.
 ///
 /// Returns the full name and whether it is named (persistent). Pure given the
 /// injected clock/pid/RNG, so it is an ordinary unit test.
@@ -262,7 +262,7 @@ fn validate_instance_name(name: &str) -> Result<()> {
 }
 
 /// Whether `name` already carries our `-<8 lowercase hex>` suffix — the same
-/// `-[0-9a-f]{8}$` test the shell uses (lib/sandbox/default.nix:1306).
+/// `-[0-9a-f]{8}$` test the shell uses.
 fn has_hex8_suffix(name: &str) -> bool {
     let bytes = name.as_bytes();
     let n = bytes.len();
@@ -275,8 +275,8 @@ fn has_hex8_suffix(name: &str) -> bool {
 }
 
 /// Collect the vsock CIDs already claimed by *sibling* instances, plus this
-/// instance's own recorded CID when it is being resumed (design §8.2;
-/// lib/sandbox/default.nix:1415-1423). Each sibling's CID is read from its
+/// instance's own recorded CID when it is being resumed. Each sibling's CID is
+/// read from its
 /// `instance.json` through the seam, so the whole sweep is `FakeHost`-testable. A
 /// missing/unreadable/parse-failing sibling is simply skipped (best-effort, as the
 /// shell's `cat … 2>/dev/null` was).
@@ -326,7 +326,7 @@ fn parse_cid(bytes: &[u8]) -> Option<u32> {
 }
 
 /// Resolve the host project root via `git rev-parse --show-toplevel` (run through
-/// the seam, :1381). Baked into the recipe as the clone/seed source.
+/// the seam). Baked into the recipe as the clone/seed source.
 fn resolve_project(host: &impl Host, git: &Path) -> Result<PathBuf> {
     let mut cmd = Command::new(git);
     cmd.arg("rev-parse").arg("--show-toplevel");
@@ -343,7 +343,7 @@ fn resolve_project(host: &impl Host, git: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
-/// Resolve the seed commit (design §8.2; lib/sandbox/default.nix:1455-1464):
+/// Resolve the seed commit:
 ///
 /// - a **named** instance whose mirror already carries the branch is resumed from
 ///   that exact commit ([`Seed::Resume`]) — no re-seed, so the agent's
@@ -407,7 +407,7 @@ fn resolve_seed(
 }
 
 /// The ephemeral-name timestamp, `date +%Y%m%d-%H%M%S` through the seam (mirrors
-/// `date +…` at lib/sandbox/default.nix:1304). Kept out of [`decide`] so the core
+/// `date +…` at ). Kept out of [`decide`] so the core
 /// stays pure on an injected clock string.
 fn now_timestamp(host: &impl Host) -> Result<String> {
     let mut cmd = Command::new("date");
@@ -424,7 +424,7 @@ fn now_timestamp(host: &impl Host) -> Result<String> {
 
 /// The `<base>/katsuobushi` directory whose mode is clamped to 700 so no *other*
 /// host user can descend to the world-writable bare mirror inside (the 9p
-/// push-permission saga, lib/sandbox/default.nix:1386-1394). `state_glob` ends
+/// push-permission saga). `state_glob` ends
 /// with `project_id`, so stripping its components yields the clamp target.
 fn katsuobushi_base(state_glob: &Path, project_id: &str) -> PathBuf {
     let mut base = state_glob.to_path_buf();
@@ -434,7 +434,7 @@ fn katsuobushi_base(state_glob: &Path, project_id: &str) -> PathBuf {
     base
 }
 
-/// The resolved-identity JSON `start --json` prints (design §13): name/mode/port/
+/// The resolved-identity JSON `start --json` prints: name/mode/port/
 /// cid — *not* the script path.
 fn identity_json(plan: &Plan) -> String {
     let mode = match plan.mode {
@@ -451,7 +451,7 @@ fn identity_json(plan: &Plan) -> String {
     .to_string()
 }
 
-// ---- recipe construction (design §8.3) -------------------------------------
+// ---- recipe construction -------------------------------------
 
 /// Double-quote a path for the emitted shell (paths may contain spaces).
 fn dq(p: &Path) -> String {
@@ -465,10 +465,10 @@ fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Build the flat setup + boot recipe (design §8.3). Pure over the [`Plan`] and
+/// Build the flat setup + boot recipe. Pure over the [`Plan`] and
 /// spec, so the golden snapshots render it directly — every branch was already
 /// decided in [`decide`]; what is emitted is unconditional (apart from the
-/// genuinely-runtime secret-presence and file-existence guards, design §10).
+/// genuinely-runtime secret-presence and file-existence guards).
 fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) -> Recipe {
     let name = &plan.name;
     let state_root = roots.state_glob.join(name);
@@ -490,7 +490,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
         mode_word(plan.mode)
     ));
 
-    // ---- dirs + the parent clamp (:1320-1333) ----
+    // ---- dirs + the parent clamp ----
     r.line(format!(
         "mkdir -p {} {}",
         dq(&state_root),
@@ -500,14 +500,14 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     r.line(format!("chmod 700 {}", dq(&state_base)));
     // Open the per-instance share root itself (non-recursive, so the large
     // image files keep their perms) so the agent-run guest controller can
-    // create entries here — notably turn-state.json (design sandbox-liveness
-    // §6.3). The 9p share is mapped-xattr (files the guest creates are recorded
+    // create entries here — notably turn-state.json. The 9p share is
+    // mapped-xattr (files the guest creates are recorded
     // agent-owned), but a host-created root-owned dir is otherwise unwritable by
     // the agent; the parent state_base is clamped 700, so this only widens
     // within the per-instance dir. Mirrors the sync.git push-perm chmod below.
     r.line(format!("chmod a+rwX {}", dq(&state_root)));
 
-    // ---- bare mirror (idempotent) + branch seed + push-perm chmod (:1372-1468) ----
+    // ---- bare mirror (idempotent) + branch seed + push-perm chmod ----
     r.blank().comment(
         "Per-instance bare git mirror + seeded branch (the guest clones it and pushes back).",
     );
@@ -533,10 +533,10 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
         }
     }
     // Re-open the whole mirror to "other" writes so the guest can push (the
-    // mapped-xattr saga, :1386-1407, :1468) — run every launch, idempotent.
+    // mapped-xattr saga) — run every launch, idempotent.
     r.line(format!("chmod -R a+rwX {}", dq(&sync_git)));
 
-    // ---- importHostStoreDb snapshot, only when enabled (:1409-1431) ----
+    // ---- importHostStoreDb snapshot, only when enabled ----
     if spec.import_host_store_db {
         let tmp = state_root.join(".nix-db.sqlite.tmp");
         let dest = state_root.join("nix-db.sqlite");
@@ -557,7 +557,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
         ));
     }
 
-    // ---- context staging, only when declared (:1433-1443) ----
+    // ---- context staging, only when declared ----
     if !spec.context.is_empty() {
         let ctx_root = state_root.join("context");
         r.blank().comment(
@@ -573,7 +573,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| ctx_root.clone());
             // Whether the context path exists is genuinely a runtime fact, so this
-            // existence guard stays in the script (the shell did the same, :1500).
+            // existence guard stays in the script (the shell did the same).
             r.line(format!(
                 "[ -e {} ] && {{ mkdir -p {}; {rsync} -a --safe-links {} {}/; }} || true",
                 dq(&src),
@@ -584,7 +584,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
         }
     }
 
-    // ---- secrets as REFERENCES, never values (design §10; :1445-1473) ----
+    // ---- secrets as REFERENCES, never values ----
     if !spec.secrets.is_empty() {
         r.blank()
             .comment("Declared secrets, staged as references — the value is re-read at runtime, never baked in.");
@@ -594,7 +594,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
                 SecretSource::FromEnv(var) => {
                     // The env var is read at script-exec time (the wrapper's
                     // process tree already exports it); its *value* is never seen
-                    // by katsuctl, so it cannot land in a snapshot (design §10).
+                    // by katsuctl, so it cannot land in a snapshot.
                     r.line(format!("if [ -z \"${{{var}:-}}\" ]; then"));
                     r.line(format!(
                         "  echo \"sandbox: required secret {} is not set on the host (expected in \\${var}).\" >&2",
@@ -622,7 +622,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
         }
     }
 
-    // ---- ephemeral ssh keypair + authorized_keys (:1475-1481) ----
+    // ---- ephemeral ssh keypair + authorized_keys ----
     let id_key = runtime_root.join("id");
     let id_pub = runtime_root.join("id.pub");
     let authorized_keys = state_root.join("authorized_keys");
@@ -635,7 +635,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     ));
     r.line(format!("cp {} {}", dq(&id_pub), dq(&authorized_keys)));
 
-    // ---- launch environment for the microvm runner (extraArgsScript reads these, :1556) ----
+    // ---- launch environment for the microvm runner (extraArgsScript reads these) ----
     r.blank()
         .comment("Per-instance launch environment for the microvm runner.");
     r.line(format!("export KATSU_STATE_DIR={}", dq(&state_root)));
@@ -644,7 +644,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
         r.line(format!("export KATSU_VSOCK_CID={cid}"));
     }
 
-    // ---- disk-image symlinks: back each volume from the persistent state dir (:1500-1512) ----
+    // ---- disk-image symlinks: back each volume from the persistent state dir ----
     r.blank()
         .comment("Back each guest disk image from the persistent state dir via a runtime symlink.");
     for img in &spec.disk_images {
@@ -681,10 +681,10 @@ fn mode_word(mode: Mode) -> &'static str {
     }
 }
 
-/// The agent tail (design §8.3; lib/sandbox/default.nix:1550-1581): `setsid` a
+/// The agent tail: `setsid` a
 /// lingering, detached VM, then — with `--prompt` — **tail-call** the `prompt`
 /// subcommand so `start` reuses the one streaming/readiness implementation
-/// (design §11) rather than duplicating vsock logic; without a prompt, exit 0 and
+/// rather than duplicating vsock logic; without a prompt, exit 0 and
 /// let the wrapper return.
 fn agent_tail(
     r: &mut Recipe,
@@ -738,8 +738,7 @@ fn agent_tail(
     }
 }
 
-/// The interactive tail (design §8.3; lib/sandbox/default.nix:1514-1546,
-/// 1583-1595): a cleanup trap that tears the VM down on any exit (and prunes the
+/// The interactive tail: a cleanup trap that tears the VM down on any exit (and prunes the
 /// state dir for an ephemeral instance), then wait-for-sshd, then a foreground
 /// `ssh`. The `ssh` is **not** `exec`ed — control must return to the shell so the
 /// EXIT trap fires and cleanup runs (faithful to the prior art, which lets the
@@ -799,7 +798,7 @@ fn interactive_tail(
         "echo \"sandbox: connecting to '{}' on 127.0.0.1:{}\"",
         plan.name, plan.ssh_port
     ));
-    // Wait for sshd to accept on the forwarded port (:1643-1646).
+    // Wait for sshd to accept on the forwarded port.
     r.line(format!(
         "for _ in $(seq 1 120); do (exec 3<>\"/dev/tcp/127.0.0.1/{}\") 2>/dev/null && break; sleep 1; done",
         plan.ssh_port
@@ -945,7 +944,7 @@ mod tests {
         build_recipe(spec, Path::new(CONFIG), &roots(), plan).render()
     }
 
-    // ---- naming (pure unit tests, design §7.2 tier 1) ----
+    // ---- naming (pure unit tests, tier 1) ----
 
     #[test]
     fn it_mints_an_ephemeral_name_from_clock_and_pid() {
@@ -1053,7 +1052,7 @@ mod tests {
         assert!(!has_hex8_suffix("x-deadbefg"), "g is not hex");
     }
 
-    // ---- seam: port allocation (design §7.2 tier 3) ----
+    // ---- seam: port allocation (tier 3) ----
 
     #[test]
     fn it_bakes_the_probed_free_port_into_the_plan() {
@@ -1083,7 +1082,7 @@ mod tests {
         assert!(host.calls().contains(&Call::PortIsFree(20_042)));
     }
 
-    // ---- seam: CID allocation skips siblings' CIDs (design §7.2 tier 3) ----
+    // ---- seam: CID allocation skips siblings' CIDs (tier 3) ----
 
     #[test]
     fn it_allocates_a_cid_skipping_used_sibling_cids() {
@@ -1119,7 +1118,7 @@ mod tests {
     #[test]
     fn it_reuses_a_resumed_instances_recorded_cid() {
         // A verbatim-resumed named agent keeps the CID recorded in its own
-        // instance.json rather than re-allocating (lib/sandbox/default.nix:1415).
+        // instance.json rather than re-allocating.
         let host_state = PathBuf::from("/state/katsuobushi/cdata/katsuobushi");
         let mut host = FakeHost::new();
         host.push_list_dir(Ok(vec!["myfeature-0badf00d".into()]))
@@ -1129,7 +1128,7 @@ mod tests {
         assert_eq!(own, Some(777));
     }
 
-    // ---- seam: seed resolution (design §7.2 tier 3) ----
+    // ---- seam: seed resolution (tier 3) ----
 
     #[test]
     fn it_seeds_fresh_from_stash_create_when_dirty() {
@@ -1203,7 +1202,7 @@ mod tests {
         assert_eq!(seed, Seed::Fresh("snap".into()));
     }
 
-    // ---- secrets stay references, never values (design §10) ----
+    // ---- secrets stay references, never values ----
 
     #[test]
     fn it_never_bakes_a_plaintext_secret_value() {
@@ -1233,7 +1232,7 @@ mod tests {
         assert!(!text.contains('\u{1b}'), "emitted scripts carry zero ANSI");
     }
 
-    // ---- golden snapshots across the matrix (design §7.2 tier 2) ----
+    // ---- golden snapshots across the matrix (tier 2) ----
 
     #[test]
     fn snapshot_ephemeral_interactive() {

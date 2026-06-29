@@ -7,7 +7,7 @@
   # having to name them. Each infra input `follows` our nixpkgs so the dependency
   # graph unifies on a single nixpkgs; a consumer overrides any of them with
   # `inputs.katsuobushi.inputs.<name>.follows = "<name>";`. See MIGRATING.md and
-  # section 8 of design/sandbox.md for the rationale.
+  # section 8 of for the rationale.
   #
   # flake-utils is used only for this repo's own per-system outputs (the
   # dogfooding dev shell below); it is not part of the consumer-facing surface.
@@ -85,7 +85,7 @@
 
       # Agent sandbox helpers: assembles a microvm.nix guest that boots into a
       # working dev environment in which an agent harness can run with a bounded
-      # blast radius. See design/sandbox.md.
+      # blast radius. See.
       lib.sandbox = sandboxLib;
 
       templates = {
@@ -166,9 +166,9 @@
           ];
         };
 
-        # In-tree Rust: the host↔guest sandbox controller crate for agent mode
-        # (see design/sandbox-agent-mode.md §6). Built via lib.rust (crane) so
-        # the build is reproducible and sandboxed, with deps vendored from the
+        # In-tree Rust: the host↔guest sandbox controller crate for agent mode.
+        # Built via lib.rust (crane) so the build is reproducible and sandboxed,
+        # with deps vendored from the
         # root Cargo.lock. tokio-vsock pins these to Linux, matching the
         # sandbox's own platform gate, so the packages/checks are isLinux-only.
         rust = rustLib {
@@ -183,7 +183,7 @@
           pname = "katsuobushi-sandbox-guest";
           cargoExtraArgs = "--package katsuobushi-sandbox-guest";
         };
-        # Host-side sandbox controller (design/katsuctl.md). Built the same way;
+        # Host-side sandbox controller. Built the same way;
         # stays in `packages` (= controlCrates) and goes on the devshell PATH.
         controlCrates.katsuctl = rust.buildCrate {
           pname = "katsuctl";

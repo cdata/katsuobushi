@@ -1,22 +1,18 @@
 //! Minimal native QMP client over the qemu monitor Unix socket.
 //!
 //! QMP is newline-delimited JSON over a Unix socket. Only two operations are
-//! needed (design §2.3, §14.4), so this stays deliberately tiny — no general
+//! needed, so this stays deliberately tiny — no general
 //! client and no command beyond the two below until something needs more:
 //!
 //! - [`is_alive`] — liveness probe. Connecting to a live qemu monitor always
 //!   yields the QMP greeting line; an absent or refused socket means the
-//!   instance is gone. Mirrors the old socat connect probe (`isRunning` in
-//!   `lib/sandbox/default.nix`).
-//! - [`quit`] — the `qmp_capabilities` + `quit` shutdown handshake (the
-//!   `sandbox:stop` exchange in `lib/sandbox/default.nix`).
+//!   instance is gone.
+//! - [`quit`] — the `qmp_capabilities` + `quit` shutdown handshake.
 //!
 //! The handshake is fixed JSON, so this needs no serializer — `std` sockets
 //! keep it synchronous, matching the rest of the crate's sync dispatch.
 //!
-//! Lands ahead of its callers: `sandbox status` consumes [`is_alive`] and
-//! `sandbox stop` consumes [`quit`] in later migration steps (design §12), so
-//! the API is unused (but tested) until then.
+//! Consumed by `sandbox status` ([`is_alive`]) and `sandbox stop` ([`quit`]).
 #![allow(dead_code)]
 
 use std::io::{BufRead, BufReader, Read, Write};

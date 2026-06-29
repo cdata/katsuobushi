@@ -189,10 +189,9 @@ let
   # only squid) is allowed to use it; the agent gets no resolver at all.
   slirpDns = "10.0.2.3";
 
-  # Liveness tunables — the single source for both sides (design
-  # sandbox-liveness.md §14.8, §18). Rendered into the host spec (katsuctlSpec,
-  # specVersion 2) and, for the two the guest reads directly, into the agent
-  # env. Inert knobs until a consumer reads them; defaults per the §18 table.
+  # Liveness tunables — the single source for both sides. Rendered into the host
+  # spec (katsuctlSpec, specVersion 2) and, for the two the guest reads directly,
+  # into the agent env. Inert knobs until a consumer reads them.
   heartbeatSecs = 10; # heartbeat cadence (H)
   heartbeatMiss = 3; # dead after N·H = 30 s of silence (N)
   progressStallSecs = 300; # surface "no progress" (no break)
@@ -207,7 +206,7 @@ let
   #
   # Built reproducibly via lib.rust/crane from Katsuobushi's own workspace
   # source. The server + `report` binaries are baked into the guest; the host
-  # client now lives in `katsuctl sandbox prompt`. See design/sandbox-agent-mode.md.
+  # client now lives in `katsuctl sandbox prompt`. See.
   controlRust = rust {
     inherit pkgs;
     workspaceRoot = controlSrc;
@@ -218,7 +217,7 @@ let
     pname = "katsuobushi-sandbox-guest";
     cargoExtraArgs = "--package katsuobushi-sandbox-guest";
   };
-  # Host-side controller (design/katsuctl.md), built from the same workspace.
+  # Host-side controller, built from the same workspace.
   # `nix run .#sandbox` runs outside the devshell, where `katsuctl` is not on
   # PATH, so apps.sandbox references this binary explicitly (and puts it on PATH
   # so the emitted agent-start tail-call `exec katsuctl … prompt` resolves too).
@@ -238,7 +237,7 @@ let
   # The agent's `report` command — a shell app, not a Rust binary. It just
   # writes one JSON line (the ReportLine wire shape) to the server's guest-local
   # unix socket; jq guarantees correct escaping of arbitrary status text, socat
-  # carries the line. Opaque to the agent (design §5.6).
+  # carries the line. Opaque to the agent.
   reportApp = pkgs.writeShellApplication {
     name = "report";
     runtimeInputs = with pkgs; [
@@ -392,7 +391,7 @@ let
   '';
 
   # Agent-mode operating contract, injected at launch via
-  # `--append-system-prompt-file` (design §5.11). Always-on for every turn in
+  # `--append-system-prompt-file`. Always-on for every turn in
   # the dormant session, fully ours, and scoped to agent mode — so it does NOT
   # touch ~/.claude/CLAUDE.md, which stays the consumer's.
   agentContract = pkgs.writeText "katsuobushi-agent-contract.md" ''
@@ -446,7 +445,7 @@ let
   # none — they fail with "no active session", so zellij CANNOT inject this
   # keystroke headlessly (verified 2026-06-24, the hard way). tmux targets
   # sessions by name and its send-keys/capture-pane work on a detached session
-  # with no client — exactly the design's named fallback (§5.2). The tradeoff is
+  # with no client — exactly the intended fallback. The tradeoff is
   # losing zellij's nicer attach UX.
   agentChannelAck = pkgs.writeShellScript "katsuobushi-channel-ack" ''
     export PATH=${
@@ -460,7 +459,7 @@ let
       sleep 2
       if tmux capture-pane -t katsuobushi -p 2>/dev/null | tr -d ' ' | grep -qi 'forlocaldevelopment'; then
         tmux send-keys -t katsuobushi Enter
-        # Probe-independent SessionReady arming signal (§5, §7.1): the dev-
+        # Probe-independent SessionReady arming signal: the dev-
         # channels prompt has just been dismissed, so the session is live —
         # emit session-ready directly rather than relying solely on the
         # SessionStart hook. Best-effort; never wedge boot on the report socket.
@@ -609,8 +608,8 @@ let
     set -eu
     args=""
 
-    # User-mode (slirp) NIC with an ssh hostfwd bound to host loopback only
-    #. passt is unsupported by microvm.nix's qemu runner, so we use the
+    # User-mode (slirp) NIC with an ssh hostfwd bound to host loopback only.
+    # passt is unsupported by microvm.nix's qemu runner, so we use the
     # guaranteed slirp fallback.
     args="$args -netdev user,id=net0,hostfwd=tcp:127.0.0.1:''${KATSU_SSH_PORT}-:22"
     args="$args -device virtio-net-pci,netdev=net0,mac=${guestMac},romfile="
@@ -620,7 +619,7 @@ let
     args="$args -device virtio-9p-pci,fsdev=katsushare,mount_tag=${shareTag}"
 
     # Agent mode: a vhost-vsock device with the per-instance CID the runner
-    # allocated, for the host↔guest controller channel (design §5.4). Emitted only when
+    # allocated, for the host↔guest controller channel. Emitted only when
     # a CID is present; interactive instances get no vsock device at all.
     if [ -n "''${KATSU_VSOCK_CID:-}" ]; then
       args="$args -device vhost-vsock-pci,guest-cid=''${KATSU_VSOCK_CID}"
@@ -733,7 +732,7 @@ let
       };
 
       # virtio-vsock guest transport, for the host↔guest controller channel in agent
-      # mode (design §5.4). The matching `vhost-vsock-pci` device is emitted at
+      # mode. The matching `vhost-vsock-pci` device is emitted at
       # launch (extraArgsScript) only when a CID is allocated; loading the
       # module unconditionally is harmless when no device is present.
       boot.kernelModules = [ "vmw_vsock_virtio_transport" ];
@@ -849,9 +848,9 @@ let
         # (agent mode). Set globally so both — the server claude spawns, and the
         # report command the agent runs — agree without per-invocation wiring.
         KATSU_REPORT_SOCK = reportSocket;
-        # Liveness tunables the guest reads directly (design sandbox-liveness.md
-        # §16, §18); the rest live only in the host spec. KATSU_SHARE is the 9p
-        # share mount where the server writes turn-state.json (§6.3). Plumbed
+        # Liveness tunables the guest reads directly; the rest live only in the
+        # host spec. KATSU_SHARE is the 9p
+        # share mount where the server writes turn-state.json. Plumbed
         # from the same let-bindings as the spec so the two sides can't drift.
         KATSU_HEARTBEAT_SECS = toString heartbeatSecs;
         KATSU_STOP_GRACE_MS = toString stopGraceMs;
@@ -878,9 +877,9 @@ let
       # The `hooks` block wires Claude Code's lifecycle events to the `report
       # hook <event>` subcommand by absolute store path (PATH-independent), so
       # the dormant session emits real liveness lines into the controller server
-      # (design sandbox-liveness.md §5; the server consumes them via
-      # GuestLocalLine and drives the turn-state machine, #025). All three live in
-      # the managed tier because the #022 probe (real boot 2026-06-28, §11)
+      # (the server consumes them via GuestLocalLine and drives the turn-state
+      # machine). All three live in
+      # the managed tier because the probe (real boot 2026-06-28)
       # confirmed managed-settings hooks ARE honored and that Stop, SessionStart,
       # and UserPromptSubmit all fire for injected channel turns — so no
       # degradation/fallback path is active:
@@ -944,7 +943,7 @@ let
 
       # SSH: key-only, agent only, reachable only via the loopback hostfwd
       #
-      #. The pubkey arrives per-launch through the share.
+      # The pubkey arrives per-launch through the share.
       services.openssh = {
         enable = true;
         settings = {
@@ -991,7 +990,7 @@ let
           gzip
           rsync
           cacert
-          # Agent-mode PTY host for the dormant Claude session (design §5.2).
+          # Agent-mode PTY host for the dormant Claude session.
           # A human can `tmux attach -t katsuobushi` over ssh to watch it work.
           # tmux (not zellij) because its send-keys/capture-pane drive a detached
           # session with no attached client — needed to dismiss Claude Code's
@@ -1013,7 +1012,7 @@ let
 
       # Agent-mode self-shutdown: a scoped polkit rule lets the otherwise
       # unprivileged agent power off ITS OWN VM — and nothing else — via
-      # `systemctl poweroff` (design §5.10). poweroff is orthogonal to the
+      # `systemctl poweroff`. poweroff is orthogonal to the
       # egress firewall the unprivileged-agent design protects, so this does not
       # weaken the threat model: worst case a prompt-injected agent self-DoSes
       # its own sandbox.
@@ -1247,7 +1246,7 @@ let
             echo "no sync share present; skipping workspace setup"
             exit 0
           fi
-          # Prefer the consolidated instance.json (#004); fall back to the legacy
+          # Prefer the consolidated instance.json; fall back to the legacy
           # scalar share file, then a hardcoded default, so both old and new hosts boot.
           instance="$(jq -r '.name // empty' ${shareMount}/instance.json 2>/dev/null || true)"
           [ -n "$instance" ] || instance="$(cat ${shareMount}/instance 2>/dev/null || echo unknown)"
@@ -1286,12 +1285,11 @@ let
       #
       # Always present; no-ops unless launched in agent mode. It starts a
       # *dormant interactive* Claude session inside a detached tmux session as
-      # the unprivileged agent (design §5.2), with the controller channel server
+      # the unprivileged agent, with the controller channel server
       # armed so the host can push prompts into the session over vsock. The
       # session lingers; it ends when the agent runs `systemctl poweroff` (told
       # it is finished) or the host stops the VM. Replaces the old `claude -p`
-      # autonomous path, which was doomed by the -p→bare billing shift (design
-      # §1, §5.1).
+      # autonomous path, which was doomed by the -p→bare billing shift.
       systemd.services.katsuobushi-agent = {
         description = "Katsuobushi agent-mode session (dormant Claude under tmux)";
         wantedBy = [ "multi-user.target" ];
@@ -1337,7 +1335,7 @@ let
         # (it owns the tmux session).
         script = ''
           set -u
-          # Prefer the consolidated instance.json (#004); fall back to the legacy
+          # Prefer the consolidated instance.json; fall back to the legacy
           # scalar share file, then a hardcoded default, so both old and new hosts boot.
           mode="$(jq -r '.mode // empty' ${shareMount}/instance.json 2>/dev/null || true)"
           [ -n "$mode" ] || mode="$(cat ${shareMount}/mode 2>/dev/null || echo interactive)"
@@ -1347,7 +1345,7 @@ let
           runuser -u ${agentUser} -- ${pkgs.tmux}/bin/tmux new-session -d -s katsuobushi -x 220 -y 50 \
             ${pkgs.bash}/bin/bash -lc 'unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC; cd ${workspacePath} && exec claude --dangerously-skip-permissions --dangerously-load-development-channels server:katsuobushi-sandbox-guest --append-system-prompt-file ${agentContract}'
           setsid runuser -u ${agentUser} -- ${agentChannelAck} >/dev/null 2>&1 &
-          # Future: idle backstop — reap a forgotten/wedged session (design §5.10).
+          # Future: idle backstop — reap a forgotten/wedged session.
         '';
       };
     };
@@ -1363,7 +1361,7 @@ let
 
   runner = guestSystem.config.microvm.declaredRunner;
 
-  # Nix→Rust instance spec (design/katsuctl.md §5)
+  # Nix→Rust instance spec
   #
   # One JSON spec rendered at flake-eval time and handed to `katsuctl` via
   # `--config`. Rust owns the schema (rust/katsuctl/src/sandbox/spec.rs — every
@@ -1374,16 +1372,16 @@ let
   # tool packages) — no duplicated values — so the spec and the remaining shell
   # can never drift. `roots` carries the `$XDG_*` templates verbatim; `katsuctl`
   # expands them in Rust (resolve_roots) with the same `:-` fallbacks the runner
-  # uses (:1321-1322), rather than baking a user's absolute home path into the
+  # uses, rather than baking a user's absolute home path into the
   # store. `sqlite3` is gated on importHostStoreDb exactly as the runner's
-  # runtimeInputs are (:1285) — null (Tools.sqlite3 = None) when off.
+  # runtimeInputs are — null (Tools.sqlite3 = None) when off.
   katsuctlSpec = pkgs.writeText "katsuctl-sandbox-spec.json" (
     builtins.toJSON {
       specVersion = 2;
       inherit projectId agentUser importHostStoreDb;
-      # Liveness tunables (design sandbox-liveness.md §16, §18); inert until a
+      # Liveness tunables; inert until a
       # consumer reads them, but plumbed from the one let-binding source so the
-      # host spec and the guest env can never drift (§14.8).
+      # host spec and the guest env can never drift.
       inherit
         heartbeatSecs
         heartbeatMiss
@@ -1432,12 +1430,12 @@ let
   menuCommands = {
     "sandbox:start" = {
       description = "Launch an agent sandbox";
-      # Business logic now lives in katsuctl (design/katsuctl.md §8): katsuctl
+      # Business logic now lives in katsuctl: katsuctl
       # makes every probe-dependent decision (naming, port/CID allocation, branch
       # seed), writes instance.json, and emits a flat setup+boot recipe, printing
       # only its path. This wrapper is the documented emit+exec form — a planning
       # failure exits nonzero with no path, so the `exec` is reached only on a
-      # clean emit (design §8.1).
+      # clean emit.
       command = ''
         script="$(katsuctl sandbox --config ${katsuctlSpec} start "$@")" || exit
         exec ${pkgs.bash}/bin/bash "$script"
@@ -1445,7 +1443,7 @@ let
     };
     "sandbox:prompt" = {
       description = "Send a prompt to an agent instance (auto-starting a paused one)";
-      # Business logic now lives in katsuctl (design/katsuctl.md §11): instance
+      # Business logic now lives in katsuctl: instance
       # resolution, the QMP liveness probe, the readiness-wait, vsock streaming,
       # and the paused-named auto-restart. This wrapper just hands off, passing
       # the Nix-rendered spec via --config.
@@ -1455,7 +1453,7 @@ let
     };
     "sandbox:status" = {
       description = "List instances, or detail a single instance";
-      # Business logic now lives in katsuctl (design/katsuctl.md §2.2, §13); this
+      # Business logic now lives in katsuctl; this
       # wrapper just hands off, passing the Nix-rendered spec via --config. A bare
       # `status` still doubles as the launch prerequisite gate (nonzero exit iff a
       # secret is missing or /dev/vhost-vsock is absent).
@@ -1465,7 +1463,7 @@ let
     };
     "sandbox:fetch" = {
       description = "Fetch a sandbox's branch into this repo";
-      # Business logic now lives in katsuctl (design/katsuctl.md §2.2); this
+      # Business logic now lives in katsuctl; this
       # wrapper just hands off, passing the Nix-rendered spec via --config.
       command = ''
         exec katsuctl sandbox --config ${katsuctlSpec} fetch "$@"
@@ -1473,7 +1471,7 @@ let
     };
     "sandbox:stop" = {
       description = "Suspend or remove an instance";
-      # Business logic now lives in katsuctl (design/katsuctl.md §2.2); this
+      # Business logic now lives in katsuctl; this
       # wrapper just hands off, passing the Nix-rendered spec via --config.
       command = ''
         exec katsuctl sandbox --config ${katsuctlSpec} stop "$@"
@@ -1481,11 +1479,11 @@ let
     };
     "sandbox:attach" = {
       description = "SSH in and attach to a running agent's tmux session";
-      # Business logic now lives in katsuctl (design/katsuctl.md §8): katsuctl
+      # Business logic now lives in katsuctl: katsuctl
       # does the running/has-session probes directly and emits a tiny terminal-
       # handoff recipe, printing only its path. This wrapper is the documented
       # emit+exec form — a planning failure exits nonzero with no path, so the
-      # `exec` is reached only on a clean emit (design §8.1).
+      # `exec` is reached only on a clean emit.
       command = ''
         script="$(katsuctl sandbox --config ${katsuctlSpec} attach "$@")" || exit
         exec ${pkgs.bash}/bin/bash "$script"
@@ -1496,7 +1494,7 @@ in
 {
   # `nix run .#sandbox` needs an app; lifecycle helpers are menu commands. Its
   # program is the documented emit+exec wrapper around `katsuctl sandbox start`
-  # (design/katsuctl.md §8.1, §9 step 3): katsuctl makes every probe-dependent
+  # (step 3): katsuctl makes every probe-dependent
   # decision, writes instance.json, and prints the path of a flat setup+boot
   # recipe; the wrapper `exec`s bash on it (a planning failure exits nonzero with
   # no path, so the `exec` runs only on a clean emit). katsuctl is put on PATH so
@@ -1514,7 +1512,7 @@ in
   inherit menuCommands;
 
   # The Nix-rendered instance spec, exposed so the menu-command rewrites
-  # (design/katsuctl.md §9 step 3) can pass it to `katsuctl --config`.
+  # (step 3) can pass it to `katsuctl --config`.
   inherit katsuctlSpec;
 
   # Building the guest image so CI catches a broken sandbox config.

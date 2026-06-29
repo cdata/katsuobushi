@@ -1,4 +1,4 @@
-//! `katsuctl sandbox attach` — the first emit-script command (design §8.3).
+//! `katsuctl sandbox attach` — the first emit-script command.
 //!
 //! `katsuctl` does the two probe-dependent decisions *directly* — the VM is
 //! running (QMP) and the agent's tmux session is armed (`tmux has-session`, no
@@ -6,10 +6,10 @@
 //! `exec`s. The pre-checks act in Rust rather than in the script so a freshly
 //! launched VM, an interactive (non `--agent`) VM, or a finished agent never
 //! drops the caller into a bare login shell (the "attached, then kicked out
-//! right after the README" symptom; lib/sandbox/default.nix:1959-1972).
+//! right after the README" symptom; ).
 //!
-//! Replaces the `sandbox:attach` shell at lib/sandbox/default.nix:1935-1984; the
-//! menu command becomes the documented emit+exec wrapper (design §8.1).
+//! Replaces the `sandbox:attach` shell at; the
+//! menu command becomes the documented emit+exec wrapper.
 
 use std::path::Path;
 use std::process::Command;
@@ -23,8 +23,7 @@ use crate::sandbox::resolve::resolve_instance;
 use crate::sandbox::spec::{load_spec, resolve_roots, Spec};
 use crate::Global;
 
-/// The fixed tmux session name the agent harness runs under
-/// (lib/sandbox/default.nix:1967).
+/// The fixed tmux session name the agent harness runs under.
 const SESSION: &str = "katsuobushi";
 
 /// What the planning pass decided: emit the handoff, or stop with guidance.
@@ -32,7 +31,7 @@ enum Outcome {
     /// A recipe was written and its path printed (the wrapper will `exec` it).
     Emitted,
     /// A pre-check failed; the caller prints this to stderr and exits nonzero
-    /// **without** emitting a script (design §8.1: planning failure → no path).
+    /// **without** emitting a script (: planning failure → no path).
     Guidance(String),
 }
 
@@ -45,7 +44,7 @@ pub fn run(config: &Path, instance: &str, _global: Global) -> Result<()> {
     let host = HostImpl::new().context("initializing the host IO seam")?;
     let roots = resolve_roots(&spec.roots)?;
     let inst = resolve_instance(&roots.state_glob, &host, instance)?;
-    // `ssh_port` lives in instance.json (design §6); read it before probing so
+    // `ssh_port` lives in instance.json; read it before probing so
     // both the has-session pre-check and the emitted recipe use the same port.
     let meta = instance::read(&roots.state_glob, &inst)?;
 
@@ -60,7 +59,7 @@ pub fn run(config: &Path, instance: &str, _global: Global) -> Result<()> {
     }
 }
 
-/// The testable core (design §7.2): with `inst` already resolved and `ssh_port`
+/// The testable core: with `inst` already resolved and `ssh_port`
 /// already read, do the two direct probes through the seam and, only when both
 /// pass, emit the recipe. Returns [`Outcome::Guidance`] (no script) on a failed
 /// probe so the seam tests can assert "guidance + no temp-file write".
@@ -74,15 +73,14 @@ fn attach_with(
 ) -> Result<Outcome> {
     let roots = resolve_roots(&spec.roots)?;
 
-    // Verify the VM is running via QMP (the one true liveness probe, §2.3);
-    // same socket path as `sandbox:stop` (lib/sandbox/default.nix:1917).
+    // Verify the VM is running via QMP (the one true liveness probe);
+    // same socket path as `sandbox:stop`.
     let sock = roots.runtime_glob.join(inst).join("katsuobushi.sock");
     if !host.qmp_alive(&sock) {
         return Ok(Outcome::Guidance(not_running(inst)));
     }
 
-    // The ssh key path matches the prior art (lib/sandbox/default.nix:1955,
-    // :1886): the per-instance private key under the runtime root.
+    // The ssh key path is the per-instance private key under the runtime root.
     let key = roots.runtime_glob.join(inst).join("id");
     if !has_session(host, &key, ssh_port, &spec.agent_user) {
         return Ok(Outcome::Guidance(no_session(inst)));
@@ -94,10 +92,10 @@ fn attach_with(
     Ok(Outcome::Emitted)
 }
 
-/// The direct `tmux has-session` pre-check (design §8.3): an ssh with **no PTY**
+/// The direct `tmux has-session` pre-check: an ssh with **no PTY**
 /// so it stays silent on success and skips the guest's login greeting. Mirrors
 /// the prior-art `_ssh 'tmux has-session -t katsuobushi'`
-/// (lib/sandbox/default.nix:1967); a nonzero exit means no live session.
+///; a nonzero exit means no live session.
 fn has_session(host: &impl Host, key: &Path, ssh_port: u16, agent_user: &str) -> bool {
     let mut cmd = Command::new("ssh");
     cmd.arg("-i")
@@ -116,12 +114,12 @@ fn has_session(host: &impl Host, key: &Path, ssh_port: u16, agent_user: &str) ->
     matches!(host.run(&cmd), Ok(out) if out.status.success())
 }
 
-/// The emitted terminal-handoff recipe (design §8.3). A flat recipe whose tail
+/// The emitted terminal-handoff recipe. A flat recipe whose tail
 /// is the single `exec ssh … -t 'TERM=… tmux attach'`: `-t` forces a PTY for the
 /// interactive client, and `TERM` is pinned in the *remote* command environment
 /// (not forwarded via `SetEnv`, which needs sshd's `AcceptEnv`) because the
 /// caller's `$TERM` may have no terminfo entry in the guest — tmux would abort
-/// with "missing or unsuitable terminal" (lib/sandbox/default.nix:1973-1982).
+/// with "missing or unsuitable terminal".
 fn attach_recipe(key: &Path, ssh_port: u16, agent_user: &str) -> Recipe {
     let mut recipe = Recipe::new();
     recipe
@@ -152,7 +150,7 @@ fn no_session(inst: &str) -> String {
 }
 
 /// The shared "what to do next" lines both pre-check failures end with
-/// (lib/sandbox/default.nix:1969-1970): a freshly launched VM needs ~30-60s to
+///: a freshly launched VM needs ~30-60s to
 /// arm the session, and only `--agent` instances ever run one.
 fn guidance_tail(inst: &str) -> String {
     format!(
@@ -246,7 +244,7 @@ mod tests {
         host.calls().iter().any(|c| matches!(c, Call::Write(..)))
     }
 
-    // ---- golden snapshot (design §7.2 tier 2): the emitted recipe ----
+    // ---- golden snapshot (tier 2): the emitted recipe ----
 
     #[test]
     fn it_snapshots_the_attach_recipe() {
@@ -348,7 +346,7 @@ mod tests {
             Outcome::Emitted => panic!("must not emit when there is no session"),
         }
         // Critically: nothing was written — the caller is never dropped into a
-        // bare login shell (design §8.1, no path on a planning failure).
+        // bare login shell (no path on a planning failure).
         assert!(!wrote_a_script(&host), "no script on a missing session");
     }
 

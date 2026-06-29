@@ -1,5 +1,5 @@
 //! `katsuctl sandbox prompt` — push one prompt to an instance and stream its
-//! reports (design/katsuctl.md §11). Absorbs and retires the standalone
+//! reports. Absorbs and retires the standalone
 //! `katsuobushi-sandbox-prompt` host client (`prompt.rs`): its `drive()`
 //! streaming loop and the readiness-wait move here.
 //!
@@ -13,8 +13,8 @@
 //!   (`--agent --name <inst>`, boot only — *no* `--prompt`), then fall through to
 //!   the same vsock delivery the running branch uses so `katsuctl` itself streams
 //!   the turn once the channel arms. (The shell `start` runner no longer delivers
-//!   `--prompt`; that lands natively in #015. Delivering here keeps restart
-//!   self-contained — the turn is never silently dropped.);
+//!   `--prompt`; delivering it here keeps restart self-contained — the turn is
+//!   never silently dropped.);
 //! - **not running + ephemeral**: there is nothing to resume — error clearly.
 //!
 //! The vsock streaming keeps the proven async/tokio + `tokio-vsock` machinery
@@ -22,7 +22,7 @@
 //! through [`Host::vsock_connect`](crate::sandbox::host::Host::vsock_connect)
 //! (whose runtime is private). A freshly-booted instance needs ~30–60s before
 //! vsock answers, so the connect retries with backoff (the old runner's
-//! `--probe` loop, lib/sandbox/default.nix) — a successful connect *is* the
+//! `--probe` loop) — a successful connect *is* the
 //! readiness signal.
 
 use std::path::Path;
@@ -48,19 +48,19 @@ use crate::Global;
 /// How many times [`connect_with_retry`] attempts the vsock connect before giving
 /// up, and the backoff cap between tries. With the 250ms→2s schedule this is a
 /// ~3-minute readiness budget, matching the old runner's `for _ in $(seq 1 180)`
-/// `--probe` loop (lib/sandbox/default.nix) so a just-booted instance is handled.
+/// `--probe` loop so a just-booted instance is handled.
 const READINESS_TRIES: usize = 90;
 const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_CAP: Duration = Duration::from_secs(2);
 
-/// The host watchdog's three deadlines plus the resend budget (design
-/// /sandbox-liveness.md §8, §18) and the phase-0 ready-gate bound, resolved from
-/// the spec tunables. Carried into [`drive`] so its `select!` timers are driven by
-/// data, not magic numbers — and so a test can shrink them.
+/// The host watchdog's three deadlines plus the resend budget, and the phase-0
+/// ready-gate bound, resolved from the spec tunables. Carried into [`drive`] so
+/// its `select!` timers are driven by data, not magic numbers — and so a test
+/// can shrink them.
 #[derive(Debug, Clone, Copy)]
 struct Watchdog {
     /// `readyGateSecs`: how long [`drive`]'s phase-0 ready-gate waits for the
-    /// guest's `SessionReady` before sending the first `Prompt` anyway (§7.1).
+    /// guest's `SessionReady` before sending the first `Prompt` anyway.
     ready_gate: Duration,
     /// `heartbeatSecs * heartbeatMiss`: no `Heartbeat` within this window ⇒ the
     /// transport is dead (error).
@@ -76,7 +76,7 @@ struct Watchdog {
 }
 
 impl Watchdog {
-    /// Resolve the deadlines from the Nix-rendered spec tunables (design §18).
+    /// Resolve the deadlines from the Nix-rendered spec tunables.
     fn from_spec(spec: &Spec) -> Self {
         Self {
             ready_gate: Duration::from_secs(spec.ready_gate_secs),
@@ -94,15 +94,15 @@ impl Watchdog {
 /// What [`drive`] surfaces to its sink — everything that should reach the host
 /// orchestrator. A `Heartbeat` is deliberately **absent**: it is handled silently
 /// (timer reset + a throttled `liveness.json` touch), so a backgrounded `drive`
-/// emits zero bytes on a tick (design §8.1). The transport-dead and resend-
+/// emits zero bytes on a tick. The transport-dead and resend-
 /// exhausted verdicts are not here either — they are terminal `Err`s, rendered as
 /// `Lost` by [`deliver_over_vsock`].
 enum DriveEvent<'a> {
     /// A relayed agent `Report` (working/info/done/blocked).
     Report(&'a Report),
-    /// The one-shot progress-stall notice (§8): "no progress for T".
+    /// The one-shot progress-stall notice: "no progress for T".
     Stalled(&'a str),
-    /// The §6.2 `reported:false` verdict for this `turn_id` — the agent stopped
+    /// The `reported:false` verdict for this `turn_id` — the agent stopped
     /// without a terminal report.
     Stopped(u64),
 }
@@ -142,7 +142,7 @@ pub fn run(config: &Path, instance: &str, text: Vec<String>, global: Global) -> 
         resume_via_start,
         |cid, inst| {
             // The turn id is allocated from (and the heartbeat record written to)
-            // `liveness.json` beside the instance's `instance.json` (design §9).
+            // `liveness.json` beside the instance's `instance.json`.
             let liveness_path = state_glob.join(inst).join("liveness.json");
             let turn_id = alloc_turn_id(&host, &liveness_path)?;
             deliver_over_vsock(
@@ -171,7 +171,7 @@ pub fn run(config: &Path, instance: &str, text: Vec<String>, global: Global) -> 
 ///
 /// A paused named instance is **booted then delivered to**: the boot only
 /// launches the detached VM (it does not carry the prompt — the shell start
-/// runner no longer delivers `--prompt`; that lands natively in #015), so the
+/// runner no longer delivers `--prompt`; that lands natively in ), so the
 /// restart path falls through to the *same* `deliver` the running path uses, and
 /// `katsuctl` itself streams the turn over vsock once the channel arms. This
 /// keeps restart self-contained: it never drops the turn waiting on `start`.
@@ -191,12 +191,12 @@ fn prompt_core(
     let meta = read_instance(&inst)?;
 
     // No CID means no control channel: an interactive instance can't be prompted
-    // (mirrors the old `vsock-cid` readability guard, lib/sandbox/default.nix).
+    // (mirrors the old `vsock-cid` readability guard).
     let Some(cid) = meta.vsock_cid else {
         bail!("sandbox prompt: no control channel for {inst:?} (is it an --agent instance?)");
     };
 
-    // Liveness is derived from QMP, never stored (design §6): a live qemu monitor
+    // Liveness is derived from QMP, never stored: a live qemu monitor
     // answers at <runtimeGlob>/<inst>/katsuobushi.sock.
     let sock = roots.runtime_glob.join(&inst).join("katsuobushi.sock");
     if host.qmp_alive(&sock) {
@@ -226,7 +226,7 @@ fn prompt_core(
 ///
 /// The streaming sink renders agent `Report`s and the watchdog's `Stalled`/
 /// `Stopped` notices; the silent heartbeat touch writes `liveness.json` through
-/// the host seam (design §8.1/§9). A terminal `Err` (transport dead / resend
+/// the host seam. A terminal `Err` (transport dead / resend
 /// exhausted) is rendered once as the `Lost` ✗ verdict, then the process exits
 /// nonzero — short-circuiting `anyhow`'s noisier top-level chain.
 #[allow(clippy::too_many_arguments)]
@@ -258,7 +258,7 @@ fn deliver_over_vsock(
     };
     // The heartbeat touch: load-modify-store the liveness record with a fresh
     // timestamp from the clock seam. Best-effort — a failed write never fails the
-    // turn (design §8.1) — and silent (no render/print).
+    // turn — and silent (no render/print).
     let touch = || {
         let mut liveness = Liveness::load(host, liveness_path);
         if let Ok(stamp) = now_rfc3339(host) {
@@ -288,7 +288,7 @@ fn deliver_over_vsock(
 }
 
 /// Flip `streamActive` in `liveness.json` (best-effort) so `status` can tell an
-/// attached `drive` from a stale record (design §9). Preserves the rest of the
+/// attached `drive` from a stale record. Preserves the rest of the
 /// record via load-modify-store.
 fn set_stream_active(host: &impl Host, path: &Path, active: bool) {
     let mut liveness = Liveness::load(host, path);
@@ -296,7 +296,7 @@ fn set_stream_active(host: &impl Host, path: &Path, active: bool) {
     let _ = liveness.store(host, path);
 }
 
-/// The §6.2 message for a turn that stopped without a terminal report.
+/// The message for a turn that stopped without a terminal report.
 fn stopped_message(turn_id: u64) -> String {
     format!(
         "agent stopped without reporting (turn {turn_id}) — possible silent \
@@ -306,7 +306,7 @@ fn stopped_message(turn_id: u64) -> String {
 
 /// Render a watchdog notice (Stalled/Stopped/Lost) through the shared renderer:
 /// `--json` emits a tagged `{"event":…,"text":…}` line (the NDJSON stream's
-/// out-of-band note), human mode paints the glyph line (design §13/§16).
+/// out-of-band note), human mode paints the glyph line.
 fn render_note(renderer: &Renderer, kind: ReportKind, text: &str) -> Result<()> {
     #[derive(Serialize)]
     struct Note<'a> {
@@ -359,16 +359,16 @@ enum LineFlow {
     Break,
 }
 
-/// Handle one decoded guest line in the phase-1 stream loop (design §8/§16),
+/// Handle one decoded guest line in the phase-1 stream loop,
 /// mutating the watchdog state in place and surfacing events through `sink`:
 ///
 /// - `Heartbeat` is **silent** — reset `last_hb` + a throttled (≤1/s) `touch()`
-///   of `liveness.json` (§8.1), no render.
+///   of `liveness.json`, no render.
 /// - a `working`/`info` `Report` resets the stall timer, (re)arms the one-shot
-///   notice, and counts as the implicit delivery ack (§7.2 fallback).
+///   notice, and counts as the implicit delivery ack (fallback).
 /// - a `done`/`blocked` `Report` relays then [`LineFlow::Break`]s (clean terminal).
 /// - `TurnAccepted`/`TurnCompleted` for *this* `turn_id` ack / terminate (the
-///   latter warning via `Stopped` when `reported = false`, §6.2).
+///   latter warning via `Stopped` when `reported = false`).
 /// - everything else is tolerated/diagnostic (a per-connect `ready`, a late
 ///   `SessionReady`, stale-`turn_id` lifecycle, an unknown variant, undecodable
 ///   bytes) — none reach the orchestrator.
@@ -393,7 +393,7 @@ where
 {
     match serde_json::from_str::<GuestMessage>(line) {
         Ok(GuestMessage::Heartbeat { .. }) => {
-            // §8.1 invariant: SILENT — reset the deadline and a throttled (≤1/s)
+            // invariant: SILENT — reset the deadline and a throttled (≤1/s)
             // liveness touch only. No render, no print.
             *last_hb = Instant::now();
             let due =
@@ -406,7 +406,7 @@ where
         Ok(GuestMessage::Report(report)) => match report.status {
             Status::Working | Status::Info => {
                 // Progress: reset the stall timer, (re)arm the one-shot notice, and
-                // treat it as the implicit delivery ack (§7.2 fallback).
+                // treat it as the implicit delivery ack (fallback).
                 *last_prog = Instant::now();
                 *stall_surfaced = false;
                 *accepted = true;
@@ -414,7 +414,7 @@ where
             }
             Status::Done | Status::Blocked => {
                 sink(DriveEvent::Report(&report))?;
-                return Ok(LineFlow::Break); // clean terminal (§8)
+                return Ok(LineFlow::Break); // clean terminal
             }
         },
         Ok(GuestMessage::TurnAccepted { turn_id: id }) if id == turn_id => {
@@ -425,7 +425,7 @@ where
             reported,
         }) if id == turn_id => {
             if !reported {
-                // §6.2: stopped without a terminal report — warn.
+                //: stopped without a terminal report — warn.
                 sink(DriveEvent::Stopped(turn_id))?;
             }
             return Ok(LineFlow::Break);
@@ -440,7 +440,7 @@ where
     Ok(LineFlow::Continue)
 }
 
-/// The host watchdog (design/sandbox-liveness.md §8, §16). Sends `Prompt{turn_id}`
+/// The host watchdog. Sends `Prompt{turn_id}`
 /// over `stream`, then runs a `select!` loop over the guest line stream plus three
 /// deadline timers, until a terminal condition:
 ///
@@ -448,22 +448,22 @@ where
 ///   ⇒ the transport is dead ⇒ `Err` (rendered `Lost`).
 /// - **progress-deadline** (`progress_deadline`): no `Report`/lifecycle in the
 ///   window ⇒ surface the `Stalled` notice **once** per episode (no break, no
-///   kill — §8); cleared by the next `working`/`info` report.
+///   kill); cleared by the next `working`/`info` report.
 /// - **delivery-deadline** (`delivery_deadline`): no `TurnAccepted` yet ⇒ resend
-///   the identical `Prompt` up to `delivery_retries`, then `Err` clearly (§7.2).
+///   the identical `Prompt` up to `delivery_retries`, then `Err` clearly.
 ///
 /// A `Heartbeat` is handled **silently** — reset `last_hb` + a throttled (≤1/s)
-/// `touch()` of `liveness.json` — and reaches the orchestrator as zero bytes
-/// (§8.1). Terminal breaks: a `done`/`blocked` `Report`, `TurnCompleted{true}`
-/// (clean), or `TurnCompleted{false}` (the §6.2 `Stopped` warning). EOF (`None`)
+/// `touch()` of `liveness.json` — and reaches the orchestrator as zero bytes.
+/// Terminal breaks: a `done`/`blocked` `Report`, `TurnCompleted{true}`
+/// (clean), or `TurnCompleted{false}` (the `Stopped` warning). EOF (`None`)
 /// is a transport-closed-mid-turn `Err`.
 ///
-/// A **phase-0 ready-gate** (§7.1, #029) precedes the send: `drive` waits up to
+/// A **phase-0 ready-gate** precedes the send: `drive` waits up to
 /// `ready_gate` for the guest's `SessionReady` — latched and replayed on each
-/// control connect (#026), so an already-armed agent passes instantly — before
+/// control connect, so an already-armed agent passes instantly — before
 /// the first `Prompt`, tolerating `Ready`/`Heartbeat` and stashing any other line
 /// (the agent is already moving) into phase-1 so it is not lost. The gate elapsing
-/// proceeds anyway; the §7.2 ack-and-resend is the delivery guarantee. `Ready` is
+/// proceeds anyway; the ack-and-resend is the delivery guarantee. `Ready` is
 /// thereby demoted to "transport accepted" — it no longer authorizes a prompt.
 /// Generic over the transport so a test drives it with an in-memory duplex.
 async fn drive<S, Sink, Touch>(
@@ -482,7 +482,7 @@ where
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut lines = BufReader::new(read_half).lines();
 
-    // Encode once so a resend (§7.2) replays the *identical* Prompt bytes — the
+    // Encode once so a resend replays the *identical* Prompt bytes — the
     // guest dedupes on `turn_id`, so a resend racing a slow first delivery is
     // dropped harmlessly.
     let prompt_line = {
@@ -499,13 +499,13 @@ where
         delivery_retries,
     } = watchdog;
 
-    // Phase 0: the bounded ready-gate (§7.1, #029). Wait up to `ready_gate` for the
-    // guest's `SessionReady` — latched and replayed on each control connect (#026),
+    // Phase 0: the bounded ready-gate. Wait up to `ready_gate` for the
+    // guest's `SessionReady` — latched and replayed on each control connect,
     // so a prompt to an already-armed agent passes instantly, while one right after
-    // boot waits for real arming (closing the §2 startup race). `Ready`/`Heartbeat`
+    // boot waits for real arming (closing the startup race). `Ready`/`Heartbeat`
     // mean "transport up", not "agent armed" — consume and keep waiting; any other
     // line means the agent is already producing turn output, so stash it for phase-1
-    // (never lost) and stop waiting. The gate elapsing sends anyway — #027's
+    // (never lost) and stop waiting. The gate elapsing sends anyway — 's
     // ack-and-resend covers a still-unarmed agent.
     let gate_deadline = Instant::now() + ready_gate;
     let mut stashed: Option<String> = None;
@@ -537,7 +537,7 @@ where
                     }
                 }
             }
-            _ = sleep_until(gate_deadline) => break, // proceed anyway (§7.1)
+            _ = sleep_until(gate_deadline) => break, // proceed anyway
         }
     }
 
@@ -557,7 +557,7 @@ where
     let mut resends: u32 = 0;
     let mut stall_surfaced = false;
 
-    // A fast agent may have produced its first line *during* the ready-gate; #029
+    // A fast agent may have produced its first line *during* the ready-gate;
     // stashed it rather than dropping it. Feed it through the identical handler the
     // stream loop uses before awaiting anything more — it may itself be terminal.
     if let Some(line) = stashed.take() {
@@ -616,7 +616,7 @@ where
                     progress_deadline.as_secs()
                 );
                 sink(DriveEvent::Stalled(&note))?;
-                stall_surfaced = true; // one-shot per episode; no break, no kill (§8)
+                stall_surfaced = true; // one-shot per episode; no break, no kill
             }
             _ = sleep_until(sent + delivery_deadline), if !accepted => {
                 if resends < delivery_retries {
@@ -640,8 +640,8 @@ where
 }
 
 /// Render one streamed report: `--json` emits the `Report` as one line of NDJSON
-/// (the existing wire format); human output uses the #007 status glyph/color
-/// (design §13). Both go through [`Renderer::emit`], which serializes in `--json`
+/// (the existing wire format); human output uses the status glyph/color.
+/// Both go through [`Renderer::emit`], which serializes in `--json`
 /// mode and paints (gated) otherwise.
 fn render_report(renderer: &Renderer, report: &Report) -> Result<()> {
     let kind = match report.status {
@@ -672,7 +672,7 @@ fn resume_via_start_args(inst: &str) -> Vec<String> {
 /// promptly after detaching the VM, so this spawns-and-waits (not `exec`) and then
 /// returns to `prompt_core`, which streams the turn over vsock once the channel
 /// arms — making restart self-contained rather than depending on `start` to
-/// deliver `--prompt` (which it no longer does; that lands natively in #015).
+/// deliver `--prompt` (which it no longer does; that lands natively in).
 fn resume_via_start(inst: &str) -> Result<()> {
     eprintln!(
         "sandbox prompt: {inst:?} is paused — resuming it to deliver this turn \
@@ -1039,7 +1039,7 @@ mod tests {
 
     #[test]
     fn a_heartbeat_produces_zero_orchestrator_events_but_touches_liveness() {
-        // §8.1 invariant: a `Heartbeat` surfaces NO event to the sink (zero
+        // invariant: a `Heartbeat` surfaces NO event to the sink (zero
         // orchestrator-facing bytes); it only resets the timer and silently
         // touches `liveness.json`.
         let (result, events, _, touches) = drive_over_canned(
@@ -1064,7 +1064,7 @@ mod tests {
 
     #[test]
     fn it_renders_a_stopped_warning_on_turn_completed_unreported() {
-        // §6.2: `TurnCompleted{reported:false}` for our turn → a single `Stopped`
+        //: `TurnCompleted{reported:false}` for our turn → a single `Stopped`
         // verdict, then a clean break (not an error).
         let (result, events, _, _) = drive_over_canned(
             "go",
@@ -1264,7 +1264,7 @@ mod tests {
         });
         result.expect("a turn accepted after a resend is success");
         // Both deliveries are the identical Prompt{turn_id:7} (so the guest's
-        // turn_id dedupe makes the resend safe, design §7.2).
+        // turn_id dedupe makes the resend safe).
         for raw in [&p1, &p2] {
             let HostMessage::Prompt(p) =
                 serde_json::from_str::<HostMessage>(raw.trim()).expect("a Prompt");
@@ -1299,7 +1299,7 @@ mod tests {
         assert!(format!("{err:#}").contains("not accepted"), "{err:#}");
     }
 
-    // ---- phase-0 ready-gate (#029, canned channel, tier 2) ----
+    // ---- phase-0 ready-gate (canned channel, tier 2) ----
     //
     // As with the watchdog-timer tests above, these use *small real* durations
     // (no paused clock — `test-util` is not enabled on the shared `tokio` dep).
@@ -1395,7 +1395,7 @@ mod tests {
     #[test]
     fn it_passes_the_gate_at_once_on_a_latched_session_ready_replay() {
         // The server latches `SessionReady` and replays it on every control connect
-        // (#026), so a prompt to an already-armed agent sees it as the very first
+        //, so a prompt to an already-armed agent sees it as the very first
         // line — the gate clears with ~no wait even though it is seconds-wide.
         let watchdog = Watchdog {
             ready_gate: Duration::from_secs(30),
@@ -1454,7 +1454,7 @@ mod tests {
     #[test]
     fn it_proceeds_after_the_ready_gate_without_session_ready() {
         // No `SessionReady` ever arrives: the gate must time out and send the prompt
-        // anyway (§7.1) — #027's ack-and-resend is then the guarantee. A short gate
+        // anyway — 's ack-and-resend is then the guarantee. A short gate
         // keeps the test quick; the prompt only arrives once the gate elapses.
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
         let sent = RefCell::new(String::new());

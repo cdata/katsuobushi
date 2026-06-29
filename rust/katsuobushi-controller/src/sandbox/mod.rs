@@ -1,8 +1,5 @@
 //! The `sandbox` domain: dispatch plus one module per subcommand, so future
-//! top-level domains slot in as sibling modules under `src/` (design §4).
-//!
-//! Every subcommand here is a stub returning a clear `unimplemented` error; the
-//! real behavior lands command-by-command per the migration phasing (design §12).
+//! top-level domains slot in as sibling modules under `src/`.
 
 use crate::{Global, SandboxArgs, SandboxCommand};
 use anyhow::Result;

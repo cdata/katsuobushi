@@ -1,15 +1,15 @@
-//! The Nix→Rust spec contract (design/katsuctl.md §5).
+//! The Nix→Rust spec contract.
 //!
 //! Nix renders a single JSON instance spec at flake-eval time (`builtins.toJSON`)
 //! and hands it to `katsuctl` via `--config <path>`; these types are the
 //! authoritative schema (Rust owns the schema, Nix produces JSON to match,
-//! design §5.1). Every struct is `#[serde(deny_unknown_fields)]` so a field added
+//! ). Every struct is `#[serde(deny_unknown_fields)]` so a field added
 //! on the Nix side but not here fails loudly rather than being silently dropped,
 //! and [`Spec::spec_version`] is checked on load so a stale `nix develop` shell
 //! fails loud with a "rebuild your devshell" message instead of misbehaving.
 
 // The schema and loader land ahead of the subcommands that consume them
-// (design §12 phasing); each `Spec`/`Roots`/loader item is wired in as its
+// (phasing); each `Spec`/`Roots`/loader item is wired in as its
 // command migrates, so they read as dead code until then.
 #![allow(dead_code)]
 
@@ -19,43 +19,43 @@ use std::path::{Path, PathBuf};
 
 /// The spec schema version this build of `katsuctl` understands. Bumped in
 /// lockstep with the Nix renderer; [`load_spec`] fails loud on any mismatch
-/// (design §5.1, §14.6 — no multi-version support, no migration).
+/// (— no multi-version support, no migration).
 pub const SUPPORTED_SPEC_VERSION: u32 = 2;
 
 /// The complete Nix-rendered instance spec — the one source of truth for
-/// everything Nix-derived (design §5.2).
+/// everything Nix-derived.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Spec {
     /// Schema version; checked against [`SUPPORTED_SPEC_VERSION`] on load.
     pub spec_version: u32,
-    /// e.g. `"cdata/katsuobushi"` (lib/sandbox/default.nix:30).
+    /// e.g. `"cdata/katsuobushi"` (:30).
     pub project_id: String,
-    /// The unprivileged in-guest user, e.g. `"agent"` (:161).
+    /// The unprivileged in-guest user, e.g. `"agent"`.
     pub agent_user: String,
-    /// Whether to snapshot the host Nix DB into the instance (:135).
+    /// Whether to snapshot the host Nix DB into the instance.
     pub import_host_store_db: bool,
 
     /// State/runtime root templates (still carrying `$XDG_*`/`$HOME`).
     pub roots: Roots,
     /// Every pinned store-path binary `katsuctl` shells out to.
     pub tools: Tools,
-    /// `${runner}/bin/microvm-run` (:1262, :1556).
+    /// `${runner}/bin/microvm-run`.
     pub runner: PathBuf,
-    /// e.g. `["rw-store.img", "nix-db.img", "scratch.img"]` (:1510).
+    /// e.g. `["rw-store.img", "nix-db.img", "scratch.img"]`.
     pub disk_images: Vec<String>,
-    /// `validatedContext` relative paths to stage into the instance (:270, :1438).
+    /// `validatedContext` relative paths to stage into the instance.
     pub context: Vec<String>,
-    /// Declared secrets to stage to the runtime tmpfs (design §10; :90, :1445).
+    /// Declared secrets to stage to the runtime tmpfs (:90).
     pub secrets: Vec<SecretSpec>,
     /// vsock port for the control channel (`protocol::VSOCK_PORT`, 1024).
     pub vsock_port: u32,
     /// Host CID (`protocol::VMADDR_CID_HOST`, 2).
     pub host_cid: u32,
 
-    // Liveness tunables (design/sandbox-liveness.md §16, §18). Rendered from a
-    // single set of Nix let-bindings (lib/sandbox/default.nix) into both this
-    // spec and the guest env, so the two sides can never drift (§14.8). Inert
+    // Liveness tunables. Rendered from a
+    // single set of Nix let-bindings into both this
+    // spec and the guest env, so the two sides can never drift. Inert
     // until a later issue's consumer reads them — knob plumbing only.
     /// Heartbeat cadence in seconds (H); also exported as `KATSU_HEARTBEAT_SECS`.
     pub heartbeat_secs: u64,
@@ -76,8 +76,8 @@ pub struct Spec {
 
 /// State/runtime directory roots, carrying the `$XDG_*`/`$HOME` templates the
 /// shell expands at runtime rather than baked absolute paths — `katsuctl` does
-/// the same expansion in Rust via [`resolve_roots`] (design §5.2 note;
-/// lib/sandbox/default.nix:1321-1322, 1604-1605).
+/// the same expansion in Rust via [`resolve_roots`] (note;
+///, 1604-1605).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Roots {
@@ -87,8 +87,8 @@ pub struct Roots {
     pub runtime_glob: PathBuf,
 }
 
-/// The pinned store-path binaries `katsuctl` orchestrates (design §5.2; §2.3 —
-/// shell out to the exact paths Nix supplies, native Rust only for sockets).
+/// The pinned store-path binaries `katsuctl` orchestrates — shell out to the
+/// exact paths Nix supplies, native Rust only for sockets.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Tools {
@@ -97,34 +97,34 @@ pub struct Tools {
     pub ssh_keygen: PathBuf,
     pub tmux: PathBuf,
     pub rsync: PathBuf,
-    /// Only present when [`Spec::import_host_store_db`] is set (:135, :1409).
+    /// Only present when [`Spec::import_host_store_db`] is set.
     pub sqlite3: Option<PathBuf>,
-    /// Interpreter for the emitted `start`/`attach` scripts (design §8).
+    /// Interpreter for the emitted `start`/`attach` scripts.
     pub bash: PathBuf,
 }
 
-/// One declared secret to stage into the instance (design §10; :1445-1473).
+/// One declared secret to stage into the instance.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SecretSpec {
-    /// Guest-side credential name (:1446).
+    /// Guest-side credential name.
     pub name: String,
-    /// Where the value comes from on the host (:1449, :1461).
+    /// Where the value comes from on the host.
     pub source: SecretSource,
-    /// Runtime-tmpfs filename, `"cred-<name>"` (:1457).
+    /// Runtime-tmpfs filename, `"cred-<name>"`.
     pub dest: String,
 }
 
 /// The host-side origin of a secret. Externally tagged to match the rendered
-/// JSON exactly: `{ "fromEnv": "VAR" }` / `{ "fromFile": "/path" }` (design §5.3).
+/// JSON exactly: `{ "fromEnv": "VAR" }` / `{ "fromFile": "/path" }`.
 /// `katsuctl` never reads the *value* here — the emitted script re-reads the env
-/// var or copies the file at runtime (design §10, references-never-values).
+/// var or copies the file at runtime (references-never-values).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SecretSource {
-    /// Read from this host environment variable at script runtime (:1449).
+    /// Read from this host environment variable at script runtime.
     FromEnv(String),
-    /// Copy from this host file path at script runtime (:1461).
+    /// Copy from this host file path at script runtime.
     FromFile(String),
 }
 
@@ -139,7 +139,7 @@ pub struct ResolvedRoots {
 /// Read, parse, and version-check the Nix-rendered spec at `path`.
 ///
 /// Fails loud on a `specVersion` mismatch with a "rebuild your devshell" hint
-/// (design §5.1) — sandboxes are ephemeral, so there is no migration path.
+/// — sandboxes are ephemeral, so there is no migration path.
 pub fn load_spec(path: &Path) -> Result<Spec> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("reading sandbox spec at {}", path.display()))?;
@@ -162,15 +162,15 @@ fn from_json_bytes(bytes: &[u8]) -> Result<Spec> {
 }
 
 /// Expand the `$XDG_*`/`$HOME` templates in `roots` against the real process
-/// environment (design §5.2 note). Mirrors the shell's
+/// environment (note). Mirrors the shell's
 /// `${XDG_STATE_HOME:-$HOME/.local/state}` / `${XDG_RUNTIME_DIR:-/tmp}` fallbacks
-/// (lib/sandbox/default.nix:1321-1322, 1604-1605).
+/// (1604-1605).
 pub fn resolve_roots(roots: &Roots) -> Result<ResolvedRoots> {
     resolve_roots_with(roots, |k| std::env::var(k).ok())
 }
 
 /// [`resolve_roots`] over an injected environment lookup, so expansion is a pure
-/// function testable against a fake env (design §7.2 tier 1).
+/// function testable against a fake env (tier 1).
 fn resolve_roots_with(
     roots: &Roots,
     get: impl Fn(&str) -> Option<String>,
@@ -222,7 +222,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    /// The design §5.3 example, with the `…` store-hash ellipses filled in.
+    /// The example, with the `…` store-hash ellipses filled in.
     const EXAMPLE_SPEC_JSON: &str = r#"{
       "specVersion": 2,
       "projectId": "cdata/katsuobushi",
@@ -283,7 +283,7 @@ mod tests {
         assert_eq!(spec.vsock_port, 1024);
         assert_eq!(spec.host_cid, 2);
 
-        // Liveness tunables parse with the §18 defaults (inert knob plumbing).
+        // Liveness tunables parse with the defaults (inert knob plumbing).
         assert_eq!(spec.heartbeat_secs, 10);
         assert_eq!(spec.heartbeat_miss, 3);
         assert_eq!(spec.progress_stall_secs, 300);
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn it_rejects_a_now_stale_v1_spec() {
         // The v1→v2 bump is the skew gate: a spec from a pre-tunables Nix render
-        // must fail loud rather than parse with missing knobs (design §14.6).
+        // must fail loud rather than parse with missing knobs.
         let json = EXAMPLE_SPEC_JSON.replace(r#""specVersion": 2"#, r#""specVersion": 1"#);
         let err = from_json_bytes(json.as_bytes()).expect_err("v1 must now be rejected");
         let msg = format!("{err:#}");

@@ -1,15 +1,14 @@
 //! katsuobushi-sandbox-guest — the guest-side sandbox controller server.
 //!
-//! Claude Code spawns this over stdio as an MCP server (see
-//! `design/sandbox-agent-mode.md` §3). It declares exactly one capability —
-//! `claude/channel` — so the host can push a prompt into the dormant
-//! interactive session as a `<channel>` turn, and nothing else. It is the
-//! adapter (design Layer 2): the only place that knows the word "channel".
+//! Claude Code spawns this over stdio as an MCP server. It declares exactly one
+//! capability — `claude/channel` — so the host can push a prompt into the
+//! dormant interactive session as a `<channel>` turn, and nothing else. It is
+//! the adapter: the only place that knows the word "channel".
 //!
 //! Three I/O sources, one tokio runtime:
 //!
 //! - stdio ↔ claude: the rmcp server; its `Peer` is how we inject turns.
-//! - control ↔ host: vsock in production (peer-CID==2 gated, §5.9), a unix
+//! - control ↔ host: vsock in production (peer-CID==2 gated), a unix
 //!   socket for the no-vsock local spike. Carries inbound `Prompt`s and
 //!   outbound `Report`/`ready` lines.
 //! - report ← agent: a guest-local unix socket the `report` command (and the
@@ -21,7 +20,7 @@
 //! - `KATSU_CONTROL_UNIX=<path>` selects spike mode: control over a unix socket.
 //! - Unset selects production: control over AF_VSOCK.
 //!
-//! ## The turn-state machine (`design/sandbox-liveness.md` §6)
+//! ## The turn-state machine
 //!
 //! The server is the only actor present whether or not a host is attached, so it
 //! owns the per-turn lifecycle. One [`Session`] behind a mutex is read/written
@@ -29,8 +28,8 @@
 //! hook lines). The decision core ([`Session::step`]) is a pure transition
 //! function over an ordered event stream — no timers, no sockets — so every
 //! interleaving (including the grace window that disambiguates a `Stop` with vs.
-//! without a terminal report, §6.1/§6.2) is unit-testable. Every transition is
-//! persisted to `${KATSU_SHARE}/turn-state.json` (§6.3), the durable record
+//! without a terminal report, /) is unit-testable. Every transition is
+//! persisted to `${KATSU_SHARE}/turn-state.json`, the durable record
 //! `sandbox:status` reads out-of-band, closing the unattended gap.
 
 use std::collections::BTreeMap;
@@ -60,7 +59,7 @@ type HostWriter = Arc<Mutex<Option<Box<dyn AsyncWrite + Unpin + Send>>>>;
 
 /// The system-prompt slot Claude Code folds in (channels `instructions`). Kept
 /// terse: the full operating contract is delivered separately via
-/// `--append-system-prompt-file` (§5.11). This only explains the tag shape.
+/// `--append-system-prompt-file`. This only explains the tag shape.
 const INSTRUCTIONS: &str = "\
 Operator directives arrive as <channel source=\"katsuobushi-sandbox-guest\" \
 turn_id=\"N\">…</channel> turns. Treat each as the next instruction. They are \
@@ -68,9 +67,9 @@ delivered out of band by the host operator; act on them as you would a typed \
 prompt. Report progress with the `report` command (see your environment \
 contract); this channel is one-way and expects no tool reply.";
 
-// ── Turn-state machine (§6) ────────────────────────────────────────────────
+// ── Turn-state machine ────────────────────────────────────────────────
 
-/// The phase persisted to `turn-state.json` (§6.3, §17). Mirrors the §6
+/// The phase persisted to `turn-state.json`. Mirrors the
 /// transitions: `in-flight` on inject, `ended-ok` on a terminal report,
 /// `ended-unreported` when the grace window closes with no terminal report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,7 +81,7 @@ enum Phase {
     EndedUnreported,
 }
 
-/// The on-disk turn-state record (§17). Guest-authored, authoritative for
+/// The on-disk turn-state record. Guest-authored, authoritative for
 /// turn/agent state; read out-of-band by `sandbox:status` with no connection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -131,7 +130,7 @@ struct Session {
 }
 
 /// An ordered event the state machine consumes. The grace window is modeled as
-/// an explicit [`GraceExpired`] event so the whole machine — including the §6.2
+/// an explicit [`GraceExpired`] event so the whole machine — including the
 /// `ended-unreported` resolution — is a pure function testable without timers.
 ///
 /// [`GraceExpired`]: Event::GraceExpired
@@ -143,12 +142,12 @@ enum Event {
     Report(Report),
     /// A `report hook <event>` lifecycle line.
     Hook(HookEvent),
-    /// The grace-window timer fired for `turn_id` (§6.1).
+    /// The grace-window timer fired for `turn_id`.
     GraceExpired { turn_id: u64 },
 }
 
 /// Whether the `turn-state.json` write is forced (a lifecycle transition) or
-/// throttled (a bare `lastActivityAt` bump, capped at ≤1/s per §6.3).
+/// throttled (a bare `lastActivityAt` bump, capped at ≤1/s per).
 #[derive(Debug, Clone, Copy)]
 enum PersistMode {
     Force,
@@ -163,7 +162,7 @@ struct Outcome {
     inject: bool,
     /// `GuestMessage`s to forward to the host (no-ops when none is attached).
     messages: Vec<GuestMessage>,
-    /// Spawn the grace-window delayed check for this turn id (§6.1).
+    /// Spawn the grace-window delayed check for this turn id.
     schedule_grace: Option<u64>,
     /// Persist the snapshot below, if set.
     persist: Option<PersistMode>,
@@ -172,21 +171,21 @@ struct Outcome {
 }
 
 impl Session {
-    /// The pure transition core (§6). Given the current state, an event, and a
+    /// The pure transition core. Given the current state, an event, and a
     /// timestamp (`now`, injected so the core stays clock-free), mutate the
     /// state and return the [`Outcome`] for the async layer to execute.
     fn step(&mut self, event: Event, now: &str) -> Outcome {
         let mut out = Outcome::default();
         match event {
             Event::Prompt { turn_id } => {
-                // Dedupe a resend (§6/§7.2): the same in-flight, not-yet-ended
+                // Dedupe a resend: the same in-flight, not-yet-ended
                 // id is dropped — no re-inject, no transition.
                 if let Some(t) = self.turn.as_ref() {
                     if t.id == turn_id && !t.ended {
                         return out;
                     }
                 }
-                // A genuinely new (or superseding, §19) turn.
+                // A genuinely new (or superseding) turn.
                 self.turn = Some(Turn {
                     id: turn_id,
                     accepted: false,
@@ -225,7 +224,7 @@ impl Session {
                         }
                         force = true;
                         // A late terminal report arriving during the grace window
-                        // resolves the turn cleanly (§6.1), so the delayed check
+                        // resolves the turn cleanly, so the delayed check
                         // becomes a no-op.
                         if was_ended {
                             out.messages.push(GuestMessage::TurnCompleted {
@@ -235,7 +234,7 @@ impl Session {
                             clear_turn = true;
                         }
                     } else if !t.accepted {
-                        // First non-terminal activity (§6): mark accepted + emit
+                        // First non-terminal activity: mark accepted + emit
                         // the delivery ack once.
                         t.accepted = true;
                         self.state.accepted_at = Some(now.to_string());
@@ -257,7 +256,7 @@ impl Session {
             }
             Event::Hook(HookEvent::SessionReady) => {
                 // Session-lifetime latch; emitted now and replayed on each new
-                // control connect (§7.1). `send_to_host` no-ops with no host.
+                // control connect. `send_to_host` no-ops with no host.
                 self.ready_latched = true;
                 self.state.last_activity_at = now.to_string();
                 out.messages.push(GuestMessage::SessionReady);
@@ -300,7 +299,7 @@ impl Session {
                         clear_turn = true;
                     } else {
                         // Stop with no terminal report yet → arm the grace window
-                        // (§6.1); phase stays in-flight until it resolves.
+                        //; phase stays in-flight until it resolves.
                         t.ended = true;
                         self.state.ended_at = Some(now.to_string());
                         out.schedule_grace = Some(id);
@@ -312,7 +311,7 @@ impl Session {
                 }
             }
             Event::GraceExpired { turn_id } => {
-                // Re-check under the lock (§6.1): only resolve if the *same* turn
+                // Re-check under the lock: only resolve if the *same* turn
                 // is still ended and still unreported — otherwise a late terminal
                 // report already cleared it, or a new turn superseded it.
                 let resolve = self
@@ -371,7 +370,7 @@ async fn send_and_persist(ctl: &Arc<Control>, outcome: &Outcome) {
     }
 }
 
-/// Apply an [`Outcome`], spawning the grace-window delayed check if asked (§6.1).
+/// Apply an [`Outcome`], spawning the grace-window delayed check if asked.
 /// `GraceExpired` never schedules another grace, so the spawned task uses the
 /// non-recursive [`send_and_persist`] directly.
 async fn execute_outcome(ctl: &Arc<Control>, outcome: Outcome) {
@@ -389,7 +388,7 @@ async fn execute_outcome(ctl: &Arc<Control>, outcome: Outcome) {
 
 /// Atomically write `turn-state.json` to the share (temp + rename; 9p2000.L
 /// supports rename). `Throttled` writes are dropped if the last write was <1s
-/// ago (§6.3); the lock is held across the write so concurrent writers serialize.
+/// ago; the lock is held across the write so concurrent writers serialize.
 async fn persist(ctl: &Arc<Control>, snapshot: &TurnState, mode: PersistMode) {
     let mut guard = ctl.last_persist.lock().await;
     if let PersistMode::Throttled = mode {
@@ -418,7 +417,7 @@ fn write_turn_state(share: &Path, snapshot: &TurnState) -> anyhow::Result<()> {
 }
 
 /// Current wall-clock time as a seconds-precision RFC3339 UTC timestamp. The
-/// guest stamps `turn-state.json` with its own clock (§9); no `chrono` dep, so
+/// guest stamps `turn-state.json` with its own clock; no `chrono` dep, so
 /// the civil-date conversion is done locally (and unit-tested).
 fn now_rfc3339() -> String {
     let secs = SystemTime::now()
@@ -451,7 +450,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-/// Read a `u64` env knob, falling back to the #021 protocol const when unset or
+/// Read a `u64` env knob, falling back to the protocol const when unset or
 /// unparseable.
 fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key)
@@ -464,7 +463,7 @@ fn env_u64(key: &str, default: u64) -> u64 {
 
 /// Minimal one-way-channel MCP handler. No tools, no state — turns are injected
 /// out of band through the captured [`Peer`], and the agent replies via the
-/// `report` shell command, not an MCP tool (§5.6).
+/// `report` shell command, not an MCP tool.
 #[derive(Clone)]
 struct ControlServer;
 
@@ -474,7 +473,7 @@ impl ServerHandler for ControlServer {
     // field_reassign_with_default flags; the lint has no better option here.
     #[allow(clippy::field_reassign_with_default)]
     fn get_info(&self) -> ServerInfo {
-        // Declare *only* `claude/channel` (§5.5): the smallest possible slice of
+        // Declare *only* `claude/channel`: the smallest possible slice of
         // the research-preview API. `ExperimentalCapabilities` is a
         // `BTreeMap<String, JsonObject>`; presence of the key registers the
         // listener, the value is always `{}`.
@@ -531,9 +530,9 @@ async fn send_to_host(host: &HostWriter, msg: &GuestMessage) -> anyhow::Result<(
     Ok(())
 }
 
-/// The heartbeat task (§8): emit `GuestMessage::Heartbeat{seq}` every `period`
+/// The heartbeat task: emit `GuestMessage::Heartbeat{seq}` every `period`
 /// with a monotonic `seq`. A no-op when no host is attached, so `seq` may gap —
-/// the host judges by cadence, not continuity. **Silent per tick** (§8.1): no
+/// the host judges by cadence, not continuity. **Silent per tick**: no
 /// `println!`/`eprintln!`, so a backgrounded `drive` is never woken by a tick.
 async fn run_heartbeat(host: HostWriter, period: Duration) {
     let mut ticker = tokio::time::interval(period);
@@ -546,8 +545,8 @@ async fn run_heartbeat(host: HostWriter, period: Duration) {
 }
 
 /// Drive one accepted control connection: announce `ready`, replay a latched
-/// `SessionReady` (§7.1), install the write half for the report relay, then read
-/// inbound `Prompt`s — applying the dedupe/new-turn machine (§6) before any
+/// `SessionReady`, install the write half for the report relay, then read
+/// inbound `Prompt`s — applying the dedupe/new-turn machine before any
 /// inject — until the host hangs up. Generic over the stream type so vsock and
 /// unix share this exactly.
 async fn serve_control<S>(stream: S, peer: Peer<RoleServer>, ctl: Arc<Control>)
@@ -563,7 +562,7 @@ where
         eprintln!("katsuobushi-control: failed to send ready: {e:#}");
     }
     // The latch is replayed on every new connect so a prompt to an already-armed
-    // agent clears the host's ready-gate instantly (§7.1).
+    // agent clears the host's ready-gate instantly.
     if ctl.session.lock().await.ready_latched {
         if let Err(e) = send_to_host(&ctl.host, &GuestMessage::SessionReady).await {
             eprintln!("katsuobushi-control: failed to replay session-ready: {e:#}");
@@ -582,7 +581,7 @@ where
                             eprintln!("katsuobushi-control: inject failed: {e:#}");
                         }
                     } else {
-                        // §6 dedupe: a resend for the same in-flight turn.
+                        // dedupe: a resend for the same in-flight turn.
                         eprintln!(
                             "katsuobushi-control: dropping resend for in-flight turn {}",
                             p.turn_id
@@ -622,7 +621,7 @@ async fn run_control(peer: Peer<RoleServer>, ctl: Arc<Control>) -> anyhow::Resul
         eprintln!("katsuobushi-control: control on vsock:*:{VSOCK_PORT}");
         loop {
             let (stream, peer_addr) = listener.accept().await.context("accept vsock")?;
-            // §5.9: only the host (CID 2) may inject prompts. An in-guest
+            //: only the host (CID 2) may inject prompts. An in-guest
             // loopback peer is CID 1, so the unprivileged agent cannot poke its
             // own session.
             if peer_addr.cid() != VMADDR_CID_HOST {
@@ -659,7 +658,7 @@ async fn run_report(ctl: Arc<Control>) -> anyhow::Result<()> {
 
 /// Parse each guest-local line as an untagged [`GuestLocalLine`] and drive the
 /// machine: a `Report` relays + marks accepted/terminal; a `Hook` latches
-/// readiness, acks the turn, or resolves the grace window (§6).
+/// readiness, acks the turn, or resolves the grace window.
 async fn relay_report(stream: UnixStream, ctl: Arc<Control>) -> anyhow::Result<()> {
     let mut lines = BufReader::new(stream).lines();
     while let Some(line) = lines.next_line().await? {
@@ -720,7 +719,7 @@ async fn main() -> anyhow::Result<()> {
         persist(&ctl, &snapshot, PersistMode::Force).await;
     }
 
-    // The heartbeat task: silent transport-liveness ticks (§8/§8.1).
+    // The heartbeat task: silent transport-liveness ticks.
     let heartbeat = tokio::spawn(run_heartbeat(
         ctl.host.clone(),
         Duration::from_secs(heartbeat_secs),
@@ -1047,7 +1046,7 @@ mod tests {
         execute_outcome(&ctl, out).await;
         assert_eq!(read_state(&dir).phase, Phase::InFlight);
 
-        // Stop with no terminal report and no host writer installed (§6.3 case).
+        // Stop with no terminal report and no host writer installed (case).
         let out = drive_event(&ctl, Event::Hook(HookEvent::TurnEnded)).await;
         execute_outcome(&ctl, out).await;
 

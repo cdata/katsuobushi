@@ -1,9 +1,9 @@
-//! katsuctl — host-side Katsuobushi sandbox controller (design/katsuctl.md §4).
+//! katsuctl — host-side Katsuobushi sandbox controller.
 //!
 //! Two-level CLI: `katsuctl <domain> <command>`. Only the `sandbox` domain
 //! exists today; the [`Domain`] enum leaves room for siblings, each backed by a
 //! module under `src/`. This scaffold wires up parsing and dispatch only —
-//! every subcommand stub returns an `unimplemented` error (design §12 phase 1).
+//! every subcommand stub returns an `unimplemented` error (phase 1).
 
 mod sandbox;
 
@@ -24,7 +24,7 @@ struct Cli {
 }
 
 /// Color policy for human-facing output. Global so every future domain inherits
-/// it; honored once the subcommands grow real output (design §13).
+/// it; honored once the subcommands grow real output.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum ColorWhen {
     Auto,
@@ -99,7 +99,7 @@ enum SandboxCommand {
 /// Global flags threaded to every subcommand stub.
 #[derive(Copy, Clone)]
 struct Global {
-    #[allow(dead_code)] // consumed once subcommands grow real output (design §13)
+    #[allow(dead_code)] // consumed once subcommands grow real output
     json: bool,
     #[allow(dead_code)]
     color: ColorWhen,
@@ -133,7 +133,7 @@ mod tests {
 
     /// An all-digit `instance` is accepted verbatim as a String (it later
     /// resolves as a 1-based index; resolution is not clap's job). See
-    /// design/katsuctl.md §4 on index-vs-name.
+    /// on index-vs-name.
     #[test]
     fn all_digit_instance_is_a_string() {
         let cli = parse(&[
