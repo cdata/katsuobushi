@@ -72,14 +72,23 @@ impl Liveness {
         }
     }
 
-    /// Write the record through the [`Host`] seam (compact JSON). Rewritten at
-    /// most once per second by the watchdog touch; the record is tiny and
-    /// `status` treats it as advisory (design §15 stale-read safety), so a whole-
-    /// file write is sufficient — a torn read self-heals on the next tick.
+    /// Write the record through the [`Host`] seam atomically: serialize to a temp
+    /// sibling, then rename over the target (rename is atomic within a
+    /// filesystem). #030's `status` reads this file out-of-band, so a reader must
+    /// never observe a torn write, and a crash mid-write must not clobber
+    /// `nextTurnId` (design §9 — same temp+rename the guest uses for
+    /// turn-state.json). Rewritten at most once per second by the watchdog touch.
     pub fn store(&self, host: &impl Host, path: &Path) -> Result<()> {
         let bytes = serde_json::to_vec(self).context("serializing liveness.json")?;
-        host.write(path, &bytes)
-            .with_context(|| format!("writing liveness.json to {}", path.display()))?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("liveness.json");
+        let tmp = path.with_file_name(format!(".{name}.tmp"));
+        host.write(&tmp, &bytes)
+            .with_context(|| format!("writing liveness.json temp {}", tmp.display()))?;
+        host.rename(&tmp, path)
+            .with_context(|| format!("renaming liveness.json into {}", path.display()))?;
         Ok(())
     }
 }
@@ -225,6 +234,32 @@ mod tests {
             Some("2026-06-28T12:34:56Z")
         );
         assert!(written.stream_active);
+    }
+
+    #[test]
+    fn it_writes_liveness_atomically_via_temp_then_rename() {
+        // §9: the record must land atomically — write a temp sibling, then rename
+        // it over the target — so #030's out-of-band reader never sees a torn file.
+        let host = FakeHost::new();
+        Liveness::default()
+            .store(&host, &path())
+            .expect("store should succeed");
+        let calls = host.calls();
+        match (&calls[0], &calls[1]) {
+            (Call::Write(tmp, _), Call::Rename(from, to)) => {
+                assert_eq!(
+                    tmp, from,
+                    "rename moves the same temp file that was written"
+                );
+                assert_eq!(to, &path(), "rename targets the final liveness.json");
+                assert_ne!(
+                    tmp,
+                    &path(),
+                    "the write goes to a temp sibling, not the target"
+                );
+            }
+            other => panic!("expected Write then Rename, got {other:?}"),
+        }
     }
 
     #[test]

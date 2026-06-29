@@ -54,6 +54,10 @@ pub trait Host {
     fn read(&self, p: &Path) -> io::Result<Vec<u8>>;
     /// Write a file whole (create or truncate).
     fn write(&self, p: &Path, bytes: &[u8]) -> io::Result<()>;
+    /// Rename `from` to `to` (atomically within a filesystem). Paired with
+    /// [`write`](Host::write) to a temp sibling, this gives an atomic file
+    /// update — a reader never observes a torn write (design §9).
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
     /// Whether a path exists.
     fn exists(&self, p: &Path) -> bool;
     /// List the immediate subdirectory names of `p` (each a directory entry's
@@ -125,6 +129,10 @@ impl Host for HostImpl {
 
     fn write(&self, p: &Path, bytes: &[u8]) -> io::Result<()> {
         std::fs::write(p, bytes)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
     }
 
     fn exists(&self, p: &Path) -> bool {
@@ -268,6 +276,8 @@ pub enum Call {
     Read(PathBuf),
     /// `write(path, bytes)`.
     Write(PathBuf, Vec<u8>),
+    /// `rename(from, to)`.
+    Rename(PathBuf, PathBuf),
     /// `exists(path)`.
     Exists(PathBuf),
     /// `list_dir(path)`.
@@ -298,6 +308,7 @@ pub struct FakeHost {
     run_results: RefCell<VecDeque<io::Result<Output>>>,
     read_results: RefCell<VecDeque<io::Result<Vec<u8>>>>,
     write_results: RefCell<VecDeque<io::Result<()>>>,
+    rename_results: RefCell<VecDeque<io::Result<()>>>,
     list_dir_results: RefCell<VecDeque<io::Result<Vec<String>>>>,
     existing: HashSet<PathBuf>,
     free_ports: HashSet<u16>,
@@ -325,6 +336,12 @@ impl FakeHost {
     /// Script the next `write` result.
     pub fn push_write(&mut self, result: io::Result<()>) -> &mut Self {
         self.write_results.get_mut().push_back(result);
+        self
+    }
+
+    /// Script the next `rename` result.
+    pub fn push_rename(&mut self, result: io::Result<()>) -> &mut Self {
+        self.rename_results.get_mut().push_back(result);
         self
     }
 
@@ -392,6 +409,16 @@ impl Host for FakeHost {
             .borrow_mut()
             .push(Call::Write(p.to_path_buf(), bytes.to_vec()));
         self.write_results
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or(Ok(()))
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.calls
+            .borrow_mut()
+            .push(Call::Rename(from.to_path_buf(), to.to_path_buf()));
+        self.rename_results
             .borrow_mut()
             .pop_front()
             .unwrap_or(Ok(()))
