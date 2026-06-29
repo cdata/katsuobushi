@@ -157,11 +157,13 @@
             ".claude"
             "design"
           ];
+          graphics.enable = true;
           secrets.CLAUDE_CODE_OAUTH_TOKEN.fromEnv = "HARNESS_OAUTH_TOKEN";
           # The agent harness is just a package. We use the latest Claude Code
           # from numtide/llm-agents.nix (newer than nixpkgs, and pre-built so no
           # allowUnfree needed).
           packages = [
+            pkgs.mesa-demos
             llm-agents.packages.${system}.claude-code
           ];
         };
@@ -213,8 +215,11 @@
               # and by the sandbox controller spike harness.
               pkgs.socat
             ]
-            # `katsuctl` on the PATH for power users (additive). Linux-only, like
-            # the sandbox controller crate it lives beside (tokio-vsock gate).
+            # A bare `katsuctl` on the PATH for power users (additive). The
+            # `sandbox:*` commands invoke it by absolute store path, so this is
+            # no longer required for them to work. Linux-only, like the sandbox
+            # controller crate it lives beside (tokio-vsock gate). Same store path
+            # as `sandbox.katsuctl`, so it is built once.
             ++ pkgs.lib.optionals isLinux [ controlCrates.katsuctl ];
           shellHook = rust.rustEnvironmentHook + makeDevShellHook menu;
         };

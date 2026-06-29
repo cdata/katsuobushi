@@ -10,16 +10,11 @@ the changes anyone tracking untagged `main` should know about.
 
 ## 0.2.3
 
-### Graphics: X11 apps now work out of the box — no action required
-
-A graphics guest now exports `DISPLAY=:0` and ships XWayland, so X11 apps (and
-tools that probe `DISPLAY`) work without manual setup — previously only
-`WAYLAND_DISPLAY` was set. This is additive and gated on the graphics opt-in, so
-**no action is required**; a graphics-off sandbox is unaffected.
+No action required.
 
 ## 0.2.2
 
-### Opt-in graphics — off by default, but rebuild your dev shell
+**Action required: rebuild your dev shell.**
 
 The sandbox gains an opt-in `graphics` capability (a headless compositor plus a
 paravirtual GPU). It is **off by default**, so **existing consumers need no
@@ -47,7 +42,7 @@ If you _do_ enable graphics, two things are worth knowing — both covered in
 
 ## 0.2.1
 
-### Sandbox liveness — rebuild your dev shell
+**Action required: rebuild your dev shell.**
 
 Agent-mode sandboxes gain turn/transport liveness: heartbeats, a durable
 `turn-state.json` on the share, a host watchdog with ack-and-resend and a
@@ -63,7 +58,7 @@ with sensible defaults and need no consumer action.
 
 ## 0.2.0
 
-### Host sandbox control is now `katsuctl` — `sandbox:*` behavior is unchanged
+**Host sandbox control is now `katsuctl` — `sandbox:*` behavior is unchanged.**
 
 The host side of the sandbox (`sandbox:start` / `sandbox:prompt` /
 `sandbox:status` / `sandbox:fetch` / `sandbox:stop` / `sandbox:attach`) is
@@ -72,7 +67,7 @@ command names. **No action for devshell users** — the command names and behavi
 are unchanged, verified end-to-end on a real boot. The win is internal: the host
 logic now lives in compiled, tested Rust instead of an untested shell pile.
 
-### Breaking: the three in-tree Rust crates are renamed
+**The three in-tree Rust crates are renamed.**
 
 Only relevant if your flake references these crates or their build outputs
 directly:
@@ -87,7 +82,7 @@ directly:
 If you build a specific crate via `nix build .#<crate>`, update the attribute to
 the new name (except `.#katsuctl`, which is unchanged).
 
-### `sandbox:status` no longer lists the SSH and CID columns
+**`sandbox:status` no longer lists the SSH and CID columns.**
 
 The list view (`sandbox:status` with no argument) drops the `SSH` (ssh port) and
 `CID` (vsock CID) columns — they are plumbing you do not type by hand. Both
@@ -98,7 +93,7 @@ view or `--json` instead.
 
 ## 0.1.10
 
-### `lib.sandbox`: writable scratch is now disk-backed — `storeOverlaySize` is removed
+**`lib.sandbox`: writable scratch is now disk-backed — `storeOverlaySize` is removed.**
 
 The guest's writable scratch — the writable `/nix/store` overlay, the workspace
 clone and its build artifacts, the `cargo`/`rustup`/XDG caches, and the guest
@@ -127,7 +122,7 @@ Two behavioral notes, no action:
 - Prompting a **paused** instance now auto-starts it (see below), so its
   disk-backed caches are warm when the work resumes.
 
-### `sandbox:prompt` auto-starts a paused instance — no action required
+**`sandbox:prompt` auto-starts a paused instance — no action required.**
 
 Prompting a named instance that was stopped (but kept) now restarts it — booting
 and arming the channel (~30–60s) before delivering the turn — instead of hanging
@@ -141,7 +136,7 @@ No action required.
 
 ## 0.1.8
 
-### `lib.sandbox`: the guest now imports the host Nix DB by default — no action required in normal use
+**`lib.sandbox`: the guest now imports the host Nix DB by default — no action required in normal use**
 
 `importHostStoreDb` defaults to `true`, so a launched sandbox now snapshots the
 host's Nix database and the guest reuses every path the host has already built
@@ -173,7 +168,7 @@ No action required.
 
 ## 0.1.4
 
-### `lib.sandbox`: named instances are suffixed with random entropy — action only if you script instance names
+**`lib.sandbox`: named instances are suffixed with random entropy — action only if you script instance names**
 
 A provided `--name foo` now boots an instance named `foo-<8 hex>` (e.g.
 `foo-a3f9c2d1`) rather than `foo`. This makes every launch a fresh,
@@ -204,7 +199,7 @@ A small release: no library argument or output signatures changed, so a normal
 upgrade needs no edits. The one behavioral change worth knowing is below; the
 rest is additive or a bug fix (see [`CHANGELOG.md`](CHANGELOG.md)).
 
-### `lib.sandbox`: `sandbox:status` now exits non-zero on a failed preflight — action only if you script its exit code
+**`lib.sandbox`: `sandbox:status` now exits non-zero on a failed preflight — action only if you script its exit code**
 
 A bare `sandbox:status` now runs an environment preflight before listing
 instances (it prints an `environment:` block verifying each declared secret at
@@ -218,7 +213,7 @@ exit as failure, it will now fail when a prerequisite is missing rather than
 silently succeeding. Pass an explicit instance name (`sandbox:status <inst>`) to
 get just that instance's details without the preflight gate.
 
-### `lib.sandbox`: guest push to the 9p mirror now works — no action needed
+**`lib.sandbox`: guest push to the 9p mirror now works — no action needed**
 
 The per-instance bare mirror is now shared into the guest with
 `security_model=mapped-xattr` (was `none`), so the unprivileged in-guest agent
@@ -231,7 +226,7 @@ consumer change is required.
 The first tagged release. The notes below matter to anyone who was tracking
 untagged `main`; on a fresh install there is nothing to migrate.
 
-### Transitive dependency inheritance (`lib.rust`) — action required
+**Action required: transitive dependency inheritance (`lib.rust`)**
 
 Katsuobushi now owns its infrastructure dependencies (`crane`, `nix-filter`,
 `rust-overlay`, and `microvm` for the sandbox lib) and passes them through to
@@ -286,7 +281,7 @@ transitive `flake.lock` (they are not _built_ unless used, and `nixpkgs.follows`
 prevents nixpkgs duplication). This is the accepted price of a dramatically
 smaller consumer flake.
 
-### New library: `lib.sandbox`
+**New library: `lib.sandbox`**
 
 `katsuobushi.lib.sandbox` assembles a `microvm.nix` guest that boots into a
 working dev environment in which an agent harness (Claude Code by default) can
@@ -298,7 +293,7 @@ guest image), and `nixosConfiguration`. Scaffold a worked example with
 `nix flake init -t github:cdata/katsuobushi#sandbox`; see
 [`lib/sandbox/README.md`](lib/sandbox/README.md).
 
-### `lib.markdown`: now Prettier, scoped by include/exclude — action required
+**Action required: `lib.markdown` uses Prettier, scoped by include/exclude**
 
 `lib.markdown` switched its engine from `rumdl` to [Prettier], which handles GFM
 tables natively (rumdl misidentified them). The argument and output surface
@@ -359,7 +354,7 @@ workspace root, so every included file must be **tracked** — a flake check
 cannot reach `.gitignore`'d paths, which are not part of the flake source;
 format those with the menu command instead.
 
-### `lib.rust`: renamed input arguments — action required
+**Action required: `lib.rust`: renamed input arguments**
 
 The two input-list arguments were renamed to match nixpkgs vocabulary (the old
 `buildInputs` confusingly fed `nativeBuildInputs`, and `libraries` fed
@@ -391,7 +386,7 @@ rustHelpers = katsuobushi.lib.rust {
 Both now default to `[ ]` (previously `buildInputs` was required), so tool-only
 projects can omit them entirely.
 
-### `lib.rust`: wasm-bindgen version is derived — action required for non-default wasm builds
+**`lib.rust`: wasm-bindgen version is derived — action required for non-default wasm builds**
 
 The `wasm-bindgen-cli` version is no longer hard-pinned in the lib; it is read
 from your `Cargo.lock`. The lib ships hashes for **0.2.108** as the default.
@@ -413,31 +408,6 @@ from your `Cargo.lock`. The lib ships hashes for **0.2.108** as the default.
 - If you are on 0.2.108, or you do not build wasm: no change needed. The
   `Cargo.lock` read is lazy, so native-only projects and the bare template never
   trigger it.
-
-### `lib.rust`: informational changes — no action needed
-
-- **`buildCrate` gained a `target` argument** (`{ target ? null, ... }`).
-  Omitting it builds for the host, exactly as before. New:
-  `buildCrate { target = "wasm32-wasip3"; ... }` builds for any triple. Note
-  that `target` is now a reserved attribute name on `buildCrate` and
-  `buildTestArchive` — if you were passing a `target` attribute straight through
-  to crane, it is now intercepted.
-- **`buildWasmCrate` / `buildTrunkCrate` are unchanged** — same names, same
-  browser (`wasm32-unknown-unknown`) behavior, including the wasm-bindgen /
-  wasm-opt / esbuild tooling.
-- **Crate version derivation:** the hardcoded `version = "0.1.0"` is gone; crane
-  now derives the version from `Cargo.toml`. Build-artifact version metadata and
-  store-path names change, but flake output attribute names do not.
-- **Deps-derivation `pname`s changed:** the host deps stay
-  `<project>-workspace-deps`; the wasm deps went from
-  `<project>-workspace-wasm-deps` to
-  `<project>-workspace-deps-wasm32-unknown-unknown`. Internal only — your
-  `checks` / `packages` attribute names are unaffected.
-- **`sourceInclude` argument** added (defaults to the previous hard-coded list:
-  `.cargo`, `Cargo.lock`, `Cargo.toml`, `rust-toolchain.toml`, `rust`). Override
-  it when your crates do not live under `rust/`.
-- **Derivation name prefix** now derives from `projectId` (e.g.
-  `my-org/my-project` → `my-project`) instead of a hardcoded `fox-star`.
 
 [Prettier]: https://prettier.io
 [options]: https://prettier.io/docs/options

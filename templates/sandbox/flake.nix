@@ -180,7 +180,11 @@
         checks.sandbox = sandbox.checks.sandbox;
 
         devShells.default = pkgs.mkShell {
-          nativeBuildInputs = menu.commands;
+          # The `sandbox:*` commands invoke `katsuctl` by its absolute store path,
+          # so they work out of the box. `sandbox.katsuctl` here is optional — it
+          # only puts a bare `katsuctl` on the shell PATH for power users who want
+          # to drive the controller directly.
+          nativeBuildInputs = menu.commands ++ [ sandbox.katsuctl ];
           shellHook = makeDevShellHook menu;
         };
       }

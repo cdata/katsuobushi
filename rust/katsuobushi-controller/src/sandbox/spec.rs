@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 /// The spec schema version this build of `katsuctl` understands. Bumped in
 /// lockstep with the Nix renderer; [`load_spec`] fails loud on any mismatch
 /// — no multi-version support, no migration.
-pub const SUPPORTED_SPEC_VERSION: u32 = 3;
+pub const SUPPORTED_SPEC_VERSION: u32 = 4;
 
 /// The complete Nix-rendered instance spec — the one source of truth for
 /// everything Nix-derived.
@@ -104,6 +104,11 @@ pub struct Tools {
     pub sqlite3: Option<PathBuf>,
     /// Interpreter for the emitted `start`/`attach` scripts.
     pub bash: PathBuf,
+    /// The controller binary itself. The agent-mode `start` recipe tail-calls
+    /// `prompt` (see `start::agent_tail`), and that emitted line runs in a child
+    /// shell that may not have `katsuctl` on its PATH — so the recipe references
+    /// this absolute path instead of a bare name.
+    pub katsuctl: PathBuf,
 }
 
 /// One declared secret to stage into the instance.
@@ -280,7 +285,7 @@ mod tests {
 
     /// The example, with the `…` store-hash ellipses filled in.
     const EXAMPLE_SPEC_JSON: &str = r#"{
-      "specVersion": 3,
+      "specVersion": 4,
       "projectId": "cdata/katsuobushi",
       "agentUser": "agent",
       "importHostStoreDb": true,
@@ -292,7 +297,8 @@ mod tests {
                  "tmux": "/nix/store/h3-tmux/bin/tmux",
                  "rsync": "/nix/store/h4-rsync/bin/rsync",
                  "sqlite3": "/nix/store/h5-sqlite/bin/sqlite3",
-                 "bash": "/nix/store/h6-bash/bin/bash" },
+                 "bash": "/nix/store/h6-bash/bin/bash",
+                 "katsuctl": "/nix/store/h8-katsuctl/bin/katsuctl" },
       "runner": "/nix/store/h7-microvm-run/bin/microvm-run",
       "diskImages": ["rw-store.img", "nix-db.img", "scratch.img"],
       "context": [],
@@ -314,7 +320,7 @@ mod tests {
     fn it_parses_the_design_example_spec() {
         let spec = from_json_bytes(EXAMPLE_SPEC_JSON.as_bytes()).expect("example should parse");
 
-        assert_eq!(spec.spec_version, 3);
+        assert_eq!(spec.spec_version, 4);
         assert_eq!(spec.project_id, "cdata/katsuobushi");
         assert_eq!(spec.agent_user, "agent");
         assert!(spec.import_host_store_db);
@@ -323,6 +329,10 @@ mod tests {
             PathBuf::from("$XDG_STATE_HOME/katsuobushi/cdata/katsuobushi")
         );
         assert_eq!(spec.tools.git, PathBuf::from("/nix/store/h1-git/bin/git"));
+        assert_eq!(
+            spec.tools.katsuctl,
+            PathBuf::from("/nix/store/h8-katsuctl/bin/katsuctl")
+        );
         assert_eq!(
             spec.tools.sqlite3,
             Some(PathBuf::from("/nix/store/h5-sqlite/bin/sqlite3"))
@@ -391,7 +401,7 @@ mod tests {
 
     #[test]
     fn it_rejects_a_bad_spec_version() {
-        let json = EXAMPLE_SPEC_JSON.replace(r#""specVersion": 3"#, r#""specVersion": 999"#);
+        let json = EXAMPLE_SPEC_JSON.replace(r#""specVersion": 4"#, r#""specVersion": 999"#);
         let err = from_json_bytes(json.as_bytes()).expect_err("version skew must fail loud");
         let msg = format!("{err:#}");
         assert!(msg.contains("999"), "should name the bad version: {msg}");
@@ -403,9 +413,10 @@ mod tests {
 
     #[test]
     fn it_rejects_a_now_stale_v2_spec() {
-        // The v2→v3 bump is the skew gate: a spec from a pre-graphics Nix render
-        // must fail loud rather than parse with a missing `graphics` shape.
-        let json = EXAMPLE_SPEC_JSON.replace(r#""specVersion": 3"#, r#""specVersion": 2"#);
+        // The version check is the skew gate: a spec from any older Nix render
+        // (e.g. pre-graphics v2, or pre-`tools.katsuctl` v3) must fail loud
+        // rather than parse against a newer shape.
+        let json = EXAMPLE_SPEC_JSON.replace(r#""specVersion": 4"#, r#""specVersion": 2"#);
         let err = from_json_bytes(json.as_bytes()).expect_err("v2 must now be rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains('2'), "should name the stale version: {msg}");
@@ -418,8 +429,8 @@ mod tests {
     #[test]
     fn it_rejects_an_unknown_field() {
         let json = EXAMPLE_SPEC_JSON.replace(
-            r#""specVersion": 3,"#,
-            r#""specVersion": 3, "surpriseField": "boom","#,
+            r#""specVersion": 4,"#,
+            r#""specVersion": 4, "surpriseField": "boom","#,
         );
         let err = from_json_bytes(json.as_bytes()).expect_err("deny_unknown_fields must fire");
         let msg = format!("{err:#}");

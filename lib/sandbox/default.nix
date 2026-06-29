@@ -1581,11 +1581,13 @@ let
   katsuctlSpec = pkgs.writeText "katsuctl-sandbox-spec.json" (
     builtins.toJSON (
       {
-        # Bumped to 3 alongside the Rust SUPPORTED_SPEC_VERSION (graphics schema).
-        # The `graphics` block is appended below only when graphics.enable; a
-        # graphics-off spec omits the key entirely, and katsuctl reads an absent
-        # `graphics` as disabled (its `#[serde(default)]`).
-        specVersion = 3;
+        # Bumped to 4 alongside the Rust SUPPORTED_SPEC_VERSION (added
+        # `tools.katsuctl`; 3 added the graphics schema). The `graphics` block is
+        # appended below only when graphics.enable; a graphics-off spec omits the
+        # key entirely, and katsuctl reads an absent `graphics` as disabled (its
+        # `#[serde(default)]`). When this bumps, land the Rust bump in the same
+        # change — a stale devshell otherwise fails every launch on the mismatch.
+        specVersion = 4;
         inherit projectId agentUser importHostStoreDb;
         # Liveness tunables; inert until a
         # consumer reads them, but plumbed from the one let-binding source so the
@@ -1611,6 +1613,10 @@ let
           rsync = "${pkgs.rsync}/bin/rsync";
           sqlite3 = if importHostStoreDb then "${pkgs.sqlite.bin}/bin/sqlite3" else null;
           bash = "${pkgs.bash}/bin/bash";
+          # The agent-mode `start` recipe tail-calls `prompt` in a child shell
+          # that need not have `katsuctl` on PATH, so it references this absolute
+          # path. Same binary the menu commands / apps.sandbox invoke.
+          katsuctl = "${katsuctlPkg}/bin/katsuctl";
         };
         runner = "${runner}/bin/microvm-run";
         diskImages = [
@@ -1650,6 +1656,12 @@ let
     )
   );
 
+  # Every command invokes `katsuctl` by its absolute store path
+  # (`${katsuctlPkg}/bin/katsuctl`) rather than a bare name, so the commands work
+  # for any consumer who wires `menuCommands` into a devshell without separately
+  # putting `katsuctl` on PATH. The emitted agent-start recipe's `prompt`
+  # tail-call self-references the same binary via `spec.tools.katsuctl`, so no
+  # command needs to mutate PATH.
   menuCommands = {
     "sandbox:start" = {
       description = "Launch an agent sandbox";
@@ -1660,7 +1672,7 @@ let
       # failure exits nonzero with no path, so the `exec` is reached only on a
       # clean emit.
       command = ''
-        script="$(katsuctl sandbox --config ${katsuctlSpec} start "$@")" || exit
+        script="$(${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} start "$@")" || exit
         exec ${pkgs.bash}/bin/bash "$script"
       '';
     };
@@ -1671,7 +1683,7 @@ let
       # and the paused-named auto-restart. This wrapper just hands off, passing
       # the Nix-rendered spec via --config.
       command = ''
-        exec katsuctl sandbox --config ${katsuctlSpec} prompt "$@"
+        exec ${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} prompt "$@"
       '';
     };
     "sandbox:status" = {
@@ -1681,7 +1693,7 @@ let
       # `status` still doubles as the launch prerequisite gate (nonzero exit iff a
       # secret is missing or /dev/vhost-vsock is absent).
       command = ''
-        exec katsuctl sandbox --config ${katsuctlSpec} status "$@"
+        exec ${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} status "$@"
       '';
     };
     "sandbox:fetch" = {
@@ -1689,7 +1701,7 @@ let
       # Business logic now lives in katsuctl; this
       # wrapper just hands off, passing the Nix-rendered spec via --config.
       command = ''
-        exec katsuctl sandbox --config ${katsuctlSpec} fetch "$@"
+        exec ${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} fetch "$@"
       '';
     };
     "sandbox:stop" = {
@@ -1697,7 +1709,7 @@ let
       # Business logic now lives in katsuctl; this
       # wrapper just hands off, passing the Nix-rendered spec via --config.
       command = ''
-        exec katsuctl sandbox --config ${katsuctlSpec} stop "$@"
+        exec ${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} stop "$@"
       '';
     };
     "sandbox:attach" = {
@@ -1708,7 +1720,7 @@ let
       # emit+exec form — a planning failure exits nonzero with no path, so the
       # `exec` is reached only on a clean emit.
       command = ''
-        script="$(katsuctl sandbox --config ${katsuctlSpec} attach "$@")" || exit
+        script="$(${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} attach "$@")" || exit
         exec ${pkgs.bash}/bin/bash "$script"
       '';
     };
@@ -1721,7 +1733,7 @@ let
       # hand-off form (like fetch/prompt/status/stop), passing the Nix-rendered
       # spec via --config. Requires graphics.enable; katsuctl fails clearly if off.
       command = ''
-        exec katsuctl sandbox --config ${katsuctlSpec} screenshot "$@"
+        exec ${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} screenshot "$@"
       '';
     };
   };
@@ -1732,19 +1744,26 @@ in
   # (step 3): katsuctl makes every probe-dependent
   # decision, writes instance.json, and prints the path of a flat setup+boot
   # recipe; the wrapper `exec`s bash on it (a planning failure exits nonzero with
-  # no path, so the `exec` runs only on a clean emit). katsuctl is put on PATH so
-  # the emitted agent-start tail-call `exec katsuctl … prompt` resolves as well.
+  # no path, so the `exec` runs only on a clean emit). katsuctl is invoked by its
+  # absolute store path, and the emitted agent-start tail-call self-references the
+  # same binary via `spec.tools.katsuctl` — so nothing here touches PATH.
   apps.sandbox = {
     type = "app";
     program = "${pkgs.writeShellScript "sandbox" ''
-      export PATH="${katsuctlPkg}/bin:$PATH"
-      script="$(katsuctl sandbox --config ${katsuctlSpec} start "$@")" || exit
+      script="$(${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} start "$@")" || exit
       exec ${pkgs.bash}/bin/bash "$script"
     ''}";
     meta.description = "Launch an ephemeral Katsuobushi agent sandbox VM";
   };
 
   inherit menuCommands;
+
+  # The host-side controller binary (`katsuctl`), built reproducibly via
+  # lib.rust/crane from Katsuobushi's pinned source. The `sandbox:*` commands
+  # already invoke it by absolute store path, so consumers need not add it for
+  # those to work; it is exposed so power-users can put a bare `katsuctl` on their
+  # devshell PATH (and so the dogfood flake reuses one build instead of two).
+  katsuctl = katsuctlPkg;
 
   # The Nix-rendered instance spec, exposed so the menu-command rewrites
   # (step 3) can pass it to `katsuctl --config`.

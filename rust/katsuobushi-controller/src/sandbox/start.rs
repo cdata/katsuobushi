@@ -725,7 +725,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
 
     // ---- mode-specific tail ----
     match plan.mode {
-        Mode::Agent => agent_tail(&mut r, &runner, &console_log, &runtime_root, config, plan),
+        Mode::Agent => agent_tail(&mut r, &runner, &console_log, &runtime_root, config, plan, spec),
         Mode::Interactive => interactive_tail(
             &mut r,
             &ssh,
@@ -762,6 +762,7 @@ fn agent_tail(
     runtime_root: &Path,
     config: &Path,
     plan: &Plan,
+    spec: &Spec,
 ) {
     let cid = plan.vsock_cid.expect("agent mode always allocates a CID");
     r.blank()
@@ -790,8 +791,13 @@ fn agent_tail(
                 dq(&qmp_sock)
             ));
             r.comment("Deliver the first turn by tail-calling the prompt subcommand (it bakes in the channel readiness wait).");
+            // Absolute path from the spec (not a bare `katsuctl`): this line runs
+            // in a child shell that need not have the controller on its PATH. A
+            // store path has no shell-special characters, so it is emitted
+            // unquoted — keeping the bare-name test fixture's snapshot stable.
             r.line(format!(
-                "exec katsuctl sandbox --config {} prompt \"{}\" {}",
+                "exec {} sandbox --config {} prompt \"{}\" {}",
+                spec.tools.katsuctl.display(),
                 dq(config),
                 plan.name,
                 sq(text)
@@ -955,6 +961,9 @@ mod tests {
                     None
                 },
                 bash: PathBuf::from("/nix/store/bash/bin/bash"),
+                // Bare name (not a store path) so the agent-tail snapshot stays
+                // byte-stable: the emitted recipe renders `exec katsuctl … prompt`.
+                katsuctl: PathBuf::from("katsuctl"),
             },
             runner: PathBuf::from("/nix/store/microvm/bin/microvm-run"),
             disk_images: vec![

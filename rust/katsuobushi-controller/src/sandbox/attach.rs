@@ -213,6 +213,7 @@ mod tests {
                 rsync: PathBuf::from("/bin/rsync"),
                 sqlite3: None,
                 bash: PathBuf::from("/bin/bash"),
+                katsuctl: PathBuf::from("/bin/katsuctl"),
             },
             runner: PathBuf::from("/bin/microvm-run"),
             disk_images: vec![],
