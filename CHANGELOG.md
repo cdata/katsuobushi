@@ -5,6 +5,41 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [Unreleased]
+
+Opt-in **graphics**: a sandbox can now boot a headless compositor and a
+paravirtual GPU so a browser or Wayland app actually renders. It is off by
+default, so existing consumers are unaffected; enabling it widens the host-facing
+attack surface (the GPU command stream is parsed in the host QEMU process), which
+the README documents plainly. The instance spec bumps to `specVersion 3`; see
+[`MIGRATING.md`](MIGRATING.md#unreleased).
+
+### Added
+
+- **`lib.sandbox`: opt-in `graphics` capability.** A new `graphics` attrset
+  (`enable`, default `false`; `gpu` role-preference list, default
+  `["integrated" "discrete" "software"]`; `output`, default `1920×1080@60`) boots
+  a headless sway compositor on a virtual output and, when a GPU rung resolves,
+  hands QEMU a `virtio-gpu-gl` device against a host render node — so a browser
+  (WebDriver/Playwright) or a Wayland app can render. The browser/app goes in the
+  existing `packages` list. Pinning `gpu = ["software"]` keeps the full original
+  boundary (llvmpipe, no GPU device) at a performance cost. When enabled,
+  `sandbox:status` adds a `graphics` preflight row that runs the real GPU
+  resolver against the host and flags a missing `render`-group membership, and a
+  launch-time notice records the widened attack surface. See
+  [`lib/sandbox/README.md`](lib/sandbox/README.md#graphics-opt-in).
+- **`sandbox:screenshot <instance|#> [path]`.** A new menu command that grabs a
+  PNG of the headless-sway output by running `grim` over the existing loopback
+  ssh — no daemon, no new port. Defaults to a timestamped PNG in the cwd; `-`
+  streams to stdout. Requires the graphics opt-in; a purely-offscreen workload
+  that never composites a surface screenshots as blank (expected).
+
+### Changed
+
+- **The instance spec is now `specVersion 3`** (carrying the `graphics` block); a
+  stale v2 spec is rejected loudly. Rebuild your dev shell (`nix develop`) so the
+  spec re-renders. No config changes are required.
+
 ## [0.2.1] — 2026-06-28
 
 Sandbox **liveness**: the host and guest now agree on when a turn started,

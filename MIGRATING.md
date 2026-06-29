@@ -8,6 +8,29 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## Unreleased
+
+### Opt-in graphics — off by default, but rebuild your dev shell
+
+The sandbox gains an opt-in `graphics` capability (a headless compositor plus a
+paravirtual GPU). It is **off by default**, so **existing consumers need no
+change** — a sandbox without a `graphics` block behaves exactly as before.
+
+The one thing everyone must do is rebuild: the instance spec bumps to
+`specVersion 3`, and a stale v2 spec is now rejected loudly. Run `nix develop`
+(or otherwise rebuild your dev shell) so the spec re-renders; no config changes
+are required.
+
+If you _do_ enable graphics, two things are worth knowing — both covered in
+[`lib/sandbox/README.md`](lib/sandbox/README.md#graphics-opt-in):
+
+- It widens the host-facing attack surface (a GPU rung parses the guest's GPU
+  command stream inside the host QEMU process). Pin `gpu = ["software"]` to keep
+  the full original boundary at a performance cost.
+- Set a higher resource floor yourself (`vcpu ≥ 4`, `mem ≥ 8192`) — the library
+  does not auto-bump them — and ensure your uid can open a host render node (the
+  `graphics` row in `sandbox:status` checks this and names the fix).
+
 ## 0.2.1
 
 ### Sandbox liveness — rebuild your dev shell

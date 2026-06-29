@@ -302,6 +302,7 @@ is the artifact.
 | `sandbox:status [instance\|#]`                      | List instances (numbered, running/stopped, ephemeral/named), or detail one (ssh command, agent CID, branch).  |
 | `sandbox:attach <instance\|#>`                      | SSH into a running instance and attach the agent's `tmux` session (`TERM=xterm-256color`).                    |
 | `sandbox:fetch <instance\|#>`                       | Fetch the instance's `sandbox/<instance>` branch into this repo.                                              |
+| `sandbox:screenshot <instance\|#> [path]`           | Grab a PNG of the headless-sway output (requires the graphics opt-in). Default: timestamped PNG in the cwd.   |
 | `sandbox:stop [--remove] <instance\|#>`             | Stop a VM (and remove a named instance's state with `--remove`).                                              |
 
 Every command that takes an `<instance>` also accepts the **index** shown in the
@@ -332,6 +333,135 @@ accumulated work.
   gated to the host CID, so the in-guest agent cannot inject prompts into its
   own session — only the host can. vsock bypasses the IP stack entirely, so it
   is invisible to the egress firewall and cannot be used for exfiltration.
+
+## Graphics (opt-in)
+
+By default the guest is headless and has no GPU: a browser or Wayland app has
+nothing to render against. The optional `graphics` capability boots a headless
+[sway][sway] compositor on a virtual output and gives the guest a paravirtual
+GPU, so a browser (for WebDriver/Playwright tests) or a Wayland app can actually
+render. It is **off by default**; existing consumers are unaffected.
+
+Enable it with a `graphics` attrset on the `katsuobushi.lib.sandbox` call. The
+browser/app itself is an ordinary package — it goes in the existing `packages`
+list, not a graphics-specific channel:
+
+```nix
+sandbox = katsuobushi.lib.sandbox {
+  inherit pkgs;
+  # ... existing args ...
+
+  graphics = {
+    enable = true;                                # default false; opt-in
+
+    # Host GPU selection: a role preference, resolved at launch. The first role
+    # that is present and openable wins; "software" is the llvmpipe tail.
+    gpu = [ "integrated" "discrete" "software" ]; # default
+
+    # The headless sway virtual output.
+    output = { width = 1920; height = 1080; refresh = 60; };   # default
+  };
+
+  # The browser / app / engine goes in the EXISTING packages list:
+  packages = [ pkgs.firefox pkgs.playwright-driver /* ... */ ];
+};
+```
+
+The compositor is not a knob (it is always headless sway); reach for
+`guestModules` if you need to go beyond this surface.
+
+### What graphics changes about the boundary
+
+This is the **one place** graphics dents the sandbox's headline guarantee, so it
+is stated plainly. When a GPU rung is selected, the guest's GPU command stream
+is parsed by **virglrenderer running inside the host QEMU process**, and
+virglrenderer has a history of guest→host escape CVEs. So the
+[boundary](#what-the-boundary-enforces) guarantee that "a real VM — the agent
+cannot reach the host or other projects" becomes "…except via the GPU command
+parser, if it has an exploitable bug."
+
+This surface **does not exist** with graphics off (today's behavior), and it
+**does not exist** on the `software` rung — there is no GPU device and no
+command parser in the host process there. What still contains a GPU rung: QEMU
+runs as your unprivileged launching uid (a successful escape lands with that
+user's privileges, the same ceiling as any QEMU escape), and nothing new is
+exposed to the network — virtio-gpu is a local device, the default-deny egress
+firewall is untouched, and `sandbox:screenshot` rides ssh-over-loopback. The
+delta is purely a host-_integrity_ surface, not a data-egress one. A launch-time
+notice repeats this when you enable graphics, mirroring the
+`vhost-vsock`-missing warning.
+
+### The software escape valve
+
+A project that cannot accept that delta pins:
+
+```nix
+graphics = {
+  enable = true;
+  gpu = [ "software" ];
+};
+```
+
+That keeps the **full original boundary** — llvmpipe (CPU) rendering, no GPU
+device handed to QEMU, no command parser in the host process — at a performance
+cost. It is the recommended posture for any graphics-enabled instance running
+untrusted code where host integrity outweighs frame rate.
+
+### Resources — a recommended floor
+
+A compositor and (especially) software rendering are CPU/RAM-hungry, and
+venus/virgl add host GPU memory pressure. When graphics is enabled, raise the
+resource arguments yourself — the library does **not** auto-bump them behind
+your back:
+
+- `vcpu ≥ 4` (llvmpipe is embarrassingly CPU-bound on the `software` rung).
+- `mem ≥ 8192` MiB (browser + compositor) — and still avoid exactly `2048`, the
+  QEMU hang noted under [Quick start](#quick-start).
+- A larger `scratchVolumeSize` if the project caches large browser/engine
+  assets.
+
+### The `render`-group prerequisite
+
+Opening a host render node (`/dev/dri/renderD128`) is the one host prerequisite.
+The portable default for those nodes is `root:render 0660`, so the launching
+user's uid may need to be in the `render` group before a GPU rung is usable. You
+do not have to guess: when graphics is enabled, `sandbox:status` adds a
+`graphics` preflight row that runs the real GPU resolver against the host now
+and reports the outcome —
+
+```text
+environment:
+  CLAUDE_CODE_OAUTH_TOKEN  ok (host env HARNESS_OAUTH_TOKEN is set)
+  vhost-vsock              ok
+  graphics                 ok (will render on integrated: /dev/dri/renderD128)
+```
+
+It resolves to `ok (will render on …)` when a GPU rung wins,
+`ok (software fallback — no usable GPU)` when it falls to the `software` tail,
+and — only when your `gpu` list has **no** `software` tail and no node is
+openable —
+`MISSING - no render node openable by uid <N>; add yourself to the 'render' group`,
+which exits non-zero exactly like a missing secret.
+
+### Grabbing a screenshot
+
+```sh
+sandbox:screenshot task1            # timestamped PNG in the cwd
+sandbox:screenshot task1 shot.png   # to a path; "-" streams the PNG to stdout
+```
+
+`sandbox:screenshot` runs `grim` over the existing loopback ssh against the
+headless-sway output and streams the PNG back — no daemon, no new port, no new
+channel. It works in both interactive and agent mode, and requires the graphics
+opt-in (with graphics off it fails with a clear "graphics not enabled" message
+rather than a cryptic error).
+
+One expected behavior to know: it captures **what is composited on the sway
+output**. A workload that renders purely offscreen — to its own FBO or swapchain
+— and never puts a surface on the compositor will **screenshot as blank**. That
+is correct, not a bug: `grim` can only see what is on the output.
+
+[sway]: https://swaywm.org/
 
 ## Disk-backed writable scratch
 
