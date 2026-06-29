@@ -189,6 +189,18 @@ let
   # only squid) is allowed to use it; the agent gets no resolver at all.
   slirpDns = "10.0.2.3";
 
+  # Liveness tunables — the single source for both sides (design
+  # sandbox-liveness.md §14.8, §18). Rendered into the host spec (katsuctlSpec,
+  # specVersion 2) and, for the two the guest reads directly, into the agent
+  # env. Inert knobs until a consumer reads them; defaults per the §18 table.
+  heartbeatSecs = 10; # heartbeat cadence (H)
+  heartbeatMiss = 3; # dead after N·H = 30 s of silence (N)
+  progressStallSecs = 300; # surface "no progress" (no break)
+  deliveryDeadlineSecs = 20; # resend if no TurnAccepted
+  deliveryRetries = 3; # max resends, then fail (K)
+  readyGateSecs = 60; # wait for SessionReady, then send anyway (G)
+  stopGraceMs = 1500; # absorb a late terminal report after Stop
+
   secretNames = builtins.attrNames secrets;
 
   # In-tree sandbox controller crate (agent mode)
@@ -817,6 +829,13 @@ let
         # (agent mode). Set globally so both — the server claude spawns, and the
         # report command the agent runs — agree without per-invocation wiring.
         KATSU_REPORT_SOCK = reportSocket;
+        # Liveness tunables the guest reads directly (design sandbox-liveness.md
+        # §16, §18); the rest live only in the host spec. KATSU_SHARE is the 9p
+        # share mount where the server writes turn-state.json (§6.3). Plumbed
+        # from the same let-bindings as the spec so the two sides can't drift.
+        KATSU_HEARTBEAT_SECS = toString heartbeatSecs;
+        KATSU_STOP_GRACE_MS = toString stopGraceMs;
+        KATSU_SHARE = shareMount;
       };
 
       # Claude Code "managed settings" — the org-policy settings tier, highest
@@ -1292,8 +1311,20 @@ let
   # runtimeInputs are (:1285) — null (Tools.sqlite3 = None) when off.
   katsuctlSpec = pkgs.writeText "katsuctl-sandbox-spec.json" (
     builtins.toJSON {
-      specVersion = 1;
+      specVersion = 2;
       inherit projectId agentUser importHostStoreDb;
+      # Liveness tunables (design sandbox-liveness.md §16, §18); inert until a
+      # consumer reads them, but plumbed from the one let-binding source so the
+      # host spec and the guest env can never drift (§14.8).
+      inherit
+        heartbeatSecs
+        heartbeatMiss
+        progressStallSecs
+        deliveryDeadlineSecs
+        deliveryRetries
+        readyGateSecs
+        stopGraceMs
+        ;
       roots = {
         stateGlob = "$XDG_STATE_HOME/katsuobushi/${projectId}";
         runtimeGlob = "$XDG_RUNTIME_DIR/katsuobushi/${projectId}";

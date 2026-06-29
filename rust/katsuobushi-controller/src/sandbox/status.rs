@@ -743,7 +743,7 @@ mod tests {
     fn it_summarizes_liveness_and_branch_through_the_seam() {
         use crate::sandbox::spec::{Roots, Tools};
         let spec = Spec {
-            spec_version: 1,
+            spec_version: 2,
             project_id: "cdata/katsuobushi".into(),
             agent_user: "agent".into(),
             import_host_store_db: false,
@@ -766,6 +766,13 @@ mod tests {
             secrets: vec![],
             vsock_port: 1024,
             host_cid: 2,
+            heartbeat_secs: 10,
+            heartbeat_miss: 3,
+            progress_stall_secs: 300,
+            delivery_deadline_secs: 20,
+            delivery_retries: 3,
+            ready_gate_secs: 60,
+            stop_grace_ms: 1500,
         };
         let roots = ResolvedRoots {
             state_glob: PathBuf::from("/state"),
@@ -807,7 +814,7 @@ mod tests {
     fn it_reports_stopped_and_no_branch_when_the_seam_says_so() {
         use crate::sandbox::spec::{Roots, Tools};
         let spec = Spec {
-            spec_version: 1,
+            spec_version: 2,
             project_id: "p".into(),
             agent_user: "agent".into(),
             import_host_store_db: false,
@@ -830,6 +837,13 @@ mod tests {
             secrets: vec![],
             vsock_port: 1024,
             host_cid: 2,
+            heartbeat_secs: 10,
+            heartbeat_miss: 3,
+            progress_stall_secs: 300,
+            delivery_deadline_secs: 20,
+            delivery_retries: 3,
+            ready_gate_secs: 60,
+            stop_grace_ms: 1500,
         };
         let roots = ResolvedRoots {
             state_glob: PathBuf::from("/state"),

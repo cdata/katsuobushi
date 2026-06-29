@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 /// The spec schema version this build of `katsuctl` understands. Bumped in
 /// lockstep with the Nix renderer; [`load_spec`] fails loud on any mismatch
 /// (design §5.1, §14.6 — no multi-version support, no migration).
-pub const SUPPORTED_SPEC_VERSION: u32 = 1;
+pub const SUPPORTED_SPEC_VERSION: u32 = 2;
 
 /// The complete Nix-rendered instance spec — the one source of truth for
 /// everything Nix-derived (design §5.2).
@@ -52,6 +52,26 @@ pub struct Spec {
     pub vsock_port: u32,
     /// Host CID (`protocol::VMADDR_CID_HOST`, 2).
     pub host_cid: u32,
+
+    // Liveness tunables (design/sandbox-liveness.md §16, §18). Rendered from a
+    // single set of Nix let-bindings (lib/sandbox/default.nix) into both this
+    // spec and the guest env, so the two sides can never drift (§14.8). Inert
+    // until a later issue's consumer reads them — knob plumbing only.
+    /// Heartbeat cadence in seconds (H); also exported as `KATSU_HEARTBEAT_SECS`.
+    pub heartbeat_secs: u64,
+    /// Missed heartbeats tolerated before "dead" (N): silence ≥ N·H is dead.
+    pub heartbeat_miss: u32,
+    /// Seconds of no progress before surfacing a "no progress" note (no break).
+    pub progress_stall_secs: u64,
+    /// Seconds to wait for `TurnAccepted` before resending a prompt.
+    pub delivery_deadline_secs: u64,
+    /// Max prompt resends before failing the delivery (K).
+    pub delivery_retries: u32,
+    /// Seconds to wait for `SessionReady` before sending anyway (G).
+    pub ready_gate_secs: u64,
+    /// Grace in ms to absorb a late terminal report after Stop; also exported as
+    /// `KATSU_STOP_GRACE_MS`.
+    pub stop_grace_ms: u64,
 }
 
 /// State/runtime directory roots, carrying the `$XDG_*`/`$HOME` templates the
@@ -204,7 +224,7 @@ mod tests {
 
     /// The design §5.3 example, with the `…` store-hash ellipses filled in.
     const EXAMPLE_SPEC_JSON: &str = r#"{
-      "specVersion": 1,
+      "specVersion": 2,
       "projectId": "cdata/katsuobushi",
       "agentUser": "agent",
       "importHostStoreDb": true,
@@ -224,14 +244,21 @@ mod tests {
                      "source": { "fromEnv": "HARNESS_OAUTH_TOKEN" },
                      "dest": "cred-CLAUDE_CODE_OAUTH_TOKEN" } ],
       "vsockPort": 1024,
-      "hostCid": 2
+      "hostCid": 2,
+      "heartbeatSecs": 10,
+      "heartbeatMiss": 3,
+      "progressStallSecs": 300,
+      "deliveryDeadlineSecs": 20,
+      "deliveryRetries": 3,
+      "readyGateSecs": 60,
+      "stopGraceMs": 1500
     }"#;
 
     #[test]
     fn it_parses_the_design_example_spec() {
         let spec = from_json_bytes(EXAMPLE_SPEC_JSON.as_bytes()).expect("example should parse");
 
-        assert_eq!(spec.spec_version, 1);
+        assert_eq!(spec.spec_version, 2);
         assert_eq!(spec.project_id, "cdata/katsuobushi");
         assert_eq!(spec.agent_user, "agent");
         assert!(spec.import_host_store_db);
@@ -255,6 +282,15 @@ mod tests {
         assert!(spec.context.is_empty());
         assert_eq!(spec.vsock_port, 1024);
         assert_eq!(spec.host_cid, 2);
+
+        // Liveness tunables parse with the §18 defaults (inert knob plumbing).
+        assert_eq!(spec.heartbeat_secs, 10);
+        assert_eq!(spec.heartbeat_miss, 3);
+        assert_eq!(spec.progress_stall_secs, 300);
+        assert_eq!(spec.delivery_deadline_secs, 20);
+        assert_eq!(spec.delivery_retries, 3);
+        assert_eq!(spec.ready_gate_secs, 60);
+        assert_eq!(spec.stop_grace_ms, 1500);
 
         assert_eq!(spec.secrets.len(), 1);
         let secret = &spec.secrets[0];
@@ -292,7 +328,7 @@ mod tests {
 
     #[test]
     fn it_rejects_a_bad_spec_version() {
-        let json = EXAMPLE_SPEC_JSON.replace(r#""specVersion": 1"#, r#""specVersion": 999"#);
+        let json = EXAMPLE_SPEC_JSON.replace(r#""specVersion": 2"#, r#""specVersion": 999"#);
         let err = from_json_bytes(json.as_bytes()).expect_err("version skew must fail loud");
         let msg = format!("{err:#}");
         assert!(msg.contains("999"), "should name the bad version: {msg}");
@@ -303,10 +339,24 @@ mod tests {
     }
 
     #[test]
+    fn it_rejects_a_now_stale_v1_spec() {
+        // The v1→v2 bump is the skew gate: a spec from a pre-tunables Nix render
+        // must fail loud rather than parse with missing knobs (design §14.6).
+        let json = EXAMPLE_SPEC_JSON.replace(r#""specVersion": 2"#, r#""specVersion": 1"#);
+        let err = from_json_bytes(json.as_bytes()).expect_err("v1 must now be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains('1'), "should name the stale version: {msg}");
+        assert!(
+            msg.contains("rebuild your devshell"),
+            "should hint the fix: {msg}"
+        );
+    }
+
+    #[test]
     fn it_rejects_an_unknown_field() {
         let json = EXAMPLE_SPEC_JSON.replace(
-            r#""specVersion": 1,"#,
-            r#""specVersion": 1, "surpriseField": "boom","#,
+            r#""specVersion": 2,"#,
+            r#""specVersion": 2, "surpriseField": "boom","#,
         );
         let err = from_json_bytes(json.as_bytes()).expect_err("deny_unknown_fields must fire");
         let msg = format!("{err:#}");

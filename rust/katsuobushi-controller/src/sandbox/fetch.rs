@@ -70,7 +70,7 @@ mod tests {
     /// the recorded paths are deterministic) and whose `git` is a known path.
     fn fake_spec(state_glob: &str, git: &str) -> Spec {
         Spec {
-            spec_version: 1,
+            spec_version: 2,
             project_id: "cdata/katsuobushi".into(),
             agent_user: "agent".into(),
             import_host_store_db: false,
@@ -93,6 +93,13 @@ mod tests {
             secrets: vec![],
             vsock_port: 1024,
             host_cid: 2,
+            heartbeat_secs: 10,
+            heartbeat_miss: 3,
+            progress_stall_secs: 300,
+            delivery_deadline_secs: 20,
+            delivery_retries: 3,
+            ready_gate_secs: 60,
+            stop_grace_ms: 1500,
         }
     }
 
