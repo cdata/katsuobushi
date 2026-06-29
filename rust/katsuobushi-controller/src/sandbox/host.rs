@@ -31,6 +31,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
+use std::fs::OpenOptions;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -66,6 +67,15 @@ pub trait Host {
     fn qmp_alive(&self, sock: &Path) -> bool;
     /// Connect to the guest control server over vsock.
     fn vsock_connect(&self, cid: u32, port: u32) -> io::Result<VsockStream>;
+    /// Enumerate the host render nodes (`/dev/dri/renderD*`), sorted. The seam
+    /// the §7.2 GPU resolver and §12 preflight both stand on; a host with no DRI
+    /// subsystem yields `[]`, not an error.
+    fn render_nodes(&self) -> io::Result<Vec<PathBuf>>;
+    /// Whether the calling uid can `open(O_RDWR)` a render node — the §14.3
+    /// permission prerequisite (portable nodes are `root:render 0660`, and the
+    /// operator may not be in `render`). A non-destructive probe: it opens for
+    /// read+write and immediately closes, issuing no ioctl.
+    fn can_open(&self, node: &Path) -> bool;
 }
 
 /// A pluggable source of `u32` randomness — the local stand-in for
@@ -164,6 +174,36 @@ impl Host for HostImpl {
     fn vsock_connect(&self, cid: u32, port: u32) -> io::Result<VsockStream> {
         self.runtime
             .block_on(VsockStream::connect(VsockAddr::new(cid, port)))
+    }
+
+    fn render_nodes(&self) -> io::Result<Vec<PathBuf>> {
+        let entries = match std::fs::read_dir("/dev/dri") {
+            Ok(entries) => entries,
+            // No DRI subsystem at all is "no render nodes", not a failure.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut nodes = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            // `renderD*` only — skip `card*` (privileged) and any other entry.
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("renderD"))
+            {
+                nodes.push(entry.path());
+            }
+        }
+        // read_dir order is arbitrary; sort for a stable, deterministic list.
+        nodes.sort();
+        Ok(nodes)
+    }
+
+    fn can_open(&self, node: &Path) -> bool {
+        // Non-destructive: open read+write to prove permission, then drop the
+        // handle immediately. No ioctl, so nothing on the GPU is touched.
+        OpenOptions::new().read(true).write(true).open(node).is_ok()
     }
 }
 
@@ -283,6 +323,10 @@ pub enum Call {
     QmpAlive(PathBuf),
     /// `vsock_connect(cid, port)`.
     VsockConnect(u32, u32),
+    /// `render_nodes()`.
+    RenderNodes,
+    /// `can_open(node)`.
+    CanOpen(PathBuf),
 }
 
 /// Test [`Host`]: records every call in order and returns scripted/canned
@@ -296,7 +340,9 @@ pub enum Call {
 /// "true" inputs (anything not in the set is `false`). `vsock_connect` cannot
 /// fabricate a live [`VsockStream`], so it records the call and returns an
 /// error — seam tests assert the connect was *attempted*; the byte round-trip
-/// is the e2e gate's job.
+/// is the e2e gate's job. `render_nodes` returns an injected fixture set
+/// (empty by default ⇒ `Ok([])`) and `can_open` answers from a set of openable
+/// nodes (anything not in the set is `false`).
 #[derive(Default)]
 pub struct FakeHost {
     calls: RefCell<Vec<Call>>,
@@ -308,6 +354,8 @@ pub struct FakeHost {
     existing: HashSet<PathBuf>,
     free_ports: HashSet<u16>,
     alive_socks: HashSet<PathBuf>,
+    render_nodes: Vec<PathBuf>,
+    openable: HashSet<PathBuf>,
 }
 
 impl FakeHost {
@@ -361,6 +409,19 @@ impl FakeHost {
     /// Make `qmp_alive(sock)` answer `true`.
     pub fn with_alive_sock(&mut self, sock: impl Into<PathBuf>) -> &mut Self {
         self.alive_socks.insert(sock.into());
+        self
+    }
+
+    /// Add a node to the fixture set `render_nodes` returns (preserving insertion
+    /// order; the production impl sorts, so tests should inject already-sorted).
+    pub fn with_render_node(&mut self, node: impl Into<PathBuf>) -> &mut Self {
+        self.render_nodes.push(node.into());
+        self
+    }
+
+    /// Make `can_open(node)` answer `true`.
+    pub fn with_openable(&mut self, node: impl Into<PathBuf>) -> &mut Self {
+        self.openable.insert(node.into());
         self
     }
 
@@ -450,6 +511,18 @@ impl Host for FakeHost {
             io::ErrorKind::Unsupported,
             "FakeHost cannot open a real vsock stream (call recorded)",
         ))
+    }
+
+    fn render_nodes(&self) -> io::Result<Vec<PathBuf>> {
+        self.calls.borrow_mut().push(Call::RenderNodes);
+        Ok(self.render_nodes.clone())
+    }
+
+    fn can_open(&self, node: &Path) -> bool {
+        self.calls
+            .borrow_mut()
+            .push(Call::CanOpen(node.to_path_buf()));
+        self.openable.contains(node)
     }
 }
 
@@ -581,6 +654,43 @@ mod tests {
             io::ErrorKind::NotFound
         );
         assert!(!host.exists(Path::new("/nope")));
+    }
+
+    #[test]
+    fn it_enumerates_the_injected_render_nodes() {
+        let mut host = FakeHost::new();
+        host.with_render_node("/dev/dri/renderD128")
+            .with_render_node("/dev/dri/renderD129");
+        assert_eq!(
+            host.render_nodes().unwrap(),
+            vec![
+                PathBuf::from("/dev/dri/renderD128"),
+                PathBuf::from("/dev/dri/renderD129"),
+            ]
+        );
+        assert_eq!(host.calls(), vec![Call::RenderNodes]);
+    }
+
+    #[test]
+    fn it_reflects_injected_openability_per_node() {
+        let open = PathBuf::from("/dev/dri/renderD128");
+        let denied = PathBuf::from("/dev/dri/renderD129");
+        let mut host = FakeHost::new();
+        host.with_openable(open.clone());
+        assert!(host.can_open(&open));
+        assert!(!host.can_open(&denied));
+        assert_eq!(
+            host.calls(),
+            vec![Call::CanOpen(open), Call::CanOpen(denied)]
+        );
+    }
+
+    #[test]
+    fn it_yields_an_empty_list_for_an_empty_dev_dri() {
+        // No injected nodes ⇒ Ok([]), never an error (mirrors a host with no
+        // DRI subsystem).
+        let host = FakeHost::new();
+        assert_eq!(host.render_nodes().unwrap(), Vec::<PathBuf>::new());
     }
 
     #[test]
