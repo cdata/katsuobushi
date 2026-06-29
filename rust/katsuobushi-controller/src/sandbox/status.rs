@@ -913,6 +913,7 @@ mod tests {
             delivery_retries: 3,
             ready_gate_secs: 60,
             stop_grace_ms: 1500,
+            graphics: crate::sandbox::spec::GraphicsSpec::default(),
         };
         let roots = ResolvedRoots {
             state_glob: PathBuf::from("/state"),
@@ -984,6 +985,7 @@ mod tests {
             delivery_retries: 3,
             ready_gate_secs: 60,
             stop_grace_ms: 1500,
+            graphics: crate::sandbox::spec::GraphicsSpec::default(),
         };
         let roots = ResolvedRoots {
             state_glob: PathBuf::from("/state"),
@@ -1222,6 +1224,7 @@ mod tests {
             delivery_retries: 3,
             ready_gate_secs: 60,
             stop_grace_ms: 1500,
+            graphics: crate::sandbox::spec::GraphicsSpec::default(),
         }
     }
 

@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 /// The spec schema version this build of `katsuctl` understands. Bumped in
 /// lockstep with the Nix renderer; [`load_spec`] fails loud on any mismatch
 /// (— no multi-version support, no migration).
-pub const SUPPORTED_SPEC_VERSION: u32 = 2;
+pub const SUPPORTED_SPEC_VERSION: u32 = 3;
 
 /// The complete Nix-rendered instance spec — the one source of truth for
 /// everything Nix-derived.
@@ -72,6 +72,10 @@ pub struct Spec {
     /// Grace in ms to absorb a late terminal report after Stop; also exported as
     /// `KATSU_STOP_GRACE_MS`.
     pub stop_grace_ms: u64,
+
+    /// Graphics capability; absent/`enable=false` ⇒ no GPU device, no compositor.
+    #[serde(default)]
+    pub graphics: GraphicsSpec,
 }
 
 /// State/runtime directory roots, carrying the `$XDG_*`/`$HOME` templates the
@@ -126,6 +130,42 @@ pub enum SecretSource {
     FromEnv(String),
     /// Copy from this host file path at script runtime.
     FromFile(String),
+}
+
+/// Graphics capability for the instance. Absent or `enable=false` ⇒ no GPU
+/// device and no compositor — byte-for-byte today's no-graphics behavior
+/// (§17/§18). Mirrors the camelCase / `deny_unknown_fields` conventions of
+/// [`SecretSpec`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GraphicsSpec {
+    /// Opt-in switch; `false` (the default) is exactly today's behavior.
+    pub enable: bool,
+    /// GPU role-preference ladder; `[]` when disabled (§7).
+    #[serde(default)]
+    pub gpu: Vec<GpuRole>,
+    /// Virtual output geometry; `None` ⇒ default `1920x1080@60` (§19).
+    #[serde(default)]
+    pub output: Option<Output>,
+}
+
+/// A GPU role rung in the selection ladder (§7). `software` is also a security
+/// rung (§7.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuRole {
+    Integrated,
+    Discrete,
+    Software,
+}
+
+/// Headless-compositor virtual output geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Output {
+    pub width: u32,
+    pub height: u32,
+    pub refresh: u32,
 }
 
 /// State/runtime roots with their `$XDG_*`/`$HOME` templates expanded
@@ -224,7 +264,7 @@ mod tests {
 
     /// The example, with the `…` store-hash ellipses filled in.
     const EXAMPLE_SPEC_JSON: &str = r#"{
-      "specVersion": 2,
+      "specVersion": 3,
       "projectId": "cdata/katsuobushi",
       "agentUser": "agent",
       "importHostStoreDb": true,
@@ -258,7 +298,7 @@ mod tests {
     fn it_parses_the_design_example_spec() {
         let spec = from_json_bytes(EXAMPLE_SPEC_JSON.as_bytes()).expect("example should parse");
 
-        assert_eq!(spec.spec_version, 2);
+        assert_eq!(spec.spec_version, 3);
         assert_eq!(spec.project_id, "cdata/katsuobushi");
         assert_eq!(spec.agent_user, "agent");
         assert!(spec.import_host_store_db);
@@ -300,6 +340,13 @@ mod tests {
             secret.source,
             SecretSource::FromEnv("HARNESS_OAUTH_TOKEN".to_string())
         );
+
+        // No `graphics` field in this spec ⇒ the no-graphics default, exactly
+        // today's behavior.
+        assert_eq!(spec.graphics, GraphicsSpec::default());
+        assert!(!spec.graphics.enable);
+        assert!(spec.graphics.gpu.is_empty());
+        assert_eq!(spec.graphics.output, None);
     }
 
     #[test]
@@ -328,7 +375,7 @@ mod tests {
 
     #[test]
     fn it_rejects_a_bad_spec_version() {
-        let json = EXAMPLE_SPEC_JSON.replace(r#""specVersion": 2"#, r#""specVersion": 999"#);
+        let json = EXAMPLE_SPEC_JSON.replace(r#""specVersion": 3"#, r#""specVersion": 999"#);
         let err = from_json_bytes(json.as_bytes()).expect_err("version skew must fail loud");
         let msg = format!("{err:#}");
         assert!(msg.contains("999"), "should name the bad version: {msg}");
@@ -339,13 +386,13 @@ mod tests {
     }
 
     #[test]
-    fn it_rejects_a_now_stale_v1_spec() {
-        // The v1→v2 bump is the skew gate: a spec from a pre-tunables Nix render
-        // must fail loud rather than parse with missing knobs.
-        let json = EXAMPLE_SPEC_JSON.replace(r#""specVersion": 2"#, r#""specVersion": 1"#);
-        let err = from_json_bytes(json.as_bytes()).expect_err("v1 must now be rejected");
+    fn it_rejects_a_now_stale_v2_spec() {
+        // The v2→v3 bump is the skew gate: a spec from a pre-graphics Nix render
+        // must fail loud rather than parse with a missing `graphics` shape.
+        let json = EXAMPLE_SPEC_JSON.replace(r#""specVersion": 3"#, r#""specVersion": 2"#);
+        let err = from_json_bytes(json.as_bytes()).expect_err("v2 must now be rejected");
         let msg = format!("{err:#}");
-        assert!(msg.contains('1'), "should name the stale version: {msg}");
+        assert!(msg.contains('2'), "should name the stale version: {msg}");
         assert!(
             msg.contains("rebuild your devshell"),
             "should hint the fix: {msg}"
@@ -355,8 +402,8 @@ mod tests {
     #[test]
     fn it_rejects_an_unknown_field() {
         let json = EXAMPLE_SPEC_JSON.replace(
-            r#""specVersion": 2,"#,
-            r#""specVersion": 2, "surpriseField": "boom","#,
+            r#""specVersion": 3,"#,
+            r#""specVersion": 3, "surpriseField": "boom","#,
         );
         let err = from_json_bytes(json.as_bytes()).expect_err("deny_unknown_fields must fire");
         let msg = format!("{err:#}");
@@ -364,6 +411,47 @@ mod tests {
             msg.contains("surpriseField"),
             "should name the field: {msg}"
         );
+    }
+
+    /// Splice the §18 graphics-on block onto the example spec.
+    fn with_graphics(block: &str) -> String {
+        EXAMPLE_SPEC_JSON.replace(
+            r#""stopGraceMs": 1500"#,
+            &format!(r#""stopGraceMs": 1500, "graphics": {block}"#),
+        )
+    }
+
+    #[test]
+    fn it_parses_the_graphics_on_example() {
+        // The exact §18 graphics-on shape (version 3).
+        let json = with_graphics(
+            r#"{ "enable": true,
+                 "gpu": ["integrated", "discrete", "software"],
+                 "output": { "width": 1920, "height": 1080, "refresh": 60 } }"#,
+        );
+        let spec = from_json_bytes(json.as_bytes()).expect("graphics-on example should parse");
+        assert!(spec.graphics.enable);
+        assert_eq!(
+            spec.graphics.gpu,
+            vec![GpuRole::Integrated, GpuRole::Discrete, GpuRole::Software]
+        );
+        assert_eq!(
+            spec.graphics.output,
+            Some(Output {
+                width: 1920,
+                height: 1080,
+                refresh: 60
+            })
+        );
+    }
+
+    #[test]
+    fn it_rejects_an_unknown_field_inside_graphics() {
+        let json = with_graphics(r#"{ "enable": true, "surpriseKnob": "boom" }"#);
+        let err =
+            from_json_bytes(json.as_bytes()).expect_err("graphics deny_unknown_fields must fire");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("surpriseKnob"), "should name the field: {msg}");
     }
 
     #[test]
