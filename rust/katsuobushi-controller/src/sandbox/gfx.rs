@@ -29,8 +29,14 @@ use crate::sandbox::spec::GpuRole;
 pub enum Resolution {
     /// A usable hardware GPU rung: the runner exports
     /// `KATSU_GFX_RENDERNODE=<node>` and (when `venus`) `KATSU_GFX_VENUS=1`, and
-    /// `extraArgsScript` emits the `virtio-gpu-gl` + `egl-headless` lines.
-    Gpu { node: PathBuf, venus: bool },
+    /// `extraArgsScript` emits the `virtio-gpu-gl` + `egl-headless` lines. `role`
+    /// is the rung this node satisfied (§7.2), surfaced verbatim in the §12/§18
+    /// preflight row.
+    Gpu {
+        node: PathBuf,
+        role: GpuRole,
+        venus: bool,
+    },
     /// The `software` rung: Mesa llvmpipe in-guest, **no GPU device and no host
     /// render node at all** (§7.3). The runner exports nothing GPU-related.
     Software,
@@ -85,6 +91,7 @@ fn resolve_gpu_with(
                 {
                     return Resolution::Gpu {
                         node: node.clone(),
+                        role: *role,
                         venus: true,
                     };
                 }
@@ -230,6 +237,7 @@ mod tests {
             res,
             Resolution::Gpu {
                 node: PathBuf::from(INTEGRATED),
+                role: GpuRole::Integrated,
                 venus: true,
             }
         );
@@ -250,6 +258,7 @@ mod tests {
             res,
             Resolution::Gpu {
                 node: PathBuf::from(DISCRETE),
+                role: GpuRole::Discrete,
                 venus: true,
             }
         );
@@ -299,6 +308,7 @@ mod tests {
             res,
             Resolution::Gpu {
                 node: PathBuf::from(DISCRETE),
+                role: GpuRole::Discrete,
                 venus: true,
             }
         );

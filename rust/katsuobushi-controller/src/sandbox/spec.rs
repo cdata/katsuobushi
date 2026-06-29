@@ -159,6 +159,19 @@ pub enum GpuRole {
     Software,
 }
 
+impl GpuRole {
+    /// The lowercase rung name (`integrated`/`discrete`/`software`) — the same
+    /// token the config uses, surfaced in the §18 preflight row
+    /// (`will render on <role>: <node>`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GpuRole::Integrated => "integrated",
+            GpuRole::Discrete => "discrete",
+            GpuRole::Software => "software",
+        }
+    }
+}
+
 /// Headless-compositor virtual output geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

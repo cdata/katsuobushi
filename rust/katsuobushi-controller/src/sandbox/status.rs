@@ -22,6 +22,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::sandbox::gfx::{self, Resolution};
 use crate::sandbox::host::{Host, HostImpl};
 use crate::sandbox::instance::{self, Mode};
 use crate::sandbox::liveness::{self, Liveness, TurnState};
@@ -228,11 +229,21 @@ impl Preflight {
 /// A `FromEnv` secret passes iff its host env var is set and non-empty; a
 /// `FromFile` secret passes iff its file is readable. The `CLAUDE_CODE_OAUTH_TOKEN`
 /// hint matches the shell's special-cased `claude setup-token` guidance.
+///
+/// When graphics are enabled, `graphics` carries the §7 resolver's verdict over
+/// the live host (resolved by the caller through the host seam, so this stays
+/// pure). It adds one `graphics` row (§12/§18): a resolved GPU rung or the
+/// `software` floor is `ok`; an exhausted ladder ([`Resolution::Unavailable`]) is
+/// `ok=false`, so the nonzero-exit gate fires exactly like a missing secret. With
+/// graphics off (`None`) no row is added. `uid` is only consumed by the
+/// `Unavailable` hint.
 fn preflight(
     secrets: &[SecretSpec],
     get_env: impl Fn(&str) -> Option<String>,
     file_readable: impl Fn(&Path) -> bool,
     vhost_vsock_present: bool,
+    graphics: Option<&Resolution>,
+    uid: u32,
 ) -> Preflight {
     let mut rows = Vec::with_capacity(secrets.len() + 1);
     for secret in secrets {
@@ -278,7 +289,45 @@ fn preflight(
         detail,
     });
 
+    // The graphics row (§12/§18), present only when graphics are enabled. The
+    // §7 ladder has already been run against the host by the caller; we just shape
+    // its verdict into a row. `Unavailable` is the only failing case — a deliberate
+    // "fail loud, never silently slow" choice (§7.2) — so it gates exactly like a
+    // missing secret.
+    if let Some(resolution) = graphics {
+        let (ok, detail) = match resolution {
+            Resolution::Gpu { node, role, .. } => (
+                true,
+                format!("ok (will render on {}: {})", role.as_str(), node.display()),
+            ),
+            Resolution::Software => (true, "ok (software fallback — no usable GPU)".to_string()),
+            Resolution::Unavailable => (
+                false,
+                format!(
+                    "MISSING - no render node openable by uid {uid}; \
+                     add yourself to the 'render' group"
+                ),
+            ),
+        };
+        rows.push(CheckRow {
+            label: "graphics".to_string(),
+            ok,
+            detail,
+        });
+    }
+
     Preflight { rows }
+}
+
+/// The real uid of the running `katsuctl` process — the operator/QEMU uid named
+/// in the `Unavailable` graphics hint (§18). Std has no `getuid`, so we read the
+/// owner of `/proc/self` (Linux), which is exactly that uid; a missing `/proc`
+/// degrades to `0` rather than failing the gate.
+fn current_uid() -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self")
+        .map(|m| m.uid())
+        .unwrap_or(0)
 }
 
 /// Render the preflight as a clean checklist. The glyph is plain
@@ -492,11 +541,20 @@ fn run_list(
         .map(|name| summarize(host, spec, roots, name, now))
         .collect();
 
+    // Run the §7 GPU ladder against the live host now, so the preflight verdict
+    // is the same resolution the launch path (#036) will reach. Graphics off ⇒
+    // no resolution ⇒ no graphics row.
+    let graphics = spec
+        .graphics
+        .enable
+        .then(|| gfx::resolve_gpu(&spec.graphics.gpu, host));
     let pf = preflight(
         &spec.secrets,
         |k| std::env::var(k).ok(),
         |p| host.exists(p),
         host.exists(Path::new("/dev/vhost-vsock")),
+        graphics.as_ref(),
+        current_uid(),
     );
 
     if renderer.json() {
@@ -711,6 +769,8 @@ mod tests {
             fake_env(&[]), // HARNESS_OAUTH_TOKEN unset
             |_| true,
             true, // vhost-vsock present
+            None, // graphics off
+            1000,
         );
         assert!(!pf.ok(), "a missing secret must fail the gate");
         assert_eq!(pf.problems(), 1);
@@ -730,7 +790,14 @@ mod tests {
     fn it_treats_an_empty_secret_env_var_as_missing() {
         // Shell `-n "${VAR:-}"` rejects empty, not just unset.
         let secrets = vec![env_secret("TOK", "HOST_TOK")];
-        let pf = preflight(&secrets, fake_env(&[("HOST_TOK", "")]), |_| true, true);
+        let pf = preflight(
+            &secrets,
+            fake_env(&[("HOST_TOK", "")]),
+            |_| true,
+            true,
+            None,
+            1000,
+        );
         assert!(!pf.ok(), "an empty env var counts as missing");
     }
 
@@ -742,6 +809,8 @@ mod tests {
             fake_env(&[("HOST_TOK", "s3cret")]),
             |_| true,
             true,
+            None,
+            1000,
         );
         assert!(pf.ok(), "all present -> gate passes");
         assert_eq!(pf.problems(), 0);
@@ -750,7 +819,7 @@ mod tests {
     #[test]
     fn it_gates_nonzero_when_vhost_vsock_is_absent() {
         // No secrets, but the vhost-vsock device is missing -> still a problem.
-        let pf = preflight(&[], fake_env(&[]), |_| true, false);
+        let pf = preflight(&[], fake_env(&[]), |_| true, false, None, 1000);
         assert!(!pf.ok(), "missing vhost-vsock fails the gate");
         let row = pf.rows.last().expect("the vhost-vsock row");
         assert_eq!(row.label, "vhost-vsock");
@@ -775,12 +844,96 @@ mod tests {
             fake_env(&[]),
             |p| p == Path::new("/run/secrets/tok"),
             true,
+            None,
+            1000,
         );
         assert!(ok.ok(), "a readable file passes");
         // Unreadable -> problem naming the path.
-        let bad = preflight(&secrets, fake_env(&[]), |_| false, true);
+        let bad = preflight(&secrets, fake_env(&[]), |_| false, true, None, 1000);
         assert!(!bad.ok());
         assert!(bad.rows[0].detail.contains("/run/secrets/tok"));
+    }
+
+    // ---- the graphics row (§12/§18), over the #035 resolver's verdict ----
+
+    /// The single `graphics` row a preflight produced for the given resolution
+    /// (vhost-vsock always passes; no secrets), for the §18 row assertions.
+    fn graphics_row(resolution: Option<&Resolution>, uid: u32) -> Option<CheckRow> {
+        let pf = preflight(&[], fake_env(&[]), |_| true, true, resolution, uid);
+        pf.rows.into_iter().find(|r| r.label == "graphics")
+    }
+
+    #[test]
+    fn it_adds_no_graphics_row_when_graphics_are_off() {
+        // graphics disabled ⇒ `None` ⇒ the row is absent entirely (byte-for-byte
+        // today's no-graphics preflight), and the gate still passes.
+        let pf = preflight(&[], fake_env(&[]), |_| true, true, None, 1000);
+        assert!(
+            pf.rows.iter().all(|r| r.label != "graphics"),
+            "no graphics row when off: {:?}",
+            pf.rows
+        );
+        assert!(pf.ok());
+    }
+
+    #[test]
+    fn it_renders_the_resolved_gpu_row_verbatim_per_18() {
+        // `Gpu` ⇒ ok, naming the resolved role + node (§18 line 1).
+        let res = Resolution::Gpu {
+            node: PathBuf::from("/dev/dri/renderD128"),
+            role: crate::sandbox::spec::GpuRole::Integrated,
+            venus: true,
+        };
+        let row = graphics_row(Some(&res), 1000).expect("a graphics row");
+        assert!(row.ok, "a resolved GPU rung passes");
+        assert_eq!(
+            row.detail,
+            "ok (will render on integrated: /dev/dri/renderD128)"
+        );
+    }
+
+    #[test]
+    fn it_renders_the_software_fallback_row_verbatim_per_18() {
+        // `Software` ⇒ ok, the fallback phrasing (§18 line 2).
+        let row = graphics_row(Some(&Resolution::Software), 1000).expect("a graphics row");
+        assert!(row.ok, "the software floor passes");
+        assert_eq!(row.detail, "ok (software fallback — no usable GPU)");
+    }
+
+    #[test]
+    fn it_renders_the_unavailable_row_verbatim_and_gates_nonzero_per_18() {
+        // `Unavailable` ⇒ ok=false naming the uid + the `render`-group hint (§18
+        // line 3), and it flows through `problems()`/the nonzero exit exactly like
+        // a missing secret.
+        let pf = preflight(
+            &[],
+            fake_env(&[]),
+            |_| true,
+            true, // vhost-vsock present, so graphics is the only problem
+            Some(&Resolution::Unavailable),
+            1000,
+        );
+        let row = pf
+            .rows
+            .iter()
+            .find(|r| r.label == "graphics")
+            .expect("a graphics row");
+        assert!(!row.ok, "Unavailable must fail the row");
+        assert_eq!(
+            row.detail,
+            "MISSING - no render node openable by uid 1000; add yourself to the 'render' group"
+        );
+        // The gate fires off this row alone.
+        assert!(!pf.ok(), "Unavailable fails the preflight gate");
+        assert_eq!(pf.problems(), 1);
+    }
+
+    #[test]
+    fn it_carries_the_running_uid_into_the_unavailable_hint() {
+        // The hint names whatever uid the caller passed (the live process uid in
+        // production), not a hard-coded one.
+        let row = graphics_row(Some(&Resolution::Unavailable), 4242).expect("a graphics row");
+        assert!(row.detail.contains("uid 4242"), "{}", row.detail);
     }
 
     // ---- preflight rendering ----
@@ -789,7 +942,7 @@ mod tests {
     fn it_renders_the_preflight_checklist_without_ansi_when_color_off() {
         let r = Renderer::new(false, false);
         let secrets = vec![env_secret("TOK", "HOST_TOK")];
-        let pf = preflight(&secrets, fake_env(&[]), |_| true, true);
+        let pf = preflight(&secrets, fake_env(&[]), |_| true, true, None, 1000);
         let text = render_preflight(&pf, &r);
         assert!(!has_ansi(&text), "plain when color off: {text:?}");
         assert!(text.starts_with("environment:"));
