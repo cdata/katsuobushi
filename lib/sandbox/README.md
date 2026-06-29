@@ -67,6 +67,7 @@ fully-commented reference. The most important arguments:
 | `secrets`                                                | `NAME -> { fromEnv \| fromFile }`. Read from the host at launch, injected via `fw_cfg`; never in the store.           |
 | `extraRepos` / `workspaceContext` / `homeFiles`          | Pin reference repos, carry untracked project context, and map files into the agent's home.                            |
 | `importHostStoreDb`                                      | Default `true`. Reuse everything the host has already built (e.g. `nix develop` toolchains) offline; see below.       |
+| `graphics`                                               | Opt-in headless compositor + paravirtual GPU so a browser / Wayland app can render. Off by default; see below.        |
 | `vcpu` / `mem`                                           | CPU + RAM (avoid `mem = 2048` exactly — QEMU hangs).                                                                  |
 | `storeVolumeSize` / `scratchVolumeSize` / `dbVolumeSize` | Disk-backed scratch image sizes in MiB (sparse). Default 16384 / 32768 / 4096. See "Reusing the host's Nix store".    |
 
@@ -151,9 +152,22 @@ sandbox = katsuobushi.lib.sandbox {
     };
   };
 
+  # Graphics: a headless compositor + paravirtual GPU (opt-in; off by default)
+  #
+  # Lets a browser (WebDriver/Playwright) or Wayland app render inside the VM.
+  # The browser/app itself is an ordinary entry in `packages` above. See
+  # "Graphics (opt-in)" below for the GPU role ladder, the boundary delta, and
+  # the recommended resource floor.
+  graphics = {
+    enable = true;
+    gpu = [ "integrated" "discrete" "software" ];              # role ladder; "software" = llvmpipe tail
+    output = { width = 1920; height = 1080; refresh = 60; };
+  };
+
   # Resources
   vcpu = 4;
   mem = 8192;                          # MiB — avoid exactly 2048 (QEMU hangs)
+                                       # with graphics: vcpu ≥ 4, mem ≥ 8192
   storeVolumeSize = 16384;             # writable /nix/store overlay (MiB, sparse)
   scratchVolumeSize = 32768;           # workspace clone + cargo/rustup/XDG caches
   dbVolumeSize = 4096;                 # guest Nix database
@@ -442,6 +456,17 @@ and — only when your `gpu` list has **no** `software` tail and no node is
 openable —
 `MISSING - no render node openable by uid <N>; add yourself to the 'render' group`,
 which exits non-zero exactly like a missing secret.
+
+The instance list also gains a **GRAPHICS** column showing the rung each
+instance actually launched on — `integrated`, `discrete`, `software`, or `none`
+when graphics is disabled — so a graphics-enabled fleet is scannable at a
+glance:
+
+```text
+ #  INSTANCE        STATE    MODE   PERSIST  GRAPHICS    LIVENESS
+ 1  browser-a3f9c2  running  agent  named    integrated  turn 2 in-flight · …
+ 2  build-7c1e0b    running  agent  named    none        turn 1 in-flight · …
+```
 
 ### Grabbing a screenshot
 

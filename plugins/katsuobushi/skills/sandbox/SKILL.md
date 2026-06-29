@@ -6,10 +6,11 @@ description:
   when the user wants to "use the sandbox to…", delegate a task to a sandbox or
   VM, run risky / long-running / parallel work in isolation, spin up an
   agent-mode sandbox, push prompts to a running sandbox instance, check on or
-  fetch a sandbox's work, attach to a running sandbox's live session, or stop
-  one — i.e. anything involving the sandbox:start / sandbox:prompt /
-  sandbox:status / sandbox:attach / sandbox:fetch / sandbox:stop commands or
-  `nix run .#sandbox`.
+  fetch a sandbox's work, attach to a running sandbox's live session, screenshot
+  a graphics-enabled sandbox, or stop one — i.e. anything involving the
+  sandbox:start / sandbox:prompt / sandbox:status / sandbox:attach /
+  sandbox:fetch / sandbox:screenshot / sandbox:stop commands or `nix run
+  .#sandbox`.
 ---
 
 # Driving a Katsuobushi sandbox
@@ -116,9 +117,25 @@ sandbox = katsuobushi.lib.sandbox {
     };
   };
 
+  # Graphics (opt-in; default off) — see "Graphics (opt-in)" below
+  #
+  # Boots a headless sway compositor + a paravirtual GPU so a browser
+  # (WebDriver/Playwright) or any Wayland app can actually render. The browser/app
+  # itself is an ordinary package — it goes in `packages` above, not here.
+  graphics = {
+    enable = true;
+    # Host GPU role ladder, resolved at launch; first present + openable wins.
+    # "software" is the llvmpipe (CPU) tail — always available, and the safe
+    # rung (no host GPU device handed to QEMU). Pin `[ "software" ]` to keep the
+    # full original boundary at a perf cost.
+    gpu = [ "integrated" "discrete" "software" ];
+    output = { width = 1920; height = 1080; refresh = 60; };
+  };
+
   # Resources
   vcpu = 4;
   mem = 8192;                          # MiB — avoid exactly 2048 (QEMU hangs)
+                                       # graphics needs a floor: vcpu >= 4, mem >= 8192
   # Disk-backed writable scratch (sparse raw images, MiB). Named instances keep
   # these across stop/restart, so warm build caches survive a pause.
   storeVolumeSize = 16384;             # writable /nix/store overlay
@@ -135,6 +152,38 @@ declares; `system` comes from `flake-utils`. The internal `microvm` / `rust` /
 `controlSrc` arguments are supplied by Katsuobushi — consumers don't set them.
 The fastest starting point is
 `nix flake init -t github:cdata/katsuobushi#sandbox`.
+
+## Graphics (opt-in)
+
+By default the guest is headless with no GPU, so a browser or Wayland app has
+nothing to render against. The `graphics` attrset (above) opts in: it boots a
+headless sway compositor on a virtual output and gives the guest a paravirtual
+GPU. Off by default; existing instances are unaffected. Material points for an
+orchestrator:
+
+- **Enable per project, not per launch.** It is a `lib.sandbox` config arg, so
+  it applies to every instance of that project; offer to add the `graphics`
+  block (and raise `vcpu`/`mem` to the floor) when the user wants browser/GUI
+  work. The browser/app is an ordinary entry in `packages`.
+- **`sandbox:status` shows it.** When graphics is enabled, the instance list
+  gains a **GRAPHICS** column — `integrated` / `discrete` / `software` (the rung
+  the instance actually launched on), or `none` when graphics is off — and the
+  preflight gains a `graphics` row that resolves the GPU against the host now.
+  That row reports the **`render`-group prerequisite**: a host render node is
+  portably `root:render 0660`, so the launching uid may need to be in the
+  `render` group; the row reads `MISSING - … add yourself to the 'render' group`
+  (non-zero exit) when no node is openable and the `gpu` list has no `software`
+  tail. Surface that fix to the user as you would a missing secret.
+- **`sandbox:screenshot <name|#> [path]`** grabs a PNG of the headless-sway
+  output over the existing ssh (`-` streams to stdout; default is a timestamped
+  PNG in the cwd). Works in both modes; requires the opt-in. A purely offscreen
+  workload that never puts a surface on the compositor screenshots **blank** —
+  expected, not a bug.
+- **Boundary delta.** A resolved GPU rung means the guest's GPU command stream
+  is parsed by virglrenderer inside the host QEMU process — the one place
+  graphics widens the host-facing attack surface. It does not exist with
+  graphics off or on the `software` rung. A launch-time notice repeats this. The
+  full treatment (and the `gpu = [ "software" ]` escape valve) is in the README.
 
 ## Launch a sandboxed agent
 
@@ -278,17 +327,18 @@ still land on accumulated work and need a follow-up sandbox, exactly as above.)
 ## Observing & lifecycle
 
 ```sh
-sandbox:status                  # list instances; numbered, running/stopped, agent CID, branch
+sandbox:status                  # list instances; numbered, running/stopped, graphics rung, branch
 sandbox:status <name|#>         # detail, incl. the ssh command to watch live
 sandbox:attach <name|#>         # ssh in + attach the agent's tmux session live
+sandbox:screenshot <name|#> [path] # PNG of the headless-sway output (graphics opt-in; "-" = stdout)
 sandbox:stop [--remove] <name|#> # stop (and remove a named instance with --remove)
 ```
 
 `sandbox:status` numbers every instance in a `#` column. That index is an
 alternative to the full suffixed name for **every** instance-taking command
-(`prompt`, `status`, `attach`, `fetch`, `stop`) — handy interactively, but
-positional, so it can shift as instances appear or disappear; re-check
-`sandbox:status` before trusting a number across a change.
+(`prompt`, `status`, `attach`, `fetch`, `screenshot`, `stop`) — handy
+interactively, but positional, so it can shift as instances appear or disappear;
+re-check `sandbox:status` before trusting a number across a change.
 
 To watch the agent work live, run `sandbox:attach <name|#>` — it SSHes in, pins
 `TERM=xterm-256color` (so terminals like ghostty don't trip up the guest's
