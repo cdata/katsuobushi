@@ -1,6 +1,6 @@
 ---
 source: rust/katsuobushi-controller/src/sandbox/start.rs
-expression: "render_on(&spec, &plan(\"20260627-120000-4242\", false, Mode::Agent),\n&FakeHost::new(),)"
+expression: recipe
 ---
 #!/usr/bin/env bash
 set -euo pipefail
@@ -24,6 +24,7 @@ cp "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id.pub" "/state/kats
 export KATSU_STATE_DIR="/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
 export KATSU_SSH_PORT=22042
 export KATSU_VSOCK_CID=4242
+echo "sandbox: graphics enabled" >&2
 
 # Back each guest disk image from the persistent state dir via a runtime symlink.
 ln -sfn "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/rw-store.img" "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/rw-store.img"

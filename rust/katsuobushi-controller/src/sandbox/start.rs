@@ -681,32 +681,35 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
         r.line(format!("export KATSU_VSOCK_CID={cid}"));
     }
 
-    // ---- graphics: stage the KATSU_GFX_* env from the resolved GPU rung ----
-    // The resolution was decided once in `decide` (and recorded in instance.json);
-    // a graphics-off instance carries `None` and emits nothing here, byte-for-byte
-    // today's no-graphics recipe.
+    // ---- graphics: announce, and (hardware rung only) stage the KATSU_GFX_* env ----
+    // The resolution was decided once in `decide` (and recorded in instance.json).
+    // Whenever graphics is on — either rung — announce it; a graphics-off instance
+    // carries `None` and emits nothing here, byte-for-byte today's no-graphics
+    // recipe. (`Unavailable` never reaches here — `decide` fails the launch.)
+    if plan.gpu.is_some() {
+        r.line("echo \"sandbox: graphics enabled\" >&2");
+    }
     match &plan.gpu {
-        // A usable hardware rung: hand the node + venus flag to extraArgsScript.
+        // A usable hardware rung: the host-facing boundary warning + the node and
+        // venus flag for extraArgsScript.
         Some(Resolution::Gpu { node, .. }) => {
-            // Security boundary notice — emitted ONLY on a hardware rung, because
+            // Boundary warning — emitted ONLY on a hardware rung, because
             // virglrenderer parses the guest's GPU command stream inside the host
             // QEMU process exactly when one resolves, which widens the host-facing
-            // attack surface. The software rung keeps the full original isolation
-            // (in-guest llvmpipe, no GPU device, no virglrenderer host attack
-            // surface), so the notice would be factually wrong there. Mirrors the
-            // `sandbox:`-prefixed warnings the rest of this recipe emits to stderr.
+            // attack surface. The software rung (below) keeps the full original
+            // isolation (in-guest llvmpipe, no GPU device, no virglrenderer host
+            // attack surface), so the warning would be factually wrong there.
             r.line(
-                "echo \"sandbox: graphics: GPU command stream parsed by virglrenderer in the \
-                 host QEMU process — host-facing attack surface widened.\" >&2",
+                "echo \"sandbox: WARNING! Hardware graphics capability widens the host-facing \
+                attack surface, increasing the risk of guest escape.\" >&2",
             );
             r.line(format!("export KATSU_GFX_RENDERNODE={}", dq(node)));
             r.line("export KATSU_GFX_VENUS=1".to_string());
         }
-        // The software rung is in-guest llvmpipe — no host render node, so no GPU
-        // env at all (extraArgsScript then emits no virtio-gpu device), and no
-        // virglrenderer in the loop ⇒ no boundary notice (the host attack surface
-        // is unchanged from graphics-off). Graphics-off (`None`) likewise emits
-        // nothing. (`Unavailable` never reaches here — `decide` fails the launch.)
+        // The software rung is in-guest llvmpipe — graphics is on (announced
+        // above), but no host render node, no GPU device, and no virglrenderer in
+        // the loop, so no GPU env and no boundary warning (the host attack surface
+        // is unchanged from graphics-off). Graphics-off (`None`) emits nothing.
         Some(Resolution::Software) | Some(Resolution::Unavailable) | None => {}
     }
 
@@ -1396,9 +1399,9 @@ mod tests {
 
     #[test]
     fn snapshot_agent_graphics_software_fallback() {
-        // The ladder resolved to its `software` tail: in-guest llvmpipe, so no GPU
-        // env is staged and no boundary notice fires (the host attack surface is
-        // unchanged from graphics-off).
+        // The ladder resolved to its `software` tail: in-guest llvmpipe. Graphics
+        // is still announced, but no GPU env is staged and no boundary warning
+        // fires (the host attack surface is unchanged from graphics-off).
         let spec = spec_with_graphics(vec![
             crate::sandbox::spec::GpuRole::Integrated,
             crate::sandbox::spec::GpuRole::Discrete,
@@ -1406,7 +1409,22 @@ mod tests {
         ]);
         let mut p = plan("20260627-120000-4242", false, Mode::Agent);
         p.gpu = Some(Resolution::Software);
-        insta::assert_snapshot!(render(&spec, &p));
+        let recipe = render(&spec, &p);
+        // Graphics is announced on the software rung too…
+        assert!(
+            recipe.contains("echo \"sandbox: graphics enabled\""),
+            "software rung still announces graphics: {recipe}"
+        );
+        // …but it carries no boundary warning and stages no GPU env.
+        assert!(
+            !recipe.contains("WARNING"),
+            "software rung has no boundary warning: {recipe}"
+        );
+        assert!(
+            !recipe.contains("KATSU_GFX_RENDERNODE"),
+            "software rung stages no GPU env: {recipe}"
+        );
+        insta::assert_snapshot!(recipe);
     }
 
     #[test]
