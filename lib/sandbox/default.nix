@@ -134,6 +134,24 @@ defaults:
   # what `nix` treats as valid.
   importHostStoreDb ? true,
 
+  # Graphics (opt-in): headless GPU rendering for browser tests and Wayland apps.
+  #
+  # Disabled by default — a graphics-off instance is byte-for-byte what ships
+  # today (no spec `graphics` key, no GPU args). When `enable`, the host renders
+  # the §18 spec block and (once the runner resolves a GPU rung at launch)
+  # splices a `virtio-gpu-gl` device + headless EGL backend into qemu.
+  #   gpu    — ordered role-preference list, resolved host-side; the first
+  #            present+openable rung wins. The `software` tail is the llvmpipe
+  #            (Tier A) floor that removes the GPU device entirely (see
+  #            design/sandbox-graphics.md §7).
+  #   output — the headless sway virtual output (the guest display stack lands in
+  #            #040; this only carries the dimensions through the spec).
+  # Partial attrsets are accepted: anything unset falls back to the §19 defaults
+  # below (so `graphics = { enable = true; }` gets the full default gpu/output).
+  graphics ? {
+    enable = false;
+  },
+
   # Escape hatch: extra NixOS modules merged into the guest.
   guestModules ? [ ],
 
@@ -201,6 +219,25 @@ let
   stopGraceMs = 1500; # absorb a late terminal report after Stop
 
   secretNames = builtins.attrNames secrets;
+
+  # Graphics config, normalized over the §19 defaults. `recursiveUpdate` merges a
+  # partial consumer attrset (e.g. `{ enable = true; }`, or one that overrides
+  # only `output.width`) onto the defaults; the `gpu` list is replaced wholesale,
+  # never element-merged, which is what an ordered preference list wants.
+  graphicsDefaults = {
+    enable = false;
+    gpu = [
+      "integrated"
+      "discrete"
+      "software"
+    ];
+    output = {
+      width = 1920;
+      height = 1080;
+      refresh = 60;
+    };
+  };
+  graphicsCfg = lib.recursiveUpdate graphicsDefaults graphics;
 
   # In-tree sandbox controller crate (agent mode)
   #
@@ -625,6 +662,22 @@ let
       args="$args -device vhost-vsock-pci,guest-cid=''${KATSU_VSOCK_CID}"
     fi
 
+    # Graphics (opt-in): when the runner resolved a GPU rung it exports
+    # KATSU_GFX_RENDERNODE (and KATSU_GFX_VENUS=1 for the venus path), so splice a
+    # virtio-gpu-gl device + a headless EGL backend bound to that render node. The
+    # `software` rung and a graphics-off instance export neither var, so no GPU
+    # device is emitted and the boundary is unchanged (design §7.3/§18).
+    # `-sandbox on` (qemu seccomp) is cheap defense-in-depth for the widened GPU
+    # surface (§13.3); its boot-safety and the opengl/virgl-enabled qemu-package
+    # check (§13.3/§14.5) are validated on a real boot in #042 — not here, as this
+    # VM has no nested KVM.
+    if [ -n "''${KATSU_GFX_RENDERNODE:-}" ]; then
+      venus=""; [ -n "''${KATSU_GFX_VENUS:-}" ] && venus=",venus=on"
+      args="$args -device virtio-gpu-gl-pci$venus"
+      args="$args -display egl-headless,rendernode=''${KATSU_GFX_RENDERNODE}"
+      args="$args -sandbox on"
+    fi
+
     # Declared secrets via fw_cfg, reading from tmpfs files the wrapper staged.
     ${lib.concatMapStrings (name: ''
       args="$args -fw_cfg name=opt/io.systemd.credentials/${name},file=''${KATSU_CRED_${name}}"
@@ -645,6 +698,13 @@ let
       # Boot/runner shape.
       microvm = {
         hypervisor = "qemu";
+        # QEMU package: microvm.nix defaults `microvm.qemu.package` to
+        # `pkgs.qemu_kvm` on Linux. That build is NOT stripped of graphics — at
+        # this flake's nixpkgs pin its closure links virglrenderer-1.3.0,
+        # libepoxy, mesa-libgbm, gtk, and spice (verified at eval offline), so the
+        # `virtio-gpu-gl-pci` device and `egl-headless` display the graphics path
+        # needs are present. No override required (§14.5); #042 confirms the
+        # opengl/virgl device set on a real launched VM.
         inherit vcpu mem;
         # No static interfaces: the NIC (with its per-instance hostfwd port) is
         # emitted by extraArgsScript so parallel instances do not collide.
@@ -1376,58 +1436,74 @@ let
   # store. `sqlite3` is gated on importHostStoreDb exactly as the runner's
   # runtimeInputs are — null (Tools.sqlite3 = None) when off.
   katsuctlSpec = pkgs.writeText "katsuctl-sandbox-spec.json" (
-    builtins.toJSON {
-      # Bumped to 3 alongside the Rust SUPPORTED_SPEC_VERSION (graphics schema).
-      # The `graphics` field is omitted here until the full host wiring lands;
-      # katsuctl reads an absent `graphics` as disabled (its `#[serde(default)]`).
-      specVersion = 3;
-      inherit projectId agentUser importHostStoreDb;
-      # Liveness tunables; inert until a
-      # consumer reads them, but plumbed from the one let-binding source so the
-      # host spec and the guest env can never drift.
-      inherit
-        heartbeatSecs
-        heartbeatMiss
-        progressStallSecs
-        deliveryDeadlineSecs
-        deliveryRetries
-        readyGateSecs
-        stopGraceMs
-        ;
-      roots = {
-        stateGlob = "$XDG_STATE_HOME/katsuobushi/${projectId}";
-        runtimeGlob = "$XDG_RUNTIME_DIR/katsuobushi/${projectId}";
-      };
-      tools = {
-        git = "${pkgs.git}/bin/git";
-        ssh = "${pkgs.openssh}/bin/ssh";
-        sshKeygen = "${pkgs.openssh}/bin/ssh-keygen";
-        tmux = "${pkgs.tmux}/bin/tmux";
-        rsync = "${pkgs.rsync}/bin/rsync";
-        sqlite3 = if importHostStoreDb then "${pkgs.sqlite.bin}/bin/sqlite3" else null;
-        bash = "${pkgs.bash}/bin/bash";
-      };
-      runner = "${runner}/bin/microvm-run";
-      diskImages = [
-        "rw-store.img"
-        "nix-db.img"
-        "scratch.img"
-      ];
-      context = validatedContext;
-      secrets = lib.mapAttrsToList (name: spec: {
-        inherit name;
-        source =
-          if spec ? fromEnv then
-            { fromEnv = spec.fromEnv; }
-          else if spec ? fromFile then
-            { fromFile = spec.fromFile; }
-          else
-            throw "katsuobushi.lib.sandbox: secret ${name} needs fromEnv or fromFile.";
-        dest = "cred-${name}";
-      }) secrets;
-      vsockPort = 1024;
-      hostCid = 2;
-    }
+    builtins.toJSON (
+      {
+        # Bumped to 3 alongside the Rust SUPPORTED_SPEC_VERSION (graphics schema).
+        # The `graphics` block is appended below only when graphics.enable; a
+        # graphics-off spec omits the key entirely, and katsuctl reads an absent
+        # `graphics` as disabled (its `#[serde(default)]`).
+        specVersion = 3;
+        inherit projectId agentUser importHostStoreDb;
+        # Liveness tunables; inert until a
+        # consumer reads them, but plumbed from the one let-binding source so the
+        # host spec and the guest env can never drift.
+        inherit
+          heartbeatSecs
+          heartbeatMiss
+          progressStallSecs
+          deliveryDeadlineSecs
+          deliveryRetries
+          readyGateSecs
+          stopGraceMs
+          ;
+        roots = {
+          stateGlob = "$XDG_STATE_HOME/katsuobushi/${projectId}";
+          runtimeGlob = "$XDG_RUNTIME_DIR/katsuobushi/${projectId}";
+        };
+        tools = {
+          git = "${pkgs.git}/bin/git";
+          ssh = "${pkgs.openssh}/bin/ssh";
+          sshKeygen = "${pkgs.openssh}/bin/ssh-keygen";
+          tmux = "${pkgs.tmux}/bin/tmux";
+          rsync = "${pkgs.rsync}/bin/rsync";
+          sqlite3 = if importHostStoreDb then "${pkgs.sqlite.bin}/bin/sqlite3" else null;
+          bash = "${pkgs.bash}/bin/bash";
+        };
+        runner = "${runner}/bin/microvm-run";
+        diskImages = [
+          "rw-store.img"
+          "nix-db.img"
+          "scratch.img"
+        ];
+        context = validatedContext;
+        secrets = lib.mapAttrsToList (name: spec: {
+          inherit name;
+          source =
+            if spec ? fromEnv then
+              { fromEnv = spec.fromEnv; }
+            else if spec ? fromFile then
+              { fromFile = spec.fromFile; }
+            else
+              throw "katsuobushi.lib.sandbox: secret ${name} needs fromEnv or fromFile.";
+          dest = "cred-${name}";
+        }) secrets;
+        vsockPort = 1024;
+        hostCid = 2;
+      }
+      // lib.optionalAttrs graphicsCfg.enable {
+        # §18 shape, camelCase, emitted only when enabled (so a graphics-off spec
+        # is unchanged apart from the already-bumped specVersion). The host-side
+        # GPU resolver (start.rs) consumes `gpu`; the guest display stack (#040)
+        # consumes `output`.
+        graphics = {
+          enable = true;
+          inherit (graphicsCfg) gpu;
+          output = {
+            inherit (graphicsCfg.output) width height refresh;
+          };
+        };
+      }
+    )
   );
 
   menuCommands = {
@@ -1490,6 +1566,18 @@ let
       command = ''
         script="$(katsuctl sandbox --config ${katsuctlSpec} attach "$@")" || exit
         exec ${pkgs.bash}/bin/bash "$script"
+      '';
+    };
+    "sandbox:screenshot" = {
+      description = "Grab the headless compositor framebuffer of a graphics instance";
+      # Business logic lives in katsuctl: screenshot resolves the instance and
+      # streams `grim -` over the existing loopback ssh as the agent user, landing
+      # the PNG at the requested path (or host stdout for `-`). Unlike attach it
+      # emits no recipe — it does the capture directly — so this is the plain
+      # hand-off form (like fetch/prompt/status/stop), passing the Nix-rendered
+      # spec via --config. Requires graphics.enable; katsuctl fails clearly if off.
+      command = ''
+        exec katsuctl sandbox --config ${katsuctlSpec} screenshot "$@"
       '';
     };
   };
