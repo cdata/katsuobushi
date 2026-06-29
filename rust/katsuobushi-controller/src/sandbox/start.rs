@@ -68,6 +68,24 @@ struct Plan {
     seed: Seed,
     /// The agent-mode initial prompt to tail-call `prompt` with.
     prompt: Option<String>,
+    /// The resolved GPU ladder verdict when graphics is enabled, else `None`.
+    /// Decided here (the one graphics probe) so both the recipe and the persisted
+    /// `instance.json` read the *same* resolution; never holds `Unavailable` (that
+    /// fails the launch loud in [`decide`] before a `Plan` is built).
+    gpu: Option<Resolution>,
+}
+
+impl Plan {
+    /// The GPU rung to record in `instance.json` (and surface in `sandbox:status`):
+    /// the role a hardware rung satisfied, `software` for the llvmpipe rung, or
+    /// `None` when graphics is disabled.
+    fn gpu_rung(&self) -> Option<crate::sandbox::spec::GpuRole> {
+        match &self.gpu {
+            Some(Resolution::Gpu { role, .. }) => Some(*role),
+            Some(Resolution::Software) => Some(crate::sandbox::spec::GpuRole::Software),
+            Some(Resolution::Unavailable) | None => None,
+        }
+    }
 }
 
 /// Production entry point: load the spec, stand up the real host
@@ -99,8 +117,8 @@ pub fn run(
         pid,
     )?;
 
-    // `--json` *describes* the resolved identity rather than emitting a script
-    //: the bare form prints a path to `exec`, `--json` says what will
+    // `--json` *describes* the resolved identity rather than emitting a script:
+    // the bare form prints a path to `exec`, `--json` says what will
     // happen. A power-user/structured caller, so no side effects either.
     if global.json {
         println!("{}", identity_json(&plan));
@@ -116,12 +134,13 @@ pub fn run(
         named: plan.named,
         ssh_port: plan.ssh_port,
         vsock_cid: plan.vsock_cid,
+        graphics: plan.gpu_rung(),
     };
     instance::write(&roots.state_glob, &meta).context("writing instance.json")?;
 
     let script_dir = emit::script_runtime_dir();
     emit::emit(&host, &script_dir, &mut rng, || {
-        build_recipe(&host, &spec, config, &roots, &plan)
+        build_recipe(&spec, config, &roots, &plan)
     })?;
     Ok(())
 }
@@ -187,6 +206,21 @@ fn decide(
         mirror_exists,
     )?;
 
+    // The one graphics probe: walk the GPU role ladder against the host now, so
+    // the recipe and the persisted instance.json share a single resolution. An
+    // exhausted ladder with no `software` tail fails the launch loud here rather
+    // than booting GPU-less and slow.
+    let gpu = if spec.graphics.enable {
+        match gfx::resolve_gpu(&spec.graphics.gpu, host) {
+            Resolution::Unavailable => {
+                bail!("graphics: no usable GPU and no `software` fallback in `gpu`")
+            }
+            resolved => Some(resolved),
+        }
+    } else {
+        None
+    };
+
     Ok(Plan {
         name: full_name,
         named,
@@ -197,6 +231,7 @@ fn decide(
         clone_mirror: !mirror_exists,
         seed,
         prompt: prompt.map(str::to_string),
+        gpu,
     })
 }
 
@@ -466,22 +501,12 @@ fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Build the flat setup + boot recipe. Pure over the [`Plan`] and
-/// spec, so the golden snapshots render it directly — every branch was already
-/// decided in [`decide`]; what is emitted is unconditional (apart from the
-/// genuinely-runtime secret-presence and file-existence guards).
-///
-/// The lone probe is the GPU role-ladder resolution ([`gfx::resolve_gpu`]),
-/// done here against the [`Host`] seam so the recipe carries the *resolved*
-/// `KATSU_GFX_*` env (or none) — a [`Resolution::Unavailable`] is the one fatal
-/// path, failing the launch loud rather than booting GPU-less and slow (§7.2).
-fn build_recipe(
-    host: &dyn Host,
-    spec: &Spec,
-    config: &Path,
-    roots: &ResolvedRoots,
-    plan: &Plan,
-) -> Result<Recipe> {
+/// Build the flat setup + boot recipe. Pure over the [`Plan`] and spec, so the
+/// golden snapshots render it directly — every branch was already decided in
+/// [`decide`] (including the GPU resolution carried in [`Plan::gpu`]); what is
+/// emitted is unconditional, apart from the genuinely-runtime secret-presence
+/// and file-existence guards.
+fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) -> Result<Recipe> {
     let name = &plan.name;
     let state_root = roots.state_glob.join(name);
     let runtime_root = roots.runtime_glob.join(name);
@@ -656,36 +681,33 @@ fn build_recipe(
         r.line(format!("export KATSU_VSOCK_CID={cid}"));
     }
 
-    // ---- graphics: resolve the GPU role ladder and stage the KATSU_GFX_* env ----
-    // Only touched when graphics is opted in; the default (`enable=false`,
-    // `gpu=[]`) emits nothing here, byte-for-byte today's no-graphics recipe.
-    if spec.graphics.enable {
-        match gfx::resolve_gpu(&spec.graphics.gpu, host) {
-            // A usable hardware rung: hand the node + venus flag to extraArgsScript.
-            Resolution::Gpu { node, .. } => {
-                // §13.3 boundary notice — emitted ONLY on a hardware rung, because
-                // virglrenderer parses the guest's GPU command stream inside the
-                // host QEMU process exactly when one resolves. The software rung
-                // (below) keeps the full original boundary (§7.3/§13.1), so the
-                // notice would be factually wrong there. Mirrors the `sandbox:`-
-                // prefixed warnings the rest of this recipe emits to stderr.
-                r.line(
-                    "echo \"sandbox: graphics: GPU command stream parsed by virglrenderer in the \
-                     host QEMU process — host-facing attack surface widened.\" >&2",
-                );
-                r.line(format!("export KATSU_GFX_RENDERNODE={}", dq(&node)));
-                r.line("export KATSU_GFX_VENUS=1".to_string());
-            }
-            // The software rung is in-guest llvmpipe — no host render node, so no
-            // GPU env at all (extraArgsScript then emits no virtio-gpu device), and
-            // no virglrenderer in the loop ⇒ no §13 boundary notice (§7.3).
-            Resolution::Software => {}
-            // The ladder exhausted with no `software` tail: fail loud rather than
-            // silently boot GPU-less (the project's deliberate choice, §7.2).
-            Resolution::Unavailable => {
-                bail!("graphics: no usable GPU and no `software` fallback in `gpu`")
-            }
+    // ---- graphics: stage the KATSU_GFX_* env from the resolved GPU rung ----
+    // The resolution was decided once in `decide` (and recorded in instance.json);
+    // a graphics-off instance carries `None` and emits nothing here, byte-for-byte
+    // today's no-graphics recipe.
+    match &plan.gpu {
+        // A usable hardware rung: hand the node + venus flag to extraArgsScript.
+        Some(Resolution::Gpu { node, .. }) => {
+            // Security boundary notice — emitted ONLY on a hardware rung, because
+            // virglrenderer parses the guest's GPU command stream inside the host
+            // QEMU process exactly when one resolves, which widens the host-facing
+            // attack surface. The software rung keeps the full original isolation
+            // (in-guest llvmpipe, no GPU device, no virglrenderer host attack
+            // surface), so the notice would be factually wrong there. Mirrors the
+            // `sandbox:`-prefixed warnings the rest of this recipe emits to stderr.
+            r.line(
+                "echo \"sandbox: graphics: GPU command stream parsed by virglrenderer in the \
+                 host QEMU process — host-facing attack surface widened.\" >&2",
+            );
+            r.line(format!("export KATSU_GFX_RENDERNODE={}", dq(node)));
+            r.line("export KATSU_GFX_VENUS=1".to_string());
         }
+        // The software rung is in-guest llvmpipe — no host render node, so no GPU
+        // env at all (extraArgsScript then emits no virtio-gpu device), and no
+        // virglrenderer in the loop ⇒ no boundary notice (the host attack surface
+        // is unchanged from graphics-off). Graphics-off (`None`) likewise emits
+        // nothing. (`Unavailable` never reaches here — `decide` fails the launch.)
+        Some(Resolution::Software) | Some(Resolution::Unavailable) | None => {}
     }
 
     // ---- disk-image symlinks: back each volume from the persistent state dir ----
@@ -980,21 +1002,14 @@ mod tests {
             clone_mirror: true,
             seed: Seed::Fresh("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0".into()),
             prompt: None,
+            gpu: None,
         }
     }
 
     const CONFIG: &str = "/nix/store/katsuctl-sandbox-spec.json";
 
     fn render(spec: &Spec, plan: &Plan) -> String {
-        // The default host has no render nodes; the graphics-off specs every
-        // non-graphics test uses never reach the resolver, so this never errors.
-        render_on(spec, plan, &FakeHost::new())
-    }
-
-    /// [`render`] over an explicit host, so the graphics tests can inject the
-    /// render-node fixtures the GPU resolver probes.
-    fn render_on(spec: &Spec, plan: &Plan, host: &dyn Host) -> String {
-        build_recipe(host, spec, Path::new(CONFIG), &roots(), plan)
+        build_recipe(spec, Path::new(CONFIG), &roots(), plan)
             .expect("recipe should build")
             .render()
     }
@@ -1008,16 +1023,6 @@ mod tests {
             output: None,
         };
         spec
-    }
-
-    /// A host with one openable render node — enough to satisfy a hardware rung
-    /// regardless of how [`gfx::classify`] reads (or fails to read) the real
-    /// sysfs, since both `integrated` and `discrete` map to the same export.
-    fn host_with_gpu() -> FakeHost {
-        let mut host = FakeHost::new();
-        host.with_render_node("/dev/dri/renderD128")
-            .with_openable("/dev/dri/renderD128");
-        host
     }
 
     // ---- naming (pure unit tests, tier 1) ----
@@ -1369,56 +1374,70 @@ mod tests {
         ));
     }
 
-    // ---- graphics: GPU resolution + the §13.3 launch notice ----
+    // ---- graphics: GPU resolution + the launch-time boundary notice ----
 
     #[test]
     fn snapshot_agent_graphics_gpu_rung() {
-        // Graphics on with a usable, openable render node: the recipe exports
-        // KATSU_GFX_RENDERNODE + KATSU_GFX_VENUS and prints the boundary notice.
+        // A resolved hardware rung: the recipe exports KATSU_GFX_RENDERNODE +
+        // KATSU_GFX_VENUS and prints the boundary notice.
         let spec = spec_with_graphics(vec![
             crate::sandbox::spec::GpuRole::Integrated,
             crate::sandbox::spec::GpuRole::Discrete,
             crate::sandbox::spec::GpuRole::Software,
         ]);
-        insta::assert_snapshot!(render_on(
-            &spec,
-            &plan("20260627-120000-4242", false, Mode::Agent),
-            &host_with_gpu(),
-        ));
+        let mut p = plan("20260627-120000-4242", false, Mode::Agent);
+        p.gpu = Some(Resolution::Gpu {
+            node: PathBuf::from("/dev/dri/renderD128"),
+            role: crate::sandbox::spec::GpuRole::Integrated,
+            venus: true,
+        });
+        insta::assert_snapshot!(render(&spec, &p));
     }
 
     #[test]
     fn snapshot_agent_graphics_software_fallback() {
-        // Graphics on but no render node on the host: the ladder falls through to
-        // its `software` tail — the notice still fires, but no GPU env is staged.
+        // The ladder resolved to its `software` tail: in-guest llvmpipe, so no GPU
+        // env is staged and no boundary notice fires (the host attack surface is
+        // unchanged from graphics-off).
         let spec = spec_with_graphics(vec![
             crate::sandbox::spec::GpuRole::Integrated,
             crate::sandbox::spec::GpuRole::Discrete,
             crate::sandbox::spec::GpuRole::Software,
         ]);
-        insta::assert_snapshot!(render_on(
-            &spec,
-            &plan("20260627-120000-4242", false, Mode::Agent),
-            &FakeHost::new(),
-        ));
+        let mut p = plan("20260627-120000-4242", false, Mode::Agent);
+        p.gpu = Some(Resolution::Software);
+        insta::assert_snapshot!(render(&spec, &p));
     }
 
     #[test]
     fn it_errors_when_graphics_has_no_gpu_and_no_software_tail() {
-        // A GPU-less host with a `software`-less ladder must abort the launch
-        // (fail loud, never silently boot slow — §7.2), not emit a recipe.
+        // A GPU-less host with a `software`-less ladder must abort the launch in
+        // `decide` (fail loud, never silently boot slow) — before any recipe or
+        // instance.json is produced.
         let spec = spec_with_graphics(vec![
             crate::sandbox::spec::GpuRole::Integrated,
             crate::sandbox::spec::GpuRole::Discrete,
         ]);
-        let err = build_recipe(
-            &FakeHost::new(),
-            &spec,
-            Path::new(CONFIG),
+        let mut host = FakeHost::new();
+        // Get planning through port + git (project + fresh-HEAD seed); inject no
+        // render nodes, so the integrated/discrete ladder resolves to Unavailable.
+        host.with_free_port(20_042)
+            .push_run(Ok(ok_out("/home/user/project\n")))
+            .push_run(Ok(ok_out("")))
+            .push_run(Ok(ok_out("cafebabe\n")));
+        let mut rng = FakeRng::new(&[42]);
+        let err = decide(
+            &host,
+            &mut rng,
             &roots(),
-            &plan("20260627-120000-4242", false, Mode::Agent),
+            &spec,
+            false,
+            None,
+            None,
+            "20260627-120000",
+            7,
         )
-        .expect_err("no usable GPU and no software tail must fail the build");
+        .expect_err("no usable GPU and no software tail must fail planning");
         assert!(
             format!("{err:#}").contains("no usable GPU and no `software` fallback"),
             "{err:#}"
@@ -1458,17 +1477,19 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
 
-        // And the graphics-on tail (the §13.3 notice + the KATSU_GFX_* exports)
+        // And the graphics-on tail (the boundary notice + the KATSU_GFX_* exports)
         // parses too — the em-dash in the notice lives inside a quoted echo.
         let gfx_spec = spec_with_graphics(vec![
             crate::sandbox::spec::GpuRole::Integrated,
             crate::sandbox::spec::GpuRole::Software,
         ]);
-        let text = render_on(
-            &gfx_spec,
-            &plan("e-gfx", false, Mode::Agent),
-            &host_with_gpu(),
-        );
+        let mut gfx_plan = plan("e-gfx", false, Mode::Agent);
+        gfx_plan.gpu = Some(Resolution::Gpu {
+            node: PathBuf::from("/dev/dri/renderD128"),
+            role: crate::sandbox::spec::GpuRole::Integrated,
+            venus: true,
+        });
+        let text = render(&gfx_spec, &gfx_plan);
         let dir =
             std::env::temp_dir().join(format!("katsuctl-start-it-{}-gfx", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

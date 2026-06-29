@@ -3,8 +3,8 @@
 //! Replaces the shell `sandbox:status` command:
 //! the byte-sorted instance listing (`_list_instances`), the live
 //! `column -t` table, the per-instance detail view, and the
-//! secret + `/dev/vhost-vsock` preflight (`statusSecretChecks` + the vhost row,
-//! ). A bare `status` (list mode) doubles as the launch
+//! secret + `/dev/vhost-vsock` preflight (`statusSecretChecks` + the vhost row).
+//! A bare `status` (list mode) doubles as the launch
 //! prerequisite gate: it exits **nonzero** iff any declared secret is missing or
 //! `vhost-vsock` is absent.
 //!
@@ -29,7 +29,7 @@ use crate::sandbox::liveness::{self, Liveness, TurnState};
 use crate::sandbox::output::{render_table, CellStyle, Renderer, TableCell};
 use crate::sandbox::resolve::{list_instances, resolve_instance};
 use crate::sandbox::spec::{
-    load_spec, resolve_roots, ResolvedRoots, SecretSource, SecretSpec, Spec,
+    load_spec, resolve_roots, GpuRole, ResolvedRoots, SecretSource, SecretSpec, Spec,
 };
 use crate::Global;
 
@@ -43,7 +43,7 @@ enum State {
 }
 
 /// One instance's derived summary — the unit of both the list array and the
-/// detail object in `--json` (: name, state, mode, named, port, cid,
+/// detail object in `--json` (name, state, mode, named, port, cid,
 /// branch-present). `mode`/`port`/`cid` are `Option` because an instance whose
 /// `instance.json` is missing or unreadable still lists (degraded), and only
 /// agent instances carry a CID.
@@ -56,6 +56,10 @@ struct InstanceView {
     named: bool,
     port: Option<u16>,
     cid: Option<u32>,
+    /// The GPU rung the instance launched with (`integrated`/`discrete`/
+    /// `software`), or `None` when graphics is disabled (rendered as `none`).
+    /// Read from `instance.json`; absent for a degraded/unreadable instance.
+    graphics: Option<GpuRole>,
     branch_present: bool,
     /// The full per-instance liveness line — turn/agent state
     /// from `turn-state.json` plus transport freshness from `liveness.json`,
@@ -94,9 +98,20 @@ impl InstanceView {
             "ephemeral"
         }
     }
+
+    /// The `GRAPHICS` column / detail value: the resolved GPU rung the instance
+    /// launched with, or `none` when graphics is disabled.
+    fn graphics_label(&self) -> &'static str {
+        match self.graphics {
+            Some(GpuRole::Integrated) => "integrated",
+            Some(GpuRole::Discrete) => "discrete",
+            Some(GpuRole::Software) => "software",
+            None => "none",
+        }
+    }
 }
 
-// ---- liveness surfacing (the / out-of-band turn + transport line) ----
+// ---- liveness surfacing (the out-of-band turn + transport line) ----
 
 /// The compact age token (`9m`) for `then` measured from `now`, both already
 /// through the host clock seam. `None` when either is absent or unparseable
@@ -223,16 +238,17 @@ impl Preflight {
 
 /// Re-check each declared secret at its *host* source and `/dev/vhost-vsock`,
 /// pure over injected lookups so the gate decision is unit-testable without a
-/// real env or filesystem (mirrors `statusSecretChecks` + the vhost row,
-/// ).
+/// real env or filesystem (mirrors `statusSecretChecks` + the vhost row).
 ///
 /// A `FromEnv` secret passes iff its host env var is set and non-empty; a
 /// `FromFile` secret passes iff its file is readable. The `CLAUDE_CODE_OAUTH_TOKEN`
 /// hint matches the shell's special-cased `claude setup-token` guidance.
 ///
-/// When graphics are enabled, `graphics` carries the §7 resolver's verdict over
-/// the live host (resolved by the caller through the host seam, so this stays
-/// pure). It adds one `graphics` row (§12/§18): a resolved GPU rung or the
+/// When graphics are enabled, `graphics` carries the verdict of the GPU
+/// role-preference ladder resolver — which walks an ordered list of roles
+/// [integrated, discrete, software] and picks the first present+openable one —
+/// run over the live host (resolved by the caller through the host seam, so this
+/// stays pure). It adds one `graphics` preflight row: a resolved GPU rung or the
 /// `software` floor is `ok`; an exhausted ladder ([`Resolution::Unavailable`]) is
 /// `ok=false`, so the nonzero-exit gate fires exactly like a missing secret. With
 /// graphics off (`None`) no row is added. `uid` is only consumed by the
@@ -289,11 +305,11 @@ fn preflight(
         detail,
     });
 
-    // The graphics row (§12/§18), present only when graphics are enabled. The
-    // §7 ladder has already been run against the host by the caller; we just shape
-    // its verdict into a row. `Unavailable` is the only failing case — a deliberate
-    // "fail loud, never silently slow" choice (§7.2) — so it gates exactly like a
-    // missing secret.
+    // The graphics row, present only when graphics are enabled. The GPU
+    // role-preference ladder has already been run against the host by the caller;
+    // we just shape its verdict into a row. `Unavailable` is the only failing case
+    // — a deliberate "fail loud, never silently slow" choice (an exhausted ladder
+    // with no `software` tail) — so it gates exactly like a missing secret.
     if let Some(resolution) = graphics {
         let (ok, detail) = match resolution {
             Resolution::Gpu { node, role, .. } => (
@@ -320,7 +336,7 @@ fn preflight(
 }
 
 /// The real uid of the running `katsuctl` process — the operator/QEMU uid named
-/// in the `Unavailable` graphics hint (§18). Std has no `getuid`, so we read the
+/// in the `Unavailable` graphics hint. Std has no `getuid`, so we read the
 /// owner of `/proc/self` (Linux), which is exactly that uid; a missing `/proc`
 /// degrades to `0` rather than failing the gate.
 fn current_uid() -> u32 {
@@ -368,7 +384,11 @@ fn render_list(views: &[InstanceView], r: &Renderer) -> String {
     // LIVENESS is the compact out-of-band turn/agent state — the column
     // that makes a swarm's "stopped without reporting" / hung-mid-tool instances
     // scannable without attaching; `-` when no `turn-state.json` is present.
-    let headers = ["#", "INSTANCE", "STATE", "MODE", "PERSIST", "LIVENESS"];
+    // GRAPHICS is the GPU rung the instance launched with (`none` when graphics
+    // is off), so a graphics-enabled swarm is scannable at a glance.
+    let headers = [
+        "#", "INSTANCE", "STATE", "MODE", "PERSIST", "GRAPHICS", "LIVENESS",
+    ];
     let rows: Vec<Vec<TableCell>> = views
         .iter()
         .enumerate()
@@ -384,6 +404,7 @@ fn render_list(views: &[InstanceView], r: &Renderer) -> String {
                 state,
                 TableCell::styled(v.mode_label(), CellStyle::Dim),
                 TableCell::styled(v.persist_label(), CellStyle::Dim),
+                TableCell::styled(v.graphics_label(), CellStyle::Dim),
                 TableCell::styled(v.liveness_brief.as_deref().unwrap_or("-"), CellStyle::Dim),
             ]
         })
@@ -414,6 +435,7 @@ fn render_detail(v: &InstanceView, ssh: Option<&str>, console_log: &str, r: &Ren
             }
         ),
         format!("mode:       {}", v.mode_label()),
+        format!("graphics:   {}", v.graphics_label()),
     ];
     // The out-of-band liveness line: turn/agent state + transport
     // freshness, present only once the guest has written a `turn-state.json`.
@@ -466,9 +488,15 @@ fn summarize(
     // A missing/unreadable instance.json still lists (degraded): liveness and
     // branch presence are derived independently of it.
     let meta = instance::read(&roots.state_glob, name).ok();
-    let (mode, named, port, cid) = match &meta {
-        Some(i) => (Some(i.mode), i.named, Some(i.ssh_port), i.vsock_cid),
-        None => (None, false, None, None),
+    let (mode, named, port, cid, graphics) = match &meta {
+        Some(i) => (
+            Some(i.mode),
+            i.named,
+            Some(i.ssh_port),
+            i.vsock_cid,
+            i.graphics,
+        ),
+        None => (None, false, None, None, None),
     };
 
     // Out-of-band liveness: read the guest-authored `turn-state.json`
@@ -487,6 +515,7 @@ fn summarize(
         named,
         port,
         cid,
+        graphics,
         branch_present: branch_present(host, spec, roots, name),
         liveness,
         liveness_brief,
@@ -524,8 +553,7 @@ pub fn run(config: &Path, instance: Option<String>, global: Global) -> Result<()
 }
 
 /// List mode: derive every instance, run the preflight gate, render, and exit
-/// nonzero iff the preflight found a problem (the launch prerequisite gate,
-/// ).
+/// nonzero iff the preflight found a problem (the launch prerequisite gate).
 fn run_list(
     host: &impl Host,
     spec: &Spec,
@@ -541,9 +569,9 @@ fn run_list(
         .map(|name| summarize(host, spec, roots, name, now))
         .collect();
 
-    // Run the §7 GPU ladder against the live host now, so the preflight verdict
-    // is the same resolution the launch path (#036) will reach. Graphics off ⇒
-    // no resolution ⇒ no graphics row.
+    // Run the GPU role-preference ladder against the live host now, so the
+    // preflight verdict is the same resolution the launch path in start.rs will
+    // reach. Graphics off ⇒ no resolution ⇒ no graphics row.
     let graphics = spec
         .graphics
         .enable
@@ -664,6 +692,7 @@ mod tests {
             named,
             port: None,
             cid: None,
+            graphics: None,
             branch_present: false,
             liveness: None,
             liveness_brief: None,
@@ -687,7 +716,7 @@ mod tests {
 
         assert!(!has_ansi(&table), "no ANSI when color off: {table:?}");
         // Orientation columns are present.
-        for col in ["#", "INSTANCE", "STATE", "MODE", "PERSIST"] {
+        for col in ["#", "INSTANCE", "STATE", "MODE", "PERSIST", "GRAPHICS"] {
             assert!(table.contains(col), "header {col} present: {table}");
         }
         // The ssh port / vsock CID are plumbing, not list columns — they live in
@@ -708,6 +737,29 @@ mod tests {
         assert!(!rows[0].contains("2222") && !rows[0].contains("4242"));
         assert!(rows[1].contains("inst-b") && rows[1].contains("stopped"));
         assert!(rows[1].contains("interactive") && rows[1].contains("ephemeral"));
+    }
+
+    #[test]
+    fn it_renders_the_resolved_graphics_rung_per_row() {
+        let r = Renderer::new(false, false);
+        let views = vec![
+            InstanceView {
+                graphics: Some(GpuRole::Integrated),
+                ..view("gfx-i", State::Running, Some(Mode::Agent), true)
+            },
+            InstanceView {
+                graphics: Some(GpuRole::Software),
+                ..view("gfx-s", State::Running, Some(Mode::Agent), true)
+            },
+            // Graphics off (or an unreadable instance.json) renders `none`.
+            view("gfx-off", State::Stopped, Some(Mode::Interactive), false),
+        ];
+        let table = render_list(&views, &r);
+        assert!(table.contains("GRAPHICS"), "header present: {table}");
+        let row = |needle: &str| table.lines().find(|l| l.contains(needle)).unwrap();
+        assert!(row("gfx-i").contains("integrated"), "{table}");
+        assert!(row("gfx-s").contains("software"), "{table}");
+        assert!(row("gfx-off").contains("none"), "{table}");
     }
 
     #[test]
@@ -854,10 +906,10 @@ mod tests {
         assert!(bad.rows[0].detail.contains("/run/secrets/tok"));
     }
 
-    // ---- the graphics row (§12/§18), over the #035 resolver's verdict ----
+    // ---- the graphics row, over the GPU ladder resolver's verdict ----
 
     /// The single `graphics` row a preflight produced for the given resolution
-    /// (vhost-vsock always passes; no secrets), for the §18 row assertions.
+    /// (vhost-vsock always passes; no secrets), for the preflight row assertions.
     fn graphics_row(resolution: Option<&Resolution>, uid: u32) -> Option<CheckRow> {
         let pf = preflight(&[], fake_env(&[]), |_| true, true, resolution, uid);
         pf.rows.into_iter().find(|r| r.label == "graphics")
@@ -878,7 +930,8 @@ mod tests {
 
     #[test]
     fn it_renders_the_resolved_gpu_row_verbatim_per_18() {
-        // `Gpu` ⇒ ok, naming the resolved role + node (§18 line 1).
+        // `Gpu` ⇒ ok, naming the resolved role + node ("will render on <role>:
+        // <node>").
         let res = Resolution::Gpu {
             node: PathBuf::from("/dev/dri/renderD128"),
             role: crate::sandbox::spec::GpuRole::Integrated,
@@ -894,7 +947,8 @@ mod tests {
 
     #[test]
     fn it_renders_the_software_fallback_row_verbatim_per_18() {
-        // `Software` ⇒ ok, the fallback phrasing (§18 line 2).
+        // `Software` ⇒ ok, the fallback phrasing ("software fallback — no usable
+        // GPU").
         let row = graphics_row(Some(&Resolution::Software), 1000).expect("a graphics row");
         assert!(row.ok, "the software floor passes");
         assert_eq!(row.detail, "ok (software fallback — no usable GPU)");
@@ -902,8 +956,9 @@ mod tests {
 
     #[test]
     fn it_renders_the_unavailable_row_verbatim_and_gates_nonzero_per_18() {
-        // `Unavailable` ⇒ ok=false naming the uid + the `render`-group hint (§18
-        // line 3), and it flows through `problems()`/the nonzero exit exactly like
+        // `Unavailable` ⇒ ok=false naming the uid + the `render`-group hint ("no
+        // render node openable by uid <N>; add yourself to the 'render' group"),
+        // and it flows through `problems()`/the nonzero exit exactly like
         // a missing secret.
         let pf = preflight(
             &[],
@@ -1016,7 +1071,7 @@ mod tests {
         let json = serde_json::to_string(&v).expect("serialize");
         assert_eq!(
             json,
-            r#"{"name":"inst-x","state":"running","mode":"agent","named":true,"port":2222,"cid":4242,"branchPresent":true}"#
+            r#"{"name":"inst-x","state":"running","mode":"agent","named":true,"port":2222,"cid":4242,"graphics":null,"branchPresent":true}"#
         );
     }
 
@@ -1027,6 +1082,7 @@ mod tests {
         assert!(json.contains(r#""mode":null"#), "{json}");
         assert!(json.contains(r#""port":null"#), "{json}");
         assert!(json.contains(r#""cid":null"#), "{json}");
+        assert!(json.contains(r#""graphics":null"#), "{json}");
         assert!(json.contains(r#""state":"stopped""#), "{json}");
     }
 
@@ -1163,7 +1219,7 @@ mod tests {
         }
     }
 
-    // ---- liveness surfacing (the // out-of-band line) ----
+    // ---- liveness surfacing (the out-of-band line) ----
 
     use crate::sandbox::liveness::Phase;
 
@@ -1192,7 +1248,7 @@ mod tests {
 
     #[test]
     fn it_surfaces_an_unattended_ended_unreported_turn() {
-        // verdict, persisted: ended 14m ago with nobody driving.
+        // The unattended verdict, persisted: ended 14m ago with nobody driving.
         let state = turn_state(
             Phase::EndedUnreported,
             Some(3),
@@ -1245,7 +1301,7 @@ mod tests {
 
     #[test]
     fn it_distinguishes_a_dead_server_from_an_idle_one_via_qmp() {
-        //: a stale in-flight file is ambiguous on its own. QMP corroborates —
+        // A stale in-flight file is ambiguous on its own. QMP corroborates —
         // VM up ⇒ "no active stream" (idle / hung agent, server alive); VM down ⇒
         // "vm stopped" (the server is gone, which is why the file went stale).
         let state = turn_state(Phase::InFlight, Some(3), None, "2026-06-28T11:46:00Z");

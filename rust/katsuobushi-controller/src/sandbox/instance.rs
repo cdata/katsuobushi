@@ -1,10 +1,9 @@
 //! Per-instance state — `instance.json`.
 //!
 //! Today the runner scatters scalar per-instance metadata across tiny files
-//! (`instance`, `mode`, `vsock-cid`, `ssh-port`, and the `.named` marker —
-//!, 1343-1344, 1365, 1493). This folds them into a
-//! single versioned `instance.json` that `katsuctl` owns and writes, living at
-//! `<stateGlob>/<name>/instance.json`.
+//! (`instance`, `mode`, `vsock-cid`, `ssh-port`, and the `.named` marker). This
+//! folds them into a single versioned `instance.json` that `katsuctl` owns and
+//! writes, living at `<stateGlob>/<name>/instance.json`.
 //!
 //! Rust owns the schema (Nix/guest produce JSON to match), so every struct is
 //! `#[serde(deny_unknown_fields)]` and [`Instance::instance_version`] is checked
@@ -12,23 +11,23 @@
 //! as the spec loader does (no migration — sandboxes are ephemeral).
 //!
 //! Non-scalar artifacts stay as real files/dirs and are **not** modelled here:
-//! `authorized_keys`, `console.log`, `sync.git/`, and the
-//! disk images. Guest-side readers move to `instance.json` separately
-//!. Liveness is never stored — it is derived from QMP (`isRunning`,
-//! ).
+//! `authorized_keys`, `console.log`, `sync.git/`, and the disk images. Liveness
+//! is never stored — it is derived from QMP (`isRunning`).
 
-// Read/write land ahead of the subcommands that consume them (
-// phasing), so they read as dead code until each command migrates.
+// Some read/write helpers are consumed only by specific subcommands, so a few
+// read as dead code in isolation.
 #![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::sandbox::spec::GpuRole;
+
 /// The `instance.json` schema version this build of `katsuctl` understands.
 /// Bumped in lockstep with any reader/writer; [`read`] fails loud on any
-/// mismatch (— no multi-version support, no migration).
-pub const SUPPORTED_INSTANCE_VERSION: u32 = 1;
+/// mismatch — no multi-version support, no migration.
+pub const SUPPORTED_INSTANCE_VERSION: u32 = 2;
 
 /// The mode a sandbox instance was started in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +58,12 @@ pub struct Instance {
     pub ssh_port: u16,
     /// The allocated vsock CID — agent mode only, so `None` otherwise.
     pub vsock_cid: Option<u32>,
+    /// The GPU rung this instance resolved to at launch (`integrated`,
+    /// `discrete`, or `software`); `None` when graphics is disabled. Recorded so
+    /// `sandbox:status` can show what the instance actually booted with. Omitted
+    /// from the JSON when `None` (graphics-off instances stay byte-identical).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphics: Option<GpuRole>,
 }
 
 /// The `instance.json` path for `name` under the durable state root `state_dir`
@@ -148,6 +153,7 @@ mod tests {
             named: false,
             ssh_port: 2222,
             vsock_cid: Some(4242),
+            graphics: None,
         }
     }
 
@@ -177,6 +183,31 @@ mod tests {
         assert_eq!(read_back.mode, Mode::Interactive);
         assert!(read_back.named);
         assert_eq!(read_back.vsock_cid, None);
+    }
+
+    #[test]
+    fn it_round_trips_the_resolved_graphics_rung() {
+        // A graphics instance records its resolved rung; it round-trips and
+        // serializes as the lowercase token.
+        let dir = TempDir::new("graphics");
+        let instance = Instance {
+            graphics: Some(GpuRole::Integrated),
+            ..agent_instance()
+        };
+        write(dir.path(), &instance).expect("write should succeed");
+        let read_back = read(dir.path(), &instance.name).expect("read should succeed");
+        assert_eq!(read_back.graphics, Some(GpuRole::Integrated));
+
+        let json = serde_json::to_string(&instance).expect("serialize");
+        assert!(json.contains("\"graphics\":\"integrated\""), "json: {json}");
+
+        // A graphics-off instance omits the key entirely (byte-identical to a
+        // pre-graphics instance.json apart from the version).
+        let off = serde_json::to_string(&agent_instance()).expect("serialize");
+        assert!(
+            !off.contains("graphics"),
+            "graphics-off omits the key: {off}"
+        );
     }
 
     #[test]

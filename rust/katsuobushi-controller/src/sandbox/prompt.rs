@@ -425,7 +425,7 @@ where
             reported,
         }) if id == turn_id => {
             if !reported {
-                //: stopped without a terminal report — warn.
+                // Stopped without a terminal report — warn.
                 sink(DriveEvent::Stopped(turn_id))?;
             }
             return Ok(LineFlow::Break);
@@ -725,12 +725,13 @@ mod tests {
     /// An agent `Instance` with a CID (the prompt-able shape).
     fn agent_instance(name: &str, named: bool) -> Instance {
         Instance {
-            instance_version: 1,
+            instance_version: crate::sandbox::instance::SUPPORTED_INSTANCE_VERSION,
             name: name.to_string(),
             mode: Mode::Agent,
             named,
             ssh_port: 2222,
             vsock_cid: Some(4242),
+            graphics: None,
         }
     }
 
@@ -1064,7 +1065,7 @@ mod tests {
 
     #[test]
     fn it_renders_a_stopped_warning_on_turn_completed_unreported() {
-        //: `TurnCompleted{reported:false}` for our turn → a single `Stopped`
+        // `TurnCompleted{reported:false}` for our turn → a single `Stopped`
         // verdict, then a clean break (not an error).
         let (result, events, _, _) = drive_over_canned(
             "go",
@@ -1394,8 +1395,8 @@ mod tests {
 
     #[test]
     fn it_passes_the_gate_at_once_on_a_latched_session_ready_replay() {
-        // The server latches `SessionReady` and replays it on every control connect
-        //, so a prompt to an already-armed agent sees it as the very first
+        // The server latches `SessionReady` and replays it on every control connect,
+        // so a prompt to an already-armed agent sees it as the very first
         // line — the gate clears with ~no wait even though it is seconds-wide.
         let watchdog = Watchdog {
             ready_gate: Duration::from_secs(30),

@@ -2,8 +2,8 @@
 //!
 //! Nix renders a single JSON instance spec at flake-eval time (`builtins.toJSON`)
 //! and hands it to `katsuctl` via `--config <path>`; these types are the
-//! authoritative schema (Rust owns the schema, Nix produces JSON to match,
-//! ). Every struct is `#[serde(deny_unknown_fields)]` so a field added
+//! authoritative schema (Rust owns the schema, Nix produces JSON to match).
+//! Every struct is `#[serde(deny_unknown_fields)]` so a field added
 //! on the Nix side but not here fails loudly rather than being silently dropped,
 //! and [`Spec::spec_version`] is checked on load so a stale `nix develop` shell
 //! fails loud with a "rebuild your devshell" message instead of misbehaving.
@@ -14,12 +14,12 @@
 #![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// The spec schema version this build of `katsuctl` understands. Bumped in
 /// lockstep with the Nix renderer; [`load_spec`] fails loud on any mismatch
-/// (— no multi-version support, no migration).
+/// — no multi-version support, no migration.
 pub const SUPPORTED_SPEC_VERSION: u32 = 3;
 
 /// The complete Nix-rendered instance spec — the one source of truth for
@@ -29,7 +29,7 @@ pub const SUPPORTED_SPEC_VERSION: u32 = 3;
 pub struct Spec {
     /// Schema version; checked against [`SUPPORTED_SPEC_VERSION`] on load.
     pub spec_version: u32,
-    /// e.g. `"cdata/katsuobushi"` (:30).
+    /// e.g. `"cdata/katsuobushi"`.
     pub project_id: String,
     /// The unprivileged in-guest user, e.g. `"agent"`.
     pub agent_user: String,
@@ -46,7 +46,7 @@ pub struct Spec {
     pub disk_images: Vec<String>,
     /// `validatedContext` relative paths to stage into the instance.
     pub context: Vec<String>,
-    /// Declared secrets to stage to the runtime tmpfs (:90).
+    /// Declared secrets to stage to the runtime tmpfs.
     pub secrets: Vec<SecretSpec>,
     /// vsock port for the control channel (`protocol::VSOCK_PORT`, 1024).
     pub vsock_port: u32,
@@ -80,8 +80,7 @@ pub struct Spec {
 
 /// State/runtime directory roots, carrying the `$XDG_*`/`$HOME` templates the
 /// shell expands at runtime rather than baked absolute paths — `katsuctl` does
-/// the same expansion in Rust via [`resolve_roots`] (note;
-///, 1604-1605).
+/// the same expansion in Rust via [`resolve_roots`].
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Roots {
@@ -133,25 +132,30 @@ pub enum SecretSource {
 }
 
 /// Graphics capability for the instance. Absent or `enable=false` ⇒ no GPU
-/// device and no compositor — byte-for-byte today's no-graphics behavior
-/// (§17/§18). Mirrors the camelCase / `deny_unknown_fields` conventions of
+/// device and no compositor — byte-for-byte today's no-graphics behavior.
+/// Mirrors the camelCase / `deny_unknown_fields` conventions of
 /// [`SecretSpec`].
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GraphicsSpec {
     /// Opt-in switch; `false` (the default) is exactly today's behavior.
     pub enable: bool,
-    /// GPU role-preference ladder; `[]` when disabled (§7).
+    /// GPU role-preference ladder, ordered `[integrated, discrete, software]`;
+    /// `[]` when disabled.
     #[serde(default)]
     pub gpu: Vec<GpuRole>,
-    /// Virtual output geometry; `None` ⇒ default `1920x1080@60` (§19).
+    /// Virtual output geometry; `None` ⇒ default `1920x1080@60`.
     #[serde(default)]
     pub output: Option<Output>,
 }
 
-/// A GPU role rung in the selection ladder (§7). `software` is also a security
-/// rung (§7.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// A GPU role rung in the selection ladder (`integrated`/`discrete`/`software`,
+/// in that preference order). `software` is also a security rung — llvmpipe,
+/// no GPU device, no host attack surface.
+///
+/// `Serialize` so the resolved rung can be persisted in `instance.json` (the
+/// `graphics` field) and surfaced by `sandbox:status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GpuRole {
     Integrated,
@@ -161,7 +165,7 @@ pub enum GpuRole {
 
 impl GpuRole {
     /// The lowercase rung name (`integrated`/`discrete`/`software`) — the same
-    /// token the config uses, surfaced in the §18 preflight row
+    /// token the config uses, surfaced in the preflight row
     /// (`will render on <role>: <node>`).
     pub fn as_str(self) -> &'static str {
         match self {
@@ -215,9 +219,8 @@ fn from_json_bytes(bytes: &[u8]) -> Result<Spec> {
 }
 
 /// Expand the `$XDG_*`/`$HOME` templates in `roots` against the real process
-/// environment (note). Mirrors the shell's
-/// `${XDG_STATE_HOME:-$HOME/.local/state}` / `${XDG_RUNTIME_DIR:-/tmp}` fallbacks
-/// (1604-1605).
+/// environment. Mirrors the shell's
+/// `${XDG_STATE_HOME:-$HOME/.local/state}` / `${XDG_RUNTIME_DIR:-/tmp}` fallbacks.
 pub fn resolve_roots(roots: &Roots) -> Result<ResolvedRoots> {
     resolve_roots_with(roots, |k| std::env::var(k).ok())
 }
@@ -426,7 +429,7 @@ mod tests {
         );
     }
 
-    /// Splice the §18 graphics-on block onto the example spec.
+    /// Splice the graphics-on block onto the example spec.
     fn with_graphics(block: &str) -> String {
         EXAMPLE_SPEC_JSON.replace(
             r#""stopGraceMs": 1500"#,
@@ -436,7 +439,7 @@ mod tests {
 
     #[test]
     fn it_parses_the_graphics_on_example() {
-        // The exact §18 graphics-on shape (version 3).
+        // The exact graphics-on shape (version 3).
         let json = with_graphics(
             r#"{ "enable": true,
                  "gpu": ["integrated", "discrete", "software"],
