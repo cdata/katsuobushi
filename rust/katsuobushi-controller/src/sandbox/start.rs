@@ -29,6 +29,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::sandbox::emit::{self, Recipe};
+use crate::sandbox::gfx::{self, Resolution};
 use crate::sandbox::host::{pick_cid, pick_port, Host, HostImpl, OsRng, Rng};
 use crate::sandbox::instance::{self, Instance, Mode, SUPPORTED_INSTANCE_VERSION};
 use crate::sandbox::spec::{load_spec, resolve_roots, ResolvedRoots, SecretSource, Spec};
@@ -120,7 +121,7 @@ pub fn run(
 
     let script_dir = emit::script_runtime_dir();
     emit::emit(&host, &script_dir, &mut rng, || {
-        Ok(build_recipe(&spec, config, &roots, &plan))
+        build_recipe(&host, &spec, config, &roots, &plan)
     })?;
     Ok(())
 }
@@ -469,7 +470,18 @@ fn sq(s: &str) -> String {
 /// spec, so the golden snapshots render it directly — every branch was already
 /// decided in [`decide`]; what is emitted is unconditional (apart from the
 /// genuinely-runtime secret-presence and file-existence guards).
-fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) -> Recipe {
+///
+/// The lone probe is the GPU role-ladder resolution ([`gfx::resolve_gpu`]),
+/// done here against the [`Host`] seam so the recipe carries the *resolved*
+/// `KATSU_GFX_*` env (or none) — a [`Resolution::Unavailable`] is the one fatal
+/// path, failing the launch loud rather than booting GPU-less and slow (§7.2).
+fn build_recipe(
+    host: &dyn Host,
+    spec: &Spec,
+    config: &Path,
+    roots: &ResolvedRoots,
+    plan: &Plan,
+) -> Result<Recipe> {
     let name = &plan.name;
     let state_root = roots.state_glob.join(name);
     let runtime_root = roots.runtime_glob.join(name);
@@ -644,6 +656,35 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
         r.line(format!("export KATSU_VSOCK_CID={cid}"));
     }
 
+    // ---- graphics: resolve the GPU role ladder and stage the KATSU_GFX_* env ----
+    // Only touched when graphics is opted in; the default (`enable=false`,
+    // `gpu=[]`) emits nothing here, byte-for-byte today's no-graphics recipe.
+    if spec.graphics.enable {
+        // §13.3 boundary notice: virglrenderer parses the guest's GPU command
+        // stream inside the host QEMU process, so enabling graphics widens the
+        // host-facing attack surface. Stated plainly at launch, mirroring the
+        // `sandbox:`-prefixed warnings the rest of this recipe emits to stderr.
+        r.line(
+            "echo \"sandbox: graphics: GPU command stream parsed by virglrenderer in the host \
+             QEMU process — host-facing attack surface widened.\" >&2",
+        );
+        match gfx::resolve_gpu(&spec.graphics.gpu, host) {
+            // A usable hardware rung: hand the node + venus flag to extraArgsScript.
+            Resolution::Gpu { node, .. } => {
+                r.line(format!("export KATSU_GFX_RENDERNODE={}", dq(&node)));
+                r.line("export KATSU_GFX_VENUS=1".to_string());
+            }
+            // The software rung is in-guest llvmpipe — no host render node, so no
+            // GPU env at all (extraArgsScript then emits no virtio-gpu device).
+            Resolution::Software => {}
+            // The ladder exhausted with no `software` tail: fail loud rather than
+            // silently boot GPU-less (the project's deliberate choice, §7.2).
+            Resolution::Unavailable => {
+                bail!("graphics: no usable GPU and no `software` fallback in `gpu`")
+            }
+        }
+    }
+
     // ---- disk-image symlinks: back each volume from the persistent state dir ----
     r.blank()
         .comment("Back each guest disk image from the persistent state dir via a runtime symlink.");
@@ -670,7 +711,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
         ),
     }
 
-    r
+    Ok(r)
 }
 
 /// `Mode` as the lowercase word the recipe comments and `instance.json` use.
@@ -942,7 +983,38 @@ mod tests {
     const CONFIG: &str = "/nix/store/katsuctl-sandbox-spec.json";
 
     fn render(spec: &Spec, plan: &Plan) -> String {
-        build_recipe(spec, Path::new(CONFIG), &roots(), plan).render()
+        // The default host has no render nodes; the graphics-off specs every
+        // non-graphics test uses never reach the resolver, so this never errors.
+        render_on(spec, plan, &FakeHost::new())
+    }
+
+    /// [`render`] over an explicit host, so the graphics tests can inject the
+    /// render-node fixtures the GPU resolver probes.
+    fn render_on(spec: &Spec, plan: &Plan, host: &dyn Host) -> String {
+        build_recipe(host, spec, Path::new(CONFIG), &roots(), plan)
+            .expect("recipe should build")
+            .render()
+    }
+
+    /// A spec with graphics opted in over the given GPU role ladder.
+    fn spec_with_graphics(gpu: Vec<crate::sandbox::spec::GpuRole>) -> Spec {
+        let mut spec = spec_with(vec![], vec![], false);
+        spec.graphics = crate::sandbox::spec::GraphicsSpec {
+            enable: true,
+            gpu,
+            output: None,
+        };
+        spec
+    }
+
+    /// A host with one openable render node — enough to satisfy a hardware rung
+    /// regardless of how [`gfx::classify`] reads (or fails to read) the real
+    /// sysfs, since both `integrated` and `discrete` map to the same export.
+    fn host_with_gpu() -> FakeHost {
+        let mut host = FakeHost::new();
+        host.with_render_node("/dev/dri/renderD128")
+            .with_openable("/dev/dri/renderD128");
+        host
     }
 
     // ---- naming (pure unit tests, tier 1) ----
@@ -1294,6 +1366,62 @@ mod tests {
         ));
     }
 
+    // ---- graphics: GPU resolution + the §13.3 launch notice ----
+
+    #[test]
+    fn snapshot_agent_graphics_gpu_rung() {
+        // Graphics on with a usable, openable render node: the recipe exports
+        // KATSU_GFX_RENDERNODE + KATSU_GFX_VENUS and prints the boundary notice.
+        let spec = spec_with_graphics(vec![
+            crate::sandbox::spec::GpuRole::Integrated,
+            crate::sandbox::spec::GpuRole::Discrete,
+            crate::sandbox::spec::GpuRole::Software,
+        ]);
+        insta::assert_snapshot!(render_on(
+            &spec,
+            &plan("20260627-120000-4242", false, Mode::Agent),
+            &host_with_gpu(),
+        ));
+    }
+
+    #[test]
+    fn snapshot_agent_graphics_software_fallback() {
+        // Graphics on but no render node on the host: the ladder falls through to
+        // its `software` tail — the notice still fires, but no GPU env is staged.
+        let spec = spec_with_graphics(vec![
+            crate::sandbox::spec::GpuRole::Integrated,
+            crate::sandbox::spec::GpuRole::Discrete,
+            crate::sandbox::spec::GpuRole::Software,
+        ]);
+        insta::assert_snapshot!(render_on(
+            &spec,
+            &plan("20260627-120000-4242", false, Mode::Agent),
+            &FakeHost::new(),
+        ));
+    }
+
+    #[test]
+    fn it_errors_when_graphics_has_no_gpu_and_no_software_tail() {
+        // A GPU-less host with a `software`-less ladder must abort the launch
+        // (fail loud, never silently boot slow — §7.2), not emit a recipe.
+        let spec = spec_with_graphics(vec![
+            crate::sandbox::spec::GpuRole::Integrated,
+            crate::sandbox::spec::GpuRole::Discrete,
+        ]);
+        let err = build_recipe(
+            &FakeHost::new(),
+            &spec,
+            Path::new(CONFIG),
+            &roots(),
+            &plan("20260627-120000-4242", false, Mode::Agent),
+        )
+        .expect_err("no usable GPU and no software tail must fail the build");
+        assert!(
+            format!("{err:#}").contains("no usable GPU and no `software` fallback"),
+            "{err:#}"
+        );
+    }
+
     // ---- end-to-end: the emitted recipe is exec-able under bash ----
 
     #[test]
@@ -1326,5 +1454,32 @@ mod tests {
             assert!(status.success(), "recipe must parse under bash:\n{text}");
             let _ = std::fs::remove_dir_all(&dir);
         }
+
+        // And the graphics-on tail (the §13.3 notice + the KATSU_GFX_* exports)
+        // parses too — the em-dash in the notice lives inside a quoted echo.
+        let gfx_spec = spec_with_graphics(vec![
+            crate::sandbox::spec::GpuRole::Integrated,
+            crate::sandbox::spec::GpuRole::Software,
+        ]);
+        let text = render_on(
+            &gfx_spec,
+            &plan("e-gfx", false, Mode::Agent),
+            &host_with_gpu(),
+        );
+        let dir =
+            std::env::temp_dir().join(format!("katsuctl-start-it-{}-gfx", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("start.sh");
+        std::fs::write(&path, &text).unwrap();
+        let status = Command::new("bash")
+            .arg("-n")
+            .arg(&path)
+            .status()
+            .expect("bash -n");
+        assert!(
+            status.success(),
+            "graphics recipe must parse under bash:\n{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
