@@ -5,6 +5,52 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.2.1] — 2026-06-28
+
+Sandbox **liveness**: the host and guest now agree on when a turn started,
+finished, or silently died — closing the first-turn race and surfacing
+unreported hangs. An agent-mode VM emits heartbeats and lifecycle edges, and the
+guest persists turn state to the share so `sandbox:status` can report it
+out-of-band, even with nothing attached. No action for devshell users beyond
+rebuilding (the instance spec bumps to `specVersion 2`); see
+[`MIGRATING.md`](MIGRATING.md#021).
+
+### Added
+
+- **Turn/transport liveness machinery.** The guest controller runs a per-turn
+  state machine and writes a durable `turn-state.json` to the share on every
+  transition (`idle` → `in-flight` → `ended-ok` / `ended-unreported`), plus a
+  periodic heartbeat. A `report hook <event>` bridge wires Claude Code's `Stop`,
+  `SessionStart`, and `UserPromptSubmit` hooks (managed-settings tier) into that
+  machine.
+- **Host `drive` watchdog.** `sandbox:prompt` now runs a deadline-aware loop:
+  ack-and-resend of an undelivered first turn, a heartbeat-deadline that detects
+  a dead transport, a one-shot progress-stall notice, and a pre-send ready-gate
+  that closes the first-turn race — a prompt to a just-booted instance no longer
+  lands in the arming gap. Heartbeats are silent, so a backgrounded drive is
+  never woken by a tick, and a monotonic, persisted `turn_id` makes resends safe.
+- **`sandbox:status` liveness line.** Status reads `turn-state.json` (and the
+  host-written `liveness.json`) to show per-instance turn/transport state with no
+  connection — e.g. `turn 3 ended-unreported 14m ago · no active stream` —
+  corroborated against QMP.
+- **Seven liveness tunables** (`heartbeatSecs`, `heartbeatMiss`,
+  `progressStallSecs`, `deliveryDeadlineSecs`, `deliveryRetries`, `readyGateSecs`,
+  `stopGraceMs`), Nix-driven from one source into both the spec and the guest env.
+
+### Changed
+
+- **The instance spec is now `specVersion 2`** (carrying the liveness tunables);
+  a stale v1 spec is rejected loudly. Rebuild your dev shell so it re-renders.
+
+### Fixed
+
+- **The per-instance share root is now guest-writable**, so the guest controller
+  can create `turn-state.json` on a real boot. The `mapped-xattr` 9p share left
+  the root root-owned; the launch recipe now opens it `a+rwX`, as it already did
+  for `sync.git`.
+- **`liveness.json` is written atomically** (temp + rename), so `sandbox:status`
+  never reads a torn record.
+
 ## [0.2.0] — 2026-06-27
 
 The host side of the sandbox is rewritten from an unmaintainable pile of untested

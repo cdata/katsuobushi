@@ -8,6 +8,22 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.2.1
+
+### Sandbox liveness — rebuild your dev shell
+
+Agent-mode sandboxes gain turn/transport liveness: heartbeats, a durable
+`turn-state.json` on the share, a host watchdog with ack-and-resend and a
+ready-gate, and a `sandbox:status` liveness line. It is additive, so there is
+**no action for devshell users** — except that the instance spec bumps to
+`specVersion 2`, and a stale v1 spec is now rejected loudly. Run `nix develop`
+(or otherwise rebuild your dev shell) so the spec re-renders; no config changes
+are required.
+
+The seven liveness knobs (`heartbeatSecs`, `heartbeatMiss`, `progressStallSecs`,
+`deliveryDeadlineSecs`, `deliveryRetries`, `readyGateSecs`, `stopGraceMs`) ship
+with sensible defaults and need no consumer action.
+
 ## 0.2.0
 
 ### Host sandbox control is now `katsuctl` — `sandbox:*` behavior is unchanged
