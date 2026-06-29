@@ -7,6 +7,7 @@ use anyhow::Result;
 mod attach;
 pub mod emit;
 mod fetch;
+pub mod gfx;
 pub mod host;
 pub mod instance;
 pub mod liveness;
