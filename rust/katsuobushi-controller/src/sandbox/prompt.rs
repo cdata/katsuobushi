@@ -54,11 +54,14 @@ const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_CAP: Duration = Duration::from_secs(2);
 
 /// The host watchdog's three deadlines plus the resend budget (design
-/// /sandbox-liveness.md §8, §18), resolved from the spec tunables. Carried into
-/// [`drive`] so its `select!` timers are driven by data, not magic numbers — and
-/// so a test can shrink them.
+/// /sandbox-liveness.md §8, §18) and the phase-0 ready-gate bound, resolved from
+/// the spec tunables. Carried into [`drive`] so its `select!` timers are driven by
+/// data, not magic numbers — and so a test can shrink them.
 #[derive(Debug, Clone, Copy)]
 struct Watchdog {
+    /// `readyGateSecs`: how long [`drive`]'s phase-0 ready-gate waits for the
+    /// guest's `SessionReady` before sending the first `Prompt` anyway (§7.1).
+    ready_gate: Duration,
     /// `heartbeatSecs * heartbeatMiss`: no `Heartbeat` within this window ⇒ the
     /// transport is dead (error).
     heartbeat_deadline: Duration,
@@ -76,6 +79,7 @@ impl Watchdog {
     /// Resolve the deadlines from the Nix-rendered spec tunables (design §18).
     fn from_spec(spec: &Spec) -> Self {
         Self {
+            ready_gate: Duration::from_secs(spec.ready_gate_secs),
             heartbeat_deadline: Duration::from_secs(
                 spec.heartbeat_secs
                     .saturating_mul(u64::from(spec.heartbeat_miss)),
@@ -347,6 +351,95 @@ fn connect_with_retry(
     unreachable!("the loop returns on the final attempt")
 }
 
+/// Whether the phase-1 stream loop should keep streaming or break on a terminal.
+/// Returned by [`handle_phase1_line`] so the same line-handling serves both a
+/// stashed ready-gate line and the `select!` loop's stream reads.
+enum LineFlow {
+    Continue,
+    Break,
+}
+
+/// Handle one decoded guest line in the phase-1 stream loop (design §8/§16),
+/// mutating the watchdog state in place and surfacing events through `sink`:
+///
+/// - `Heartbeat` is **silent** — reset `last_hb` + a throttled (≤1/s) `touch()`
+///   of `liveness.json` (§8.1), no render.
+/// - a `working`/`info` `Report` resets the stall timer, (re)arms the one-shot
+///   notice, and counts as the implicit delivery ack (§7.2 fallback).
+/// - a `done`/`blocked` `Report` relays then [`LineFlow::Break`]s (clean terminal).
+/// - `TurnAccepted`/`TurnCompleted` for *this* `turn_id` ack / terminate (the
+///   latter warning via `Stopped` when `reported = false`, §6.2).
+/// - everything else is tolerated/diagnostic (a per-connect `ready`, a late
+///   `SessionReady`, stale-`turn_id` lifecycle, an unknown variant, undecodable
+///   bytes) — none reach the orchestrator.
+///
+/// Factored out of the `select!` arm so a line stashed by the phase-0 ready-gate
+/// (a fast agent's first report) is fed through the *identical* logic, never lost.
+#[allow(clippy::too_many_arguments)]
+fn handle_phase1_line<Sink, Touch>(
+    line: &str,
+    turn_id: u64,
+    sink: &mut Sink,
+    touch: &mut Touch,
+    last_hb: &mut Instant,
+    last_prog: &mut Instant,
+    last_touch: &mut Option<Instant>,
+    accepted: &mut bool,
+    stall_surfaced: &mut bool,
+) -> Result<LineFlow>
+where
+    Sink: FnMut(DriveEvent) -> Result<()>,
+    Touch: FnMut(),
+{
+    match serde_json::from_str::<GuestMessage>(line) {
+        Ok(GuestMessage::Heartbeat { .. }) => {
+            // §8.1 invariant: SILENT — reset the deadline and a throttled (≤1/s)
+            // liveness touch only. No render, no print.
+            *last_hb = Instant::now();
+            let due =
+                last_touch.is_none_or(|t| last_hb.duration_since(t) >= Duration::from_secs(1));
+            if due {
+                touch();
+                *last_touch = Some(*last_hb);
+            }
+        }
+        Ok(GuestMessage::Report(report)) => match report.status {
+            Status::Working | Status::Info => {
+                // Progress: reset the stall timer, (re)arm the one-shot notice, and
+                // treat it as the implicit delivery ack (§7.2 fallback).
+                *last_prog = Instant::now();
+                *stall_surfaced = false;
+                *accepted = true;
+                sink(DriveEvent::Report(&report))?;
+            }
+            Status::Done | Status::Blocked => {
+                sink(DriveEvent::Report(&report))?;
+                return Ok(LineFlow::Break); // clean terminal (§8)
+            }
+        },
+        Ok(GuestMessage::TurnAccepted { turn_id: id }) if id == turn_id => {
+            *accepted = true;
+        }
+        Ok(GuestMessage::TurnCompleted {
+            turn_id: id,
+            reported,
+        }) if id == turn_id => {
+            if !reported {
+                // §6.2: stopped without a terminal report — warn.
+                sink(DriveEvent::Stopped(turn_id))?;
+            }
+            return Ok(LineFlow::Break);
+        }
+        // Tolerated/diagnostic — none reach the orchestrator: a per-connect `ready`,
+        // a late `SessionReady`, lifecycle for a stale `turn_id`, an unknown newer
+        // variant, or undecodable bytes.
+        Ok(GuestMessage::Ready) => eprintln!("· guest ready"),
+        Ok(_) => {}
+        Err(e) => eprintln!("· undecodable guest line: {e}"),
+    }
+    Ok(LineFlow::Continue)
+}
+
 /// The host watchdog (design/sandbox-liveness.md §8, §16). Sends `Prompt{turn_id}`
 /// over `stream`, then runs a `select!` loop over the guest line stream plus three
 /// deadline timers, until a terminal condition:
@@ -363,8 +456,16 @@ fn connect_with_retry(
 /// `touch()` of `liveness.json` — and reaches the orchestrator as zero bytes
 /// (§8.1). Terminal breaks: a `done`/`blocked` `Report`, `TurnCompleted{true}`
 /// (clean), or `TurnCompleted{false}` (the §6.2 `Stopped` warning). EOF (`None`)
-/// is a transport-closed-mid-turn `Err`. Excludes the §7.1 ready-gate (that is
-/// #029). Generic over the transport so a test drives it with an in-memory duplex.
+/// is a transport-closed-mid-turn `Err`.
+///
+/// A **phase-0 ready-gate** (§7.1, #029) precedes the send: `drive` waits up to
+/// `ready_gate` for the guest's `SessionReady` — latched and replayed on each
+/// control connect (#026), so an already-armed agent passes instantly — before
+/// the first `Prompt`, tolerating `Ready`/`Heartbeat` and stashing any other line
+/// (the agent is already moving) into phase-1 so it is not lost. The gate elapsing
+/// proceeds anyway; the §7.2 ack-and-resend is the delivery guarantee. `Ready` is
+/// thereby demoted to "transport accepted" — it no longer authorizes a prompt.
+/// Generic over the transport so a test drives it with an in-memory duplex.
 async fn drive<S, Sink, Touch>(
     stream: S,
     turn_id: u64,
@@ -389,18 +490,64 @@ where
         line.push(b'\n');
         line
     };
-    write_half
-        .write_all(&prompt_line)
-        .await
-        .context("send prompt")?;
-    write_half.flush().await.ok();
 
     let Watchdog {
+        ready_gate,
         heartbeat_deadline,
         progress_deadline,
         delivery_deadline,
         delivery_retries,
     } = watchdog;
+
+    // Phase 0: the bounded ready-gate (§7.1, #029). Wait up to `ready_gate` for the
+    // guest's `SessionReady` — latched and replayed on each control connect (#026),
+    // so a prompt to an already-armed agent passes instantly, while one right after
+    // boot waits for real arming (closing the §2 startup race). `Ready`/`Heartbeat`
+    // mean "transport up", not "agent armed" — consume and keep waiting; any other
+    // line means the agent is already producing turn output, so stash it for phase-1
+    // (never lost) and stop waiting. The gate elapsing sends anyway — #027's
+    // ack-and-resend covers a still-unarmed agent.
+    let gate_deadline = Instant::now() + ready_gate;
+    let mut stashed: Option<String> = None;
+    loop {
+        tokio::select! {
+            read = lines.next_line() => {
+                match read.context("read guest (ready-gate)")? {
+                    // The transport died before we even sent — error, never wait.
+                    None => bail!(
+                        "transport closed during the ready-gate (guest stream EOF before session ready)"
+                    ),
+                    Some(raw) => {
+                        let line = raw.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        match serde_json::from_str::<GuestMessage>(line) {
+                            // The arm we waited for: the agent's REPL is armed + idle.
+                            Ok(GuestMessage::SessionReady) => break,
+                            // Transport up, not arming — tolerate/consume, keep waiting.
+                            Ok(GuestMessage::Ready | GuestMessage::Heartbeat { .. }) => continue,
+                            // Anything else (a first report, lifecycle, undecodable):
+                            // the agent is already moving — stash it for phase-1 and go.
+                            _ => {
+                                stashed = Some(line.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            _ = sleep_until(gate_deadline) => break, // proceed anyway (§7.1)
+        }
+    }
+
+    // Phase 1: deliver the prompt, then stream. The deadlines below are measured
+    // from *here* (post-gate), so the ready-wait never counts against them.
+    write_half
+        .write_all(&prompt_line)
+        .await
+        .context("send prompt")?;
+    write_half.flush().await.ok();
 
     let mut last_hb = Instant::now();
     let mut last_prog = Instant::now();
@@ -409,6 +556,25 @@ where
     let mut accepted = false;
     let mut resends: u32 = 0;
     let mut stall_surfaced = false;
+
+    // A fast agent may have produced its first line *during* the ready-gate; #029
+    // stashed it rather than dropping it. Feed it through the identical handler the
+    // stream loop uses before awaiting anything more — it may itself be terminal.
+    if let Some(line) = stashed.take() {
+        if let LineFlow::Break = handle_phase1_line(
+            &line,
+            turn_id,
+            &mut sink,
+            &mut touch,
+            &mut last_hb,
+            &mut last_prog,
+            &mut last_touch,
+            &mut accepted,
+            &mut stall_surfaced,
+        )? {
+            return Ok(());
+        }
+    }
 
     loop {
         tokio::select! {
@@ -422,50 +588,18 @@ where
                         if line.is_empty() {
                             continue;
                         }
-                        match serde_json::from_str::<GuestMessage>(line) {
-                            Ok(GuestMessage::Heartbeat { .. }) => {
-                                // §8.1 invariant: SILENT — reset the deadline and a
-                                // throttled (≤1/s) liveness touch only. No render,
-                                // no print, so a backgrounded drive is never woken.
-                                last_hb = Instant::now();
-                                let due = last_touch
-                                    .is_none_or(|t| last_hb.duration_since(t) >= Duration::from_secs(1));
-                                if due {
-                                    touch();
-                                    last_touch = Some(last_hb);
-                                }
-                            }
-                            Ok(GuestMessage::Report(report)) => match report.status {
-                                Status::Working | Status::Info => {
-                                    // Progress: reset the stall timer, (re)arm the
-                                    // one-shot notice, and treat it as the implicit
-                                    // delivery ack (§7.2 fallback for no turn-start hook).
-                                    last_prog = Instant::now();
-                                    stall_surfaced = false;
-                                    accepted = true;
-                                    sink(DriveEvent::Report(&report))?;
-                                }
-                                Status::Done | Status::Blocked => {
-                                    sink(DriveEvent::Report(&report))?;
-                                    break; // clean terminal — the host breaks immediately (§8)
-                                }
-                            },
-                            Ok(GuestMessage::TurnAccepted { turn_id: id }) if id == turn_id => {
-                                accepted = true;
-                            }
-                            Ok(GuestMessage::TurnCompleted { turn_id: id, reported }) if id == turn_id => {
-                                if !reported {
-                                    // §6.2: stopped without a terminal report — warn.
-                                    sink(DriveEvent::Stopped(turn_id))?;
-                                }
-                                break;
-                            }
-                            // Tolerated/diagnostic — none reach the orchestrator: a
-                            // per-connect `ready`, a late `SessionReady`, lifecycle
-                            // for a stale `turn_id`, or an unknown newer variant.
-                            Ok(GuestMessage::Ready) => eprintln!("· guest ready"),
-                            Ok(_) => {}
-                            Err(e) => eprintln!("· undecodable guest line: {e}"),
+                        if let LineFlow::Break = handle_phase1_line(
+                            line,
+                            turn_id,
+                            &mut sink,
+                            &mut touch,
+                            &mut last_hb,
+                            &mut last_prog,
+                            &mut last_touch,
+                            &mut accepted,
+                            &mut stall_surfaced,
+                        )? {
+                            break;
                         }
                     }
                 }
@@ -760,10 +894,12 @@ mod tests {
         Stopped(u64),
     }
 
-    /// Deadlines so wide the watchdog timers never fire during a canned feed — the
-    /// timer behavior itself is exercised separately under a *paused* clock.
+    /// Deadlines so wide the watchdog timers never fire during a canned feed; the
+    /// ready-gate is short so a feed with no `SessionReady` reaches phase-1 promptly
+    /// (the gate's own behavior is exercised separately below).
     fn relaxed_watchdog() -> Watchdog {
         Watchdog {
+            ready_gate: Duration::from_millis(20),
             heartbeat_deadline: Duration::from_secs(3600),
             progress_deadline: Duration::from_secs(3600),
             delivery_deadline: Duration::from_secs(3600),
@@ -993,9 +1129,11 @@ mod tests {
     // tens of ms while the others are kept seconds away, so each test isolates one
     // timer deterministically.
 
-    /// A watchdog with the named deadlines in milliseconds.
+    /// A watchdog with the named deadlines in milliseconds and a short ready-gate
+    /// (these tests feed no `SessionReady`, so the gate just times out into phase-1).
     fn wd_ms(heartbeat: u64, progress: u64, delivery: u64, retries: u32) -> Watchdog {
         Watchdog {
+            ready_gate: Duration::from_millis(20),
             heartbeat_deadline: Duration::from_millis(heartbeat),
             progress_deadline: Duration::from_millis(progress),
             delivery_deadline: Duration::from_millis(delivery),
@@ -1159,5 +1297,205 @@ mod tests {
         });
         let err = result.expect_err("exhausted resends must fail");
         assert!(format!("{err:#}").contains("not accepted"), "{err:#}");
+    }
+
+    // ---- phase-0 ready-gate (#029, canned channel, tier 2) ----
+    //
+    // As with the watchdog-timer tests above, these use *small real* durations
+    // (no paused clock — `test-util` is not enabled on the shared `tokio` dep).
+    // The wall-clock the whole run took distinguishes "broke at once on
+    // SessionReady" from "waited the gate out", deterministically: the gate is set
+    // either seconds-wide (so an early break is unmistakable) or tens-of-ms (so the
+    // timeout path is quick).
+
+    /// Run `drive` over an in-memory duplex with a caller-supplied `watchdog`,
+    /// making `guest_lines` available *before* the driver sends — so they feed the
+    /// phase-0 ready-gate (a `SessionReady` that clears it, or a first line it
+    /// stashes) and then phase-1. Returns `drive`'s result, the surfaced events, the
+    /// prompt bytes the driver sent once the gate cleared, and the run's wall-clock
+    /// (to assert an immediate break vs. a gate timeout). Every caller must include
+    /// a terminal line (the relaxed timers never break on their own).
+    fn drive_gate_lines(
+        prompt: &str,
+        turn_id: u64,
+        watchdog: Watchdog,
+        guest_lines: &[&str],
+    ) -> (Result<()>, Vec<Ev>, String, std::time::Duration) {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let events: RefCell<Vec<Ev>> = RefCell::new(Vec::new());
+        let sent = RefCell::new(String::new());
+
+        let started = std::time::Instant::now();
+        let result = runtime.block_on(async {
+            let (client, mut server) = tokio::io::duplex(4096);
+            let driver = drive(
+                client,
+                turn_id,
+                prompt.to_string(),
+                watchdog,
+                |event: DriveEvent| -> Result<()> {
+                    events.borrow_mut().push(match event {
+                        DriveEvent::Report(r) => Ev::Report(r.status),
+                        DriveEvent::Stalled(_) => Ev::Stalled,
+                        DriveEvent::Stopped(id) => Ev::Stopped(id),
+                    });
+                    Ok(())
+                },
+                || {},
+            );
+            let feeder = async {
+                // The lines are buffered *before* the prompt is sent: they reach the
+                // ready-gate first, then phase-1.
+                for line in guest_lines {
+                    server.write_all(line.as_bytes()).await.unwrap();
+                    server.write_all(b"\n").await.unwrap();
+                }
+                server.flush().await.unwrap();
+                // Drain the prompt the driver emits once the gate clears, then hold
+                // the stream open so the driver's terminal break is not raced by EOF.
+                *sent.borrow_mut() = read_chunk(&mut server).await;
+                server
+            };
+            let (result, _server) = tokio::join!(driver, feeder);
+            result
+        });
+        let elapsed = started.elapsed();
+        (result, events.into_inner(), sent.into_inner(), elapsed)
+    }
+
+    #[test]
+    fn it_sends_immediately_when_session_ready_precedes_the_deadline() {
+        // A seconds-wide gate, but `SessionReady` arrives first → the gate breaks at
+        // once and the prompt is sent without waiting out `ready_gate`.
+        let watchdog = Watchdog {
+            ready_gate: Duration::from_secs(30),
+            ..relaxed_watchdog()
+        };
+        let (result, events, sent, elapsed) = drive_gate_lines(
+            "go",
+            1,
+            watchdog,
+            &[
+                r#"{"type":"sessionready"}"#,
+                r#"{"type":"report","status":"done","text":"ok"}"#,
+            ],
+        );
+        result.expect("a SessionReady-cleared gate is not an error");
+        assert_eq!(events, vec![Ev::Report(Status::Done)]);
+        // The prompt was actually sent (post-gate), carrying the right turn.
+        let HostMessage::Prompt(p) =
+            serde_json::from_str::<HostMessage>(sent.trim()).expect("a Prompt was sent");
+        assert_eq!(p.turn_id, 1);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "SessionReady must clear the gate immediately, not wait it out: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn it_passes_the_gate_at_once_on_a_latched_session_ready_replay() {
+        // The server latches `SessionReady` and replays it on every control connect
+        // (#026), so a prompt to an already-armed agent sees it as the very first
+        // line — the gate clears with ~no wait even though it is seconds-wide.
+        let watchdog = Watchdog {
+            ready_gate: Duration::from_secs(30),
+            ..relaxed_watchdog()
+        };
+        let (result, events, _sent, elapsed) = drive_gate_lines(
+            "go",
+            2,
+            watchdog,
+            &[
+                r#"{"type":"sessionready"}"#,
+                r#"{"type":"turncompleted","turn_id":2,"reported":true}"#,
+            ],
+        );
+        result.expect("a latched-replay SessionReady clears the gate cleanly");
+        assert!(
+            events.is_empty(),
+            "clean completion surfaces nothing: {events:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the latched replay must clear the gate at once: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn it_feeds_a_stashed_first_line_into_phase_one() {
+        // A fast agent's first `working` arrives *during* the gate, before any
+        // SessionReady. The gate must stash it (agent already moving) and phase-1
+        // must still process it — so it is not lost.
+        let watchdog = Watchdog {
+            ready_gate: Duration::from_secs(30),
+            ..relaxed_watchdog()
+        };
+        let (result, events, sent, _elapsed) = drive_gate_lines(
+            "go",
+            3,
+            watchdog,
+            &[
+                r#"{"type":"report","status":"working","text":"already building"}"#,
+                r#"{"type":"report","status":"done","text":"ok"}"#,
+            ],
+        );
+        result.expect("a stashed first line is not an error");
+        assert_eq!(
+            events,
+            vec![Ev::Report(Status::Working), Ev::Report(Status::Done)],
+            "the stashed `working` must reach the sink, then the `done` terminal"
+        );
+        // The prompt is still sent (the stashed line breaks the gate, then we send).
+        let HostMessage::Prompt(p) =
+            serde_json::from_str::<HostMessage>(sent.trim()).expect("a Prompt was sent");
+        assert_eq!(p.turn_id, 3);
+    }
+
+    #[test]
+    fn it_proceeds_after_the_ready_gate_without_session_ready() {
+        // No `SessionReady` ever arrives: the gate must time out and send the prompt
+        // anyway (§7.1) — #027's ack-and-resend is then the guarantee. A short gate
+        // keeps the test quick; the prompt only arrives once the gate elapses.
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let sent = RefCell::new(String::new());
+        let started = std::time::Instant::now();
+        let result = runtime.block_on(async {
+            let (client, mut server) = tokio::io::duplex(4096);
+            let watchdog = Watchdog {
+                ready_gate: Duration::from_millis(80),
+                ..relaxed_watchdog()
+            };
+            let driver = drive(
+                client,
+                1,
+                "go".into(),
+                watchdog,
+                |_ev: DriveEvent| -> Result<()> { Ok(()) },
+                || {},
+            );
+            let feeder = async {
+                // Nothing is fed to the gate, so the prompt only lands once the gate
+                // elapses; then a clean terminal so the loop ends.
+                *sent.borrow_mut() = read_chunk(&mut server).await;
+                server
+                    .write_all(br#"{"type":"turncompleted","turn_id":1,"reported":true}"#)
+                    .await
+                    .unwrap();
+                server.write_all(b"\n").await.unwrap();
+                server.flush().await.unwrap();
+                server
+            };
+            let (result, _server) = tokio::join!(driver, feeder);
+            result
+        });
+        let elapsed = started.elapsed();
+        result.expect("the gate proceeds without SessionReady (resend covers an unarmed agent)");
+        let HostMessage::Prompt(p) =
+            serde_json::from_str::<HostMessage>(sent.borrow().trim()).expect("a Prompt was sent");
+        assert_eq!(p.turn_id, 1);
+        assert!(
+            elapsed >= Duration::from_millis(80),
+            "the prompt must wait out the gate before proceeding: {elapsed:?}"
+        );
     }
 }
