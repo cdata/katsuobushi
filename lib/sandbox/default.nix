@@ -239,6 +239,20 @@ let
   };
   graphicsCfg = lib.recursiveUpdate graphicsDefaults graphics;
 
+  # Headless-sway config (referenced only when graphics.enable). One virtual
+  # output sized from graphicsCfg.output; sway is launched with `-c` so ONLY this
+  # file loads — no default keybindings/bar, because this is a headless render
+  # target, not an interactive desktop. The `WLR_HEADLESS_OUTPUTS=1` backend
+  # creates exactly one output named `HEADLESS-1`; we set its mode here. sway
+  # deterministically binds the `wayland-1` socket (its socket loop starts at 1
+  # and skips `wayland-0` — sway/server.c), which is the stable WAYLAND_DISPLAY
+  # the agent env/ssh export below advertise.
+  swayOutput = "HEADLESS-1";
+  swayConfig = pkgs.writeText "katsuobushi-sway.conf" ''
+    output ${swayOutput} mode ${toString graphicsCfg.output.width}x${toString graphicsCfg.output.height}@${toString graphicsCfg.output.refresh}Hz
+    output ${swayOutput} dpms on
+  '';
+
   # In-tree sandbox controller crate (agent mode)
   #
   # Built reproducibly via lib.rust/crane from Katsuobushi's own workspace
@@ -795,7 +809,53 @@ let
       # mode. The matching `vhost-vsock-pci` device is emitted at
       # launch (extraArgsScript) only when a CID is allocated; loading the
       # module unconditionally is harmless when no device is present.
-      boot.kernelModules = [ "vmw_vsock_virtio_transport" ];
+      #
+      # Graphics: the PCI `virtio-gpu-gl` device the host splices in is normally
+      # auto-probed by the in-tree `virtio_gpu` DRM driver, but pin it so `card0`/
+      # `renderD128` are guaranteed present for sway/Mesa regardless of probe
+      # order (design §14.4). Appended only when graphics.enable, so a graphics-off
+      # guest's module list is byte-for-byte unchanged.
+      boot.kernelModules = [
+        "vmw_vsock_virtio_transport"
+      ]
+      ++ lib.optionals graphicsCfg.enable [ "virtio_gpu" ];
+
+      # Graphics: Mesa userspace for the guest GPU — the virtio Vulkan ICD
+      # (`libvulkan_virtio.so`), the `virtio_gpu` Gallium GL driver, and llvmpipe
+      # for the `software` rung (design §14.4). `mkIf` so a graphics-off guest
+      # never pulls in `hardware.graphics` (default off ⇒ identical eval).
+      hardware.graphics.enable = lib.mkIf graphicsCfg.enable true;
+
+      # Headless sway — the guest display stack (design §8)
+      #
+      # A systemd *user* service under the unprivileged agent (NOT a system
+      # service) so the compositor stays inside the agent's blast radius —
+      # consistent with "no root, no sudo." The agent lingers (see
+      # users.users.${agentUser}.linger) so this starts at boot with no login and
+      # is live before the first ssh/`grim` or workload. `WLR_BACKENDS=headless` +
+      # `WLR_HEADLESS_OUTPUTS=1` create one virtual output (`HEADLESS-1`, sized by
+      # swayConfig from graphicsCfg.output); on a GPU rung wlroots renders through
+      # the virtio render node, on the `software` rung through llvmpipe. sway
+      # binds the `wayland-1` socket the env/ssh exports advertise. Whether the
+      # real boot brings it up and exports a usable display is the HITL #042 check
+      # (this VM has no nested KVM); here it only needs to evaluate and build.
+      systemd.user.services.katsuobushi-sway = lib.mkIf graphicsCfg.enable {
+        description = "Katsuobushi headless sway compositor (agent display stack)";
+        wantedBy = [ "default.target" ];
+        environment = {
+          WLR_BACKENDS = "headless";
+          WLR_HEADLESS_OUTPUTS = "1";
+          # No physical input on a headless seat; don't probe libinput devices.
+          WLR_LIBINPUT_NO_DEVICES = "1";
+        };
+        serviceConfig = {
+          ExecStart = "${pkgs.sway}/bin/sway --config ${swayConfig}";
+          # A transient renderer hiccup (e.g. the GPU node not yet settled) should
+          # not permanently lose the display.
+          Restart = "on-failure";
+          RestartSec = 2;
+        };
+      };
 
       networking.hostName = "katsuobushi";
       # Ephemeral guest; pin a stateVersion so the eval is reproducible.
@@ -817,8 +877,21 @@ let
         isNormalUser = true;
         home = agentHome;
         # No sudo / wheel: the agent runs strictly unprivileged so the in-guest
-        # firewall is a genuine boundary against it.
-        extraGroups = [ ];
+        # firewall is a genuine boundary against it. Graphics adds only `video`/
+        # `render` so the agent can open the guest DRM nodes (`card0`,
+        # `renderD128`) the `virtio_gpu` driver creates — group membership for a
+        # device, not a privilege grant; absent when graphics is off.
+        extraGroups = lib.optionals graphicsCfg.enable [
+          "video"
+          "render"
+        ];
+        # Graphics: linger so the headless-sway *user* service — and the
+        # `/run/user/<uid>` runtime dir it (and ssh's `XDG_RUNTIME_DIR`) rely on —
+        # come up at boot with no interactive login, so the compositor is live
+        # before the first ssh/`grim` or agent workload. `mkIf` so graphics-off
+        # leaves linger at its `null` default (an explicit `false` actively manages
+        # the marker and would alter the graphics-off build).
+        linger = lib.mkIf graphicsCfg.enable true;
       };
       users.users.katsuproxy = {
         isSystemUser = true;
@@ -1012,6 +1085,16 @@ let
           PermitRootLogin = "no";
           AllowUsers = [ agentUser ];
         };
+        # Graphics: `sandbox:screenshot` runs `ssh agent@… 'grim -'`, a
+        # non-interactive remote command that does NOT source /etc/profile, so the
+        # loginShellInit export below never reaches it. Set WAYLAND_DISPLAY
+        # server-side instead (sway binds `wayland-1`). XDG_RUNTIME_DIR is already
+        # provided to every ssh session by pam_systemd (= /run/user/<uid>, the
+        # lingering agent's dir holding the wayland socket), so it needs no help.
+        # `mkIf` (not `optionalString ""`) so graphics-off leaves extraConfig
+        # unset — an empty string would still append a trailing newline and alter
+        # the generated sshd_config (§8 #038).
+        extraConfig = lib.mkIf graphicsCfg.enable "SetEnv WAYLAND_DISPLAY=wayland-1";
       };
 
       # Login greeting + per-session secret export + env hygiene
@@ -1040,6 +1123,18 @@ let
         fi
         # Land in the (pre-trusted) workspace so `claude` starts in the project.
         if [ -d ${workspacePath} ]; then cd ${workspacePath}; fi
+      ''
+      # Graphics: point every login shell (interactive ssh, and the agent-mode
+      # `bash -lc` tmux session) at the headless sway compositor, so a workload is
+      # just `firefox` / `my-app` with no ceremony. sway binds `wayland-1`
+      # deterministically. XDG_RUNTIME_DIR is set by pam_systemd for ssh logins;
+      # default it for the `runuser`-spawned agent tmux, where pam does not run —
+      # the lingering agent's `/run/user/<uid>` exists from boot. Empty (so the
+      # profile is unchanged) when graphics is off.
+      + lib.optionalString graphicsCfg.enable ''
+        : "''${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+        export XDG_RUNTIME_DIR
+        export WAYLAND_DISPLAY=wayland-1
       '';
 
       environment.systemPackages =
@@ -1064,6 +1159,19 @@ let
           # guest closure (see claudeConfigSeed).
           reportApp
         ]
+        # Graphics (opt-in): the headless compositor (sway, also provides
+        # `swaymsg` for the #042 `get_outputs` check), the screenshot tool the
+        # `sandbox:screenshot` feature itself shells (grim, §8.2/§10), and the
+        # nested micro-compositor for the game path (gamescope, §8.2). Absent from
+        # the closure entirely when graphics is off.
+        ++ lib.optionals graphicsCfg.enable (
+          with pkgs;
+          [
+            sway
+            grim
+            gamescope
+          ]
+        )
         # Consumer-supplied packages, including the agent harness.
         ++ packages;
 
