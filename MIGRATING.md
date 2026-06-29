@@ -8,6 +8,15 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.2.3
+
+### Graphics: X11 apps now work out of the box — no action required
+
+A graphics guest now exports `DISPLAY=:0` and ships XWayland, so X11 apps (and
+tools that probe `DISPLAY`) work without manual setup — previously only
+`WAYLAND_DISPLAY` was set. This is additive and gated on the graphics opt-in, so
+**no action is required**; a graphics-off sandbox is unaffected.
+
 ## 0.2.2
 
 ### Opt-in graphics — off by default, but rebuild your dev shell

@@ -5,6 +5,20 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.2.3] — 2026-06-29
+
+A graphics hotfix: in a graphics guest an X11 app — or any tool that probes
+`DISPLAY` — failed out of the box because only `WAYLAND_DISPLAY` was set. See
+[`MIGRATING.md`](MIGRATING.md#023).
+
+### Fixed
+
+- **X11 apps work in a graphics guest.** The guest now exports `DISPLAY=:0`
+  alongside `WAYLAND_DISPLAY` (in both the sshd `SetEnv` and the login shell) and
+  ships `xwayland`, so sway's XWayland shim serves X clients on `:0`. A tool that
+  probes `DISPLAY`, or an X-only app, now runs with no per-invocation ceremony.
+  Gated on the graphics opt-in; a graphics-off guest is byte-for-byte unchanged.
+
 ## [0.2.2] — 2026-06-29
 
 Opt-in **graphics**: a sandbox can now boot a headless compositor and a
