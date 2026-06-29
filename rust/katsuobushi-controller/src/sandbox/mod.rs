@@ -15,6 +15,7 @@ pub mod output;
 mod prompt;
 pub mod qmp;
 pub mod resolve;
+mod screenshot;
 pub mod spec;
 mod start;
 mod status;
@@ -34,5 +35,8 @@ pub fn dispatch(args: SandboxArgs, global: Global) -> Result<()> {
         SandboxCommand::Fetch { instance } => fetch::run(&config, &instance, global),
         SandboxCommand::Stop { remove, instance } => stop::run(&config, remove, &instance, global),
         SandboxCommand::Attach { instance } => attach::run(&config, &instance, global),
+        SandboxCommand::Screenshot { instance, path } => {
+            screenshot::run(&config, &instance, path, global)
+        }
     }
 }

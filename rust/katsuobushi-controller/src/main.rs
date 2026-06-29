@@ -94,6 +94,19 @@ enum SandboxCommand {
         /// Instance name or 1-based index.
         instance: String,
     },
+    /// Capture the instance's composited display to a PNG (requires graphics).
+    ///
+    /// Runs `grim -` over the existing loopback ssh as the agent user and streams
+    /// the PNG back. Note: it captures only the composited sway output — a pure
+    /// offscreen Layer-0 workload (its own FBO/swapchain, no surface on the
+    /// compositor) screenshots as blank, which is expected, not a bug.
+    Screenshot {
+        /// Instance name or 1-based index.
+        instance: String,
+        /// Output path; omit for `screenshot-<instance>-<ts>.png` in the cwd, or
+        /// `-` to stream the PNG to stdout.
+        path: Option<String>,
+    },
 }
 
 /// Global flags threaded to every subcommand stub.
@@ -249,6 +262,49 @@ mod tests {
                 assert_eq!(config, PathBuf::from("/x"));
             }
             _ => panic!("expected sandbox start"),
+        }
+    }
+
+    /// `screenshot` takes an instance and an optional path (defaulting later).
+    #[test]
+    fn screenshot_instance_and_optional_path_parse() {
+        let with_path = parse(&[
+            "katsuctl",
+            "sandbox",
+            "--config",
+            "/x",
+            "screenshot",
+            "my-inst",
+            "shot.png",
+        ]);
+        match with_path.domain {
+            Domain::Sandbox(SandboxArgs {
+                command: SandboxCommand::Screenshot { instance, path },
+                ..
+            }) => {
+                assert_eq!(instance, "my-inst");
+                assert_eq!(path.as_deref(), Some("shot.png"));
+            }
+            _ => panic!("expected sandbox screenshot"),
+        }
+
+        let no_path = parse(&[
+            "katsuctl",
+            "sandbox",
+            "--config",
+            "/x",
+            "screenshot",
+            "my-inst",
+        ]);
+        match no_path.domain {
+            Domain::Sandbox(SandboxArgs {
+                command: SandboxCommand::Screenshot { instance, path },
+                ..
+            }) => {
+                assert_eq!(instance, "my-inst");
+                assert_eq!(path, None);
+            }
+            _ => panic!("expected sandbox screenshot"),
         }
     }
 
