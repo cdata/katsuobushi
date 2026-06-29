@@ -5,14 +5,14 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
-## [Unreleased]
+## [0.2.2] — 2026-06-29
 
 Opt-in **graphics**: a sandbox can now boot a headless compositor and a
 paravirtual GPU so a browser or Wayland app actually renders. It is off by
 default, so existing consumers are unaffected; enabling it widens the host-facing
 attack surface (the GPU command stream is parsed in the host QEMU process), which
 the README documents plainly. The instance spec bumps to `specVersion 3`; see
-[`MIGRATING.md`](MIGRATING.md#unreleased).
+[`MIGRATING.md`](MIGRATING.md#022).
 
 ### Added
 
@@ -33,12 +33,20 @@ the README documents plainly. The instance spec bumps to `specVersion 3`; see
   ssh — no daemon, no new port. Defaults to a timestamped PNG in the cwd; `-`
   streams to stdout. Requires the graphics opt-in; a purely-offscreen workload
   that never composites a surface screenshots as blank (expected).
+- **`sandbox:status` GRAPHICS column.** The instance list now shows the GPU rung
+  each instance launched on — `integrated`, `discrete`, `software`, or `none`
+  when graphics is off — recorded per-instance in `instance.json` (and surfaced
+  in the detail view and `--json`).
 
 ### Changed
 
 - **The instance spec is now `specVersion 3`** (carrying the `graphics` block); a
   stale v2 spec is rejected loudly. Rebuild your dev shell (`nix develop`) so the
   spec re-renders. No config changes are required.
+- **`instance.json` is now `instanceVersion 2`** (it records the resolved
+  graphics rung). A v1 instance state from an earlier release is rejected on
+  read, so recreate any persistent (`--name`d) instance after upgrading —
+  ephemeral instances are unaffected.
 
 ## [0.2.1] — 2026-06-28
 

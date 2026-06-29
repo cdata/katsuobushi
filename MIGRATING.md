@@ -8,7 +8,7 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
-## Unreleased
+## 0.2.2
 
 ### Opt-in graphics — off by default, but rebuild your dev shell
 
@@ -20,6 +20,11 @@ The one thing everyone must do is rebuild: the instance spec bumps to
 `specVersion 3`, and a stale v2 spec is now rejected loudly. Run `nix develop`
 (or otherwise rebuild your dev shell) so the spec re-renders; no config changes
 are required.
+
+Per-instance state also bumps: `instance.json` is now `instanceVersion 2` (it
+records the resolved graphics rung shown in `sandbox:status`). A v1 instance
+state from `0.2.1` is rejected on read, so recreate any persistent (`--name`d)
+instance after upgrading — ephemeral instances are unaffected.
 
 If you _do_ enable graphics, two things are worth knowing — both covered in
 [`lib/sandbox/README.md`](lib/sandbox/README.md#graphics-opt-in):
