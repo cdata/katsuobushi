@@ -5,6 +5,33 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.2.4] — 2026-06-29
+
+A packaging hotfix: the `sandbox:*` menu commands failed for consumers with
+`katsuctl: command not found`. They invoked `katsuctl` by bare name and relied on
+it already being on the dev shell's PATH — which only Katsuobushi's own dev shell
+arranged, so a project that wired in just `sandbox.menuCommands` got commands that
+could not find their own controller. The instance spec bumps to `specVersion 4`;
+see [`MIGRATING.md`](MIGRATING.md#024).
+
+### Fixed
+
+- **`sandbox:*` commands work without `katsuctl` on PATH.** Every menu command
+  (and `nix run .#sandbox`) now invokes the controller by its absolute store
+  path, and the agent-mode `start` recipe self-references it through a new
+  `tools.katsuctl` spec field instead of a bare `katsuctl … prompt` tail-call run
+  in a child shell. A consumer that wires only `sandbox.menuCommands` into a dev
+  shell no longer hits `katsuctl: command not found`. No PATH manipulation remains
+  in any command.
+
+### Added
+
+- **`lib.sandbox` exposes `katsuctl`.** The host controller derivation (built via
+  `lib.rust`/crane from Katsuobushi's pinned source) is now returned from
+  `lib.sandbox` as `katsuctl`, so a project can put a bare `katsuctl` on its dev
+  shell PATH for direct use. The sandbox template wires it in for power users; the
+  `sandbox:*` commands no longer require it.
+
 ## [0.2.3] — 2026-06-29
 
 A graphics hotfix: in a graphics guest an X11 app — or any tool that probes

@@ -8,6 +8,25 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.2.4
+
+**Action required: rebuild your dev shell.**
+
+The `sandbox:*` commands no longer depend on `katsuctl` being on your PATH —
+they invoke it by absolute store path — so the bug where a consumer dev shell
+reported `katsuctl: command not found` is fixed. **No config changes are
+required**, and if you only ever used the menu commands you needed no workaround
+before either.
+
+The one thing everyone must do is rebuild: the instance spec bumps to
+`specVersion 4` (it now carries the controller's own path so the agent-mode boot
+recipe can self-reference it), and a stale v3 spec is rejected loudly. Run
+`nix develop` (or otherwise rebuild your dev shell) so the spec re-renders.
+
+Per-instance `instance.json` state is unchanged (still `instanceVersion 2`), so
+persistent (`--name`d) instances created under `0.2.3` keep working across the
+upgrade.
+
 ## 0.2.3
 
 No action required.
@@ -93,7 +112,8 @@ view or `--json` instead.
 
 ## 0.1.10
 
-**`lib.sandbox`: writable scratch is now disk-backed — `storeOverlaySize` is removed.**
+**`lib.sandbox`: writable scratch is now disk-backed — `storeOverlaySize` is
+removed.**
 
 The guest's writable scratch — the writable `/nix/store` overlay, the workspace
 clone and its build artifacts, the `cargo`/`rustup`/XDG caches, and the guest
@@ -136,7 +156,8 @@ No action required.
 
 ## 0.1.8
 
-**`lib.sandbox`: the guest now imports the host Nix DB by default — no action required in normal use**
+**`lib.sandbox`: the guest now imports the host Nix DB by default — no action
+required in normal use**
 
 `importHostStoreDb` defaults to `true`, so a launched sandbox now snapshots the
 host's Nix database and the guest reuses every path the host has already built
@@ -168,7 +189,8 @@ No action required.
 
 ## 0.1.4
 
-**`lib.sandbox`: named instances are suffixed with random entropy — action only if you script instance names**
+**`lib.sandbox`: named instances are suffixed with random entropy — action only
+if you script instance names**
 
 A provided `--name foo` now boots an instance named `foo-<8 hex>` (e.g.
 `foo-a3f9c2d1`) rather than `foo`. This makes every launch a fresh,
@@ -199,7 +221,8 @@ A small release: no library argument or output signatures changed, so a normal
 upgrade needs no edits. The one behavioral change worth knowing is below; the
 rest is additive or a bug fix (see [`CHANGELOG.md`](CHANGELOG.md)).
 
-**`lib.sandbox`: `sandbox:status` now exits non-zero on a failed preflight — action only if you script its exit code**
+**`lib.sandbox`: `sandbox:status` now exits non-zero on a failed preflight —
+action only if you script its exit code**
 
 A bare `sandbox:status` now runs an environment preflight before listing
 instances (it prints an `environment:` block verifying each declared secret at
@@ -386,7 +409,8 @@ rustHelpers = katsuobushi.lib.rust {
 Both now default to `[ ]` (previously `buildInputs` was required), so tool-only
 projects can omit them entirely.
 
-**`lib.rust`: wasm-bindgen version is derived — action required for non-default wasm builds**
+**`lib.rust`: wasm-bindgen version is derived — action required for non-default
+wasm builds**
 
 The `wasm-bindgen-cli` version is no longer hard-pinned in the lib; it is read
 from your `Cargo.lock`. The lib ships hashes for **0.2.108** as the default.
