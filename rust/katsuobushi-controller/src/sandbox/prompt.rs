@@ -260,7 +260,11 @@ fn deliver_over_vsock(
     // timestamp from the clock seam. Best-effort — a failed write never fails the
     // turn — and silent (no render/print).
     let touch = || {
-        let mut liveness = Liveness::load(host, liveness_path);
+        // A corrupt record skips the touch rather than clobbering it — a
+        // defaulted rewrite would rewind the persisted turn-id counter.
+        let Ok(mut liveness) = Liveness::load(host, liveness_path) else {
+            return;
+        };
         if let Ok(stamp) = now_rfc3339(host) {
             liveness.last_heartbeat_at = Some(stamp);
         }
@@ -291,7 +295,11 @@ fn deliver_over_vsock(
 /// attached `drive` from a stale record. Preserves the rest of the
 /// record via load-modify-store.
 fn set_stream_active(host: &impl Host, path: &Path, active: bool) {
-    let mut liveness = Liveness::load(host, path);
+    // Best-effort, but never clobber: a corrupt record skips the flip rather
+    // than rewriting it from Default (which would rewind the turn-id counter).
+    let Ok(mut liveness) = Liveness::load(host, path) else {
+        return;
+    };
     liveness.stream_active = active;
     let _ = liveness.store(host, path);
 }

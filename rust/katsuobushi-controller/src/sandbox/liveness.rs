@@ -31,8 +31,12 @@ pub const SUPPORTED_LIVENESS_VERSION: u32 = 1;
 
 /// The host-authored `liveness.json` record. Lives beside
 /// `instance.json` at `<stateGlob>/<inst>/liveness.json`.
+///
+/// No `deny_unknown_fields`: this is the host's own record, and a newer build
+/// adding a field must not make an older build's read fail — a failed parse
+/// here is what used to silently rewind the turn-id counter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct Liveness {
     /// Schema version (`= SUPPORTED_LIVENESS_VERSION`).
     pub liveness_version: u32,
@@ -59,16 +63,30 @@ impl Default for Liveness {
 }
 
 impl Liveness {
-    /// Read the record through the [`Host`] seam, falling back to [`Default`]
-    /// when the file is missing or unreadable/unparseable. Unlike the fail-loud
-    /// `instance.json` (a cross-party contract), this is the host's own scratch
-    /// record, rewritten every tick — so a corrupt read self-heals on the next
-    /// write rather than failing the turn.
-    pub fn load(host: &impl Host, path: &Path) -> Self {
-        match host.read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-            Err(_) => Self::default(),
+    /// Read the record through the [`Host`] seam for a read-modify-write. A
+    /// *missing/unreadable* file is a clean slate ([`Default`]), but a file
+    /// that is present yet unparseable or version-skewed is an **error**:
+    /// defaulting there would rewind `nextTurnId` to 1 (and the next store
+    /// would persist the rewind), handing out an id the guest's `turn_id`
+    /// dedupe has already seen — which silently drops a genuinely-new prompt.
+    /// The heartbeat/stream writers skip their best-effort write on this
+    /// error instead of clobbering the record.
+    pub fn load(host: &impl Host, path: &Path) -> Result<Self> {
+        let bytes = match host.read(path) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(Self::default()),
+        };
+        let liveness: Self = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing {} (present but unparseable — refusing to reset the turn-id counter; remove the file to start over)", path.display()))?;
+        if liveness.liveness_version != SUPPORTED_LIVENESS_VERSION {
+            bail!(
+                "liveness.json at {} has version {} (this build supports {})",
+                path.display(),
+                liveness.liveness_version,
+                SUPPORTED_LIVENESS_VERSION
+            );
         }
+        Ok(liveness)
     }
 
     /// Write the record through the [`Host`] seam atomically: serialize to a temp
@@ -279,7 +297,8 @@ pub fn now_unix(host: &impl Host) -> Option<i64> {
 /// counter survives across `prompt` invocations. A resend reuses the *same* id
 /// (which the guest dedupes), while two distinct turns can never collide.
 pub fn alloc_turn_id(host: &impl Host, path: &Path) -> Result<u64> {
-    let mut liveness = Liveness::load(host, path);
+    // A corrupt record fails the turn loudly rather than reusing an id.
+    let mut liveness = Liveness::load(host, path)?;
     let id = liveness.next_turn_id;
     liveness.next_turn_id = id.checked_add(1).context("turn-id counter overflow")?;
     liveness.store(host, path)?;
@@ -380,10 +399,54 @@ mod tests {
     }
 
     #[test]
-    fn it_loads_a_default_when_the_record_is_unparseable() {
+    fn it_refuses_to_alloc_when_the_record_is_unparseable() {
+        // Present-but-corrupt must NOT default: a defaulted counter rewinds to
+        // 1, and the guest's turn_id dedupe then silently drops the next
+        // genuinely-new prompt. The alloc fails loudly and writes nothing.
         let mut host = FakeHost::new();
         host.push_read(Ok(b"{ not json".to_vec()));
-        let liveness = Liveness::load(&host, &path());
+        let err = alloc_turn_id(&host, &path()).expect_err("corrupt record must fail the alloc");
+        assert!(
+            format!("{err:#}").contains("refusing to reset the turn-id counter"),
+            "{err:#}"
+        );
+        assert!(
+            !host.calls().iter().any(|c| matches!(c, Call::Write(..))),
+            "nothing is written over the corrupt record"
+        );
+    }
+
+    #[test]
+    fn it_refuses_to_alloc_across_a_liveness_version_skew() {
+        // A record written by a different schema version is not ours to
+        // rewrite — treat it like corruption rather than resetting it.
+        let mut host = FakeHost::new();
+        host.push_read(Ok(
+            br#"{"livenessVersion":2,"nextTurnId":7,"streamActive":false}"#.to_vec(),
+        ));
+        let err = alloc_turn_id(&host, &path()).expect_err("version skew must fail the alloc");
+        assert!(format!("{err:#}").contains("version 2"), "{err:#}");
+    }
+
+    #[test]
+    fn it_loads_a_record_carrying_unknown_fields() {
+        // Forward compatibility: a newer build adding a field must not make
+        // this build's parse fail (a failed parse is what used to rewind the
+        // counter).
+        let mut host = FakeHost::new();
+        host.push_read(Ok(
+            br#"{"livenessVersion":1,"nextTurnId":9,"streamActive":true,"someFutureField":"x"}"#
+                .to_vec(),
+        ));
+        let liveness = Liveness::load(&host, &path()).expect("unknown fields are tolerated");
+        assert_eq!(liveness.next_turn_id, 9, "the counter survives the read");
+    }
+
+    #[test]
+    fn it_loads_a_default_when_the_record_is_missing() {
+        // No scripted read → NotFound → a clean slate, not an error.
+        let host = FakeHost::new();
+        let liveness = Liveness::load(&host, &path()).expect("missing file is a clean slate");
         assert_eq!(liveness, Liveness::default());
     }
 
@@ -400,7 +463,7 @@ mod tests {
         .unwrap()))
             .push_run(Ok(run_output("2026-06-28T12:34:56Z\n")));
 
-        let mut liveness = Liveness::load(&host, &path());
+        let mut liveness = Liveness::load(&host, &path()).expect("load should succeed");
         liveness.last_heartbeat_at = Some(now_rfc3339(&host).expect("clock seam"));
         liveness.stream_active = true;
         liveness
