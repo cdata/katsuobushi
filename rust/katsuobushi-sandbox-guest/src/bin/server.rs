@@ -686,8 +686,7 @@ where
                             Ok(()) => {
                                 // Confirm delivery so resends of this id dedupe.
                                 let confirmed =
-                                    drive_event(&ctl, Event::Injected { turn_id: p.turn_id })
-                                        .await;
+                                    drive_event(&ctl, Event::Injected { turn_id: p.turn_id }).await;
                                 execute_outcome(&ctl, confirmed).await;
                             }
                             // Leave `injected` unset: the host's delivery-
@@ -783,11 +782,8 @@ async fn relay_report(stream: UnixStream, ctl: Arc<Control>) -> anyhow::Result<(
             continue;
         }
         let event = match serde_json::from_str::<GuestLocalLine>(&line) {
-            Ok(GuestLocalLine::Report(rl)) => Event::Report(Report {
-                status: rl.status,
-                text: rl.text,
-                turn_id: rl.turn_id,
-            }),
+            // `ReportLine` is `Report`; the line relays verbatim.
+            Ok(GuestLocalLine::Report(report)) => Event::Report(report),
             Ok(GuestLocalLine::Hook(h)) => Event::Hook(h.event),
             Err(e) => {
                 eprintln!("katsuobushi-control: bad report line: {e}");
@@ -916,7 +912,10 @@ mod tests {
             next_bounded_line(&mut reader, &mut buf).await.unwrap(),
             Some("two".to_string())
         );
-        assert_eq!(next_bounded_line(&mut reader, &mut buf).await.unwrap(), None);
+        assert_eq!(
+            next_bounded_line(&mut reader, &mut buf).await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -999,9 +998,9 @@ mod tests {
         step(&mut s, Event::Prompt { turn_id: 1 });
         step(&mut s, Event::Injected { turn_id: 1 });
         step(&mut s, Event::Hook(HookEvent::TurnEnded)); // arms the grace window
-        // A resend of the SAME id while the turn is ended-but-unresolved must
-        // not create a fresh turn — re-injecting an already-executed turn
-        // would run it twice.
+                                                         // A resend of the SAME id while the turn is ended-but-unresolved must
+                                                         // not create a fresh turn — re-injecting an already-executed turn
+                                                         // would run it twice.
         let out = step(&mut s, Event::Prompt { turn_id: 1 });
         assert!(!out.inject);
         assert!(

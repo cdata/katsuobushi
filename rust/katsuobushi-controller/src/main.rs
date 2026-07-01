@@ -124,9 +124,17 @@ fn main() -> anyhow::Result<()> {
         json: cli.json,
         color: cli.color,
     };
-    match cli.domain {
+    let result = match cli.domain {
         Domain::Sandbox(args) => sandbox::dispatch(args, global),
+    };
+    // A `Reported` failure was already rendered by the subcommand (e.g. the
+    // prompt stream's `Lost` note): exit nonzero without anyhow re-printing.
+    if let Err(e) = &result {
+        if e.is::<sandbox::output::Reported>() {
+            std::process::exit(1);
+        }
     }
+    result
 }
 
 #[cfg(test)]

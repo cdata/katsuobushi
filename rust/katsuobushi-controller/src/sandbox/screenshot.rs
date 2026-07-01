@@ -31,7 +31,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 
-use crate::sandbox::host::{Host, HostImpl};
+use crate::sandbox::host::{self, Host, HostImpl};
 use crate::sandbox::instance;
 use crate::sandbox::resolve::resolve_instance;
 use crate::sandbox::spec::{load_spec, resolve_roots, Spec};
@@ -94,18 +94,7 @@ fn capture(
     }
 
     let cmd = build_ssh_command(&spec.tools.ssh, key, ssh_port, &spec.agent_user);
-    let output = host
-        .run(&cmd)
-        .with_context(|| format!("running grim over ssh for '{inst}'"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.trim();
-        bail!(
-            "grim capture for '{inst}' failed{}{}",
-            if detail.is_empty() { "" } else { ": " },
-            detail
-        );
-    }
+    let output = host::run_ok(host, &cmd, &format!("grim capture for '{inst}'"))?;
     Ok(output.stdout)
 }
 

@@ -84,8 +84,7 @@ impl InstanceView {
     /// The `MODE` column / detail value: the rendered mode, or `-` when unknown.
     fn mode_label(&self) -> &'static str {
         match self.mode {
-            Some(Mode::Agent) => "agent",
-            Some(Mode::Interactive) => "interactive",
+            Some(mode) => mode.as_str(),
             None => "-",
         }
     }
@@ -527,7 +526,13 @@ fn summarize(
     // The N·H watchdog deadline: the longest heartbeat silence a live driver
     // is allowed, so it doubles as the freshness bound for `streamActive`.
     let hb_deadline = (spec.heartbeat_secs * u64::from(spec.heartbeat_miss)) as i64;
-    let liveness = render_liveness(turn_state.as_ref(), live.as_ref(), now, running, hb_deadline);
+    let liveness = render_liveness(
+        turn_state.as_ref(),
+        live.as_ref(),
+        now,
+        running,
+        hb_deadline,
+    );
     let liveness_brief = render_liveness_brief(turn_state.as_ref(), now);
 
     InstanceView {

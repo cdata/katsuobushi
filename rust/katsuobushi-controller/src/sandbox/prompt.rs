@@ -40,7 +40,7 @@ use tokio_vsock::{VsockAddr, VsockStream};
 use crate::sandbox::host::{Host, HostImpl};
 use crate::sandbox::instance::{self, Instance};
 use crate::sandbox::liveness::{alloc_turn_id, now_rfc3339, Liveness};
-use crate::sandbox::output::{Renderer, ReportKind};
+use crate::sandbox::output::{Renderer, ReportKind, Reported};
 use crate::sandbox::resolve::resolve_instance;
 use crate::sandbox::spec::{load_spec, resolve_roots, ResolvedRoots, Spec};
 use crate::Global;
@@ -285,8 +285,11 @@ fn deliver_over_vsock(
     match result {
         Ok(()) => Ok(()),
         Err(e) => {
+            // Render the single `Lost` line here, then hand `main` the marker
+            // so it exits nonzero without re-printing anyhow's chain —
+            // process exit stays in `main`, not deep in a helper.
             let _ = render_note(renderer, ReportKind::Lost, &format!("{e:#}"));
-            std::process::exit(1);
+            Err(anyhow::Error::new(Reported))
         }
     }
 }

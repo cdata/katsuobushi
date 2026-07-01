@@ -5,9 +5,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
-use crate::sandbox::host::{Host, HostImpl};
+use crate::sandbox::host::{self, Host, HostImpl};
 use crate::sandbox::resolve::resolve_instance;
 use crate::sandbox::spec::{load_spec, resolve_roots, Spec};
 use crate::Global;
@@ -37,18 +37,7 @@ fn fetch_with(host: &impl Host, spec: &Spec, instance: &str, json: bool) -> Resu
     let mut cmd = Command::new(&spec.tools.git);
     cmd.arg("fetch").arg(&sync_git).arg(&refspec);
 
-    let output = host
-        .run(&cmd)
-        .with_context(|| format!("running git fetch for sandbox/{inst}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.trim();
-        bail!(
-            "git fetch for sandbox/{inst} failed{}{}",
-            if detail.is_empty() { "" } else { ": " },
-            detail
-        );
-    }
+    host::run_ok(host, &cmd, &format!("git fetch for sandbox/{inst}"))?;
 
     Ok(if json {
         format!(r#"{{"fetched":"sandbox/{inst}"}}"#)

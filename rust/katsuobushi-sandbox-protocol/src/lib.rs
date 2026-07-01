@@ -49,8 +49,13 @@ pub struct Report {
 /// vsock connection: relayed `report`s, plus a one-shot `ready` once the
 /// server's listeners are up.
 ///
-/// The variants stay flat and tagged (`{"type":…}`); decoders ignore unknown
-/// variants, so adding more here never breaks an older peer.
+/// The variants stay flat and tagged (`{"type":…}`). NB: serde's tagged enums
+/// **error** on an unknown tag (this crate's own test pins that), so forward
+/// compatibility does *not* come from the decoder skipping unknowns — it comes
+/// from every reader treating a failed line as diagnostic and continuing.
+/// Adding a variant is safe only because messages are newline-framed and
+/// independently decoded (an older peer drops the whole line); adding a
+/// required field to an *existing* variant breaks older peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum GuestMessage {
@@ -78,15 +83,10 @@ pub enum HostMessage {
     Prompt(Prompt),
 }
 
-/// The line `report` writes to the server's guest-local unix socket. The server
-/// stamps it into a [`GuestMessage::Report`] and relays it to the host.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReportLine {
-    pub status: Status,
-    pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<u64>,
-}
+/// The line `report` writes to the server's guest-local unix socket — the same
+/// shape as [`Report`] (it *is* [`Report`]; the alias keeps the socket-facing
+/// name), which the server relays into a [`GuestMessage::Report`] verbatim.
+pub type ReportLine = Report;
 
 /// A line on the guest-local socket. Both the `report` command and the hook
 /// bridge write here, so the union is **untagged**: resolution is by field

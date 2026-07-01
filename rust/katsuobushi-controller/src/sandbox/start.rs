@@ -110,7 +110,7 @@ pub fn run(
     let _alloc_lock = lock_allocation(&roots.state_glob)?;
 
     let mut rng = OsRng::new();
-    let clock = now_timestamp(&host)?;
+    let clock = now_timestamp()?;
     let pid = std::process::id();
     let plan = decide(
         &host,
@@ -466,20 +466,19 @@ fn resolve_seed(
     Ok(Seed::Fresh(commit))
 }
 
-/// The ephemeral-name timestamp, `date +%Y%m%d-%H%M%S` through the seam (mirrors
-/// `date +…` at ). Kept out of [`decide`] so the core
-/// stays pure on an injected clock string.
-fn now_timestamp(host: &impl Host) -> Result<String> {
-    let mut cmd = Command::new("date");
-    cmd.arg("+%Y%m%d-%H%M%S");
-    let out = host
-        .run(&cmd)
-        .context("running `date` for the ephemeral instance name")?;
-    let stamp = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if stamp.is_empty() {
-        bail!("`date` produced no timestamp");
-    }
-    Ok(stamp)
+/// The ephemeral-name timestamp (`YYYYMMDD-HHMMSS`, UTC), formatted in Rust:
+/// the recipe contract runs every world-touching tool by its pinned store
+/// path, and shelling out to a bare-PATH `date` was the lone exception (and an
+/// avoidable subprocess). UTC where the shell used local time — the stamp only
+/// needs rough sortability; uniqueness comes from the appended pid. Kept out
+/// of [`decide`] so the core stays pure on an injected clock string.
+fn now_timestamp() -> Result<String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_secs();
+    let (y, mo, d, h, mi, s) = crate::sandbox::liveness::unix_to_civil(secs);
+    Ok(format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}"))
 }
 
 /// Take the project-wide allocation lock: an exclusive advisory `flock` on a
@@ -518,13 +517,9 @@ fn katsuobushi_base(state_glob: &Path, project_id: &str) -> PathBuf {
 /// The resolved-identity JSON `start --json` prints: name/mode/port/
 /// cid — *not* the script path.
 fn identity_json(plan: &Plan) -> String {
-    let mode = match plan.mode {
-        Mode::Agent => "agent",
-        Mode::Interactive => "interactive",
-    };
     serde_json::json!({
         "name": plan.name,
-        "mode": mode,
+        "mode": plan.mode.as_str(),
         "named": plan.named,
         "sshPort": plan.ssh_port,
         "vsockCid": plan.vsock_cid,
@@ -573,7 +568,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     let mut r = Recipe::new();
     r.comment(format!(
         "katsuctl sandbox start: set up and boot {} instance '{name}'",
-        mode_word(plan.mode)
+        plan.mode.as_str()
     ));
 
     // ---- dirs + the parent clamp ----
@@ -785,7 +780,15 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
 
     // ---- mode-specific tail ----
     match plan.mode {
-        Mode::Agent => agent_tail(&mut r, &runner, &console_log, &runtime_root, config, plan, spec),
+        Mode::Agent => agent_tail(
+            &mut r,
+            &runner,
+            &console_log,
+            &runtime_root,
+            config,
+            plan,
+            spec,
+        ),
         Mode::Interactive => interactive_tail(
             &mut r,
             &ssh,
@@ -800,14 +803,6 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     }
 
     Ok(r)
-}
-
-/// `Mode` as the lowercase word the recipe comments and `instance.json` use.
-fn mode_word(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Agent => "agent",
-        Mode::Interactive => "interactive",
-    }
 }
 
 /// The agent tail: `setsid` a

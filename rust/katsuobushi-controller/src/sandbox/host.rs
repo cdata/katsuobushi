@@ -36,7 +36,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context as _, Result};
 use tokio_vsock::{VsockAddr, VsockStream};
 
 /// Everything `katsuctl` does that touches the world goes through this trait.
@@ -292,6 +292,27 @@ pub fn pick_cid(used: &HashSet<u32>, rng: &mut impl Rng) -> Result<u32> {
 /// and RNG (default.nix). Draws from `[20000, 40000)`,
 /// returning the first the predicate accepts; bails after [`ALLOC_TRIES`]
 /// rejections.
+/// Run `cmd` through the seam and require a zero exit, surfacing the trimmed
+/// stderr in the failure message. The shared "run, check status, bail with
+/// what the tool said" shape `fetch`/`screenshot` both need — one definition
+/// so the two sites format failures identically.
+pub fn run_ok(host: &impl Host, cmd: &Command, action: &str) -> Result<Output> {
+    let output = host
+        .run(cmd)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("running {action}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        bail!(
+            "{action} failed{}{}",
+            if detail.is_empty() { "" } else { ": " },
+            detail
+        );
+    }
+    Ok(output)
+}
+
 pub fn pick_port(is_free: impl Fn(u16) -> bool, rng: &mut impl Rng) -> Result<u16> {
     for _ in 0..ALLOC_TRIES {
         let candidate = (rng.next_u32() % PORT_SPAN + u32::from(PORT_BASE)) as u16;

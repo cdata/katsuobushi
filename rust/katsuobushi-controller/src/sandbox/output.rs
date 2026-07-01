@@ -54,6 +54,21 @@ pub fn color_enabled(when: ColorWhen, json: bool, stdout_is_tty: bool, no_color:
     }
 }
 
+/// Marker error: the failure was already rendered to the user (e.g. the
+/// prompt stream's `Lost` note), so `main` should exit nonzero *without*
+/// printing anyhow's chain a second time. Keeps `std::process::exit` out of
+/// deep helpers — the decision to terminate the process belongs to `main`.
+#[derive(Debug)]
+pub struct Reported;
+
+impl std::fmt::Display for Reported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(error already reported)")
+    }
+}
+
+impl std::error::Error for Reported {}
+
 /// One streamed report's flavor — the four `protocol::Status` variants plus the
 /// three watchdog verdicts the `prompt` `drive` raises,
 /// each mapped here to a glyph + color: `working`=dim,

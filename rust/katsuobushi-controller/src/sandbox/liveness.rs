@@ -268,6 +268,37 @@ fn civil_to_unix(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// Unix seconds → UTC civil `(year, month, day, hour, min, sec)` — Howard
+/// Hinnant's `civil_from_days`, the inverse of [`civil_to_unix`]. Lets the
+/// controller mint timestamps in Rust instead of shelling out to a bare-PATH
+/// `date` (the lone unpinned tool the recipe contract otherwise forbids).
+pub fn unix_to_civil(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (h, mi, s) = (
+        (rem / 3_600) as u32,
+        ((rem % 3_600) / 60) as u32,
+        (rem % 60) as u32,
+    );
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (
+        if month <= 2 { year + 1 } else { year },
+        month,
+        day,
+        h,
+        mi,
+        s,
+    )
+}
+
 /// A compact "how long ago" token (`4s`, `9m`, `2h`, `3d`) for `now - then`,
 /// clamped at zero so a little host/guest clock skew reads as `0s` rather than a
 /// negative age. The caller appends `" ago"`.
@@ -681,6 +712,23 @@ mod tests {
         assert_eq!(humanize_ago(now, now - 3 * 86_400), "3d");
         // Clock skew (then > now) clamps to 0s rather than a negative age.
         assert_eq!(humanize_ago(now, now + 30), "0s");
+    }
+
+    #[test]
+    fn it_round_trips_unix_to_civil_against_the_parser() {
+        // The formatter direction must agree with the parser direction
+        // (civil_to_unix) — spot-check epoch, a leap day, and a year edge.
+        for (secs, expect) in [
+            (0u64, (1970, 1, 1, 0, 0, 0)),
+            (1_782_648_000u64, (2026, 6, 28, 12, 0, 0)),
+            (951_782_400u64, (2000, 2, 29, 0, 0, 0)), // leap day
+            (1_767_225_599u64, (2025, 12, 31, 23, 59, 59)),
+        ] {
+            assert_eq!(unix_to_civil(secs), expect, "for {secs}");
+            let (y, mo, d, h, mi, s) = expect;
+            let rfc = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+            assert_eq!(parse_rfc3339(&rfc), Some(secs as i64), "for {rfc}");
+        }
     }
 
     #[test]

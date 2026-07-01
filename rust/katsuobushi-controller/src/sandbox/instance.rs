@@ -39,6 +39,18 @@ pub enum Mode {
     Agent,
 }
 
+impl Mode {
+    /// The lowercase word used everywhere a mode is rendered — recipe
+    /// comments, `--json` identity, and the `status` MODE column. One
+    /// definition so the string mappings cannot drift.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Interactive => "interactive",
+            Mode::Agent => "agent",
+        }
+    }
+}
+
 /// The consolidated scalar metadata for one sandbox instance.
 ///
 /// Lives at `<stateGlob>/<name>/instance.json`; written by `katsuctl`, read by
