@@ -360,31 +360,34 @@ let
     '';
   };
 
-  # Eval-time validation of project-scoped paths
-  checkContextPath =
-    p:
+  # Eval-time validation of consumer-supplied relative paths
+  #
+  # One predicate for every path that is joined under a trusted root
+  # (workspaceContext under the project, extraRepos/homeFiles dests under the
+  # agent home): absolute paths and every ".."-escape form are rejected.
+  # `what` names the offending option in the error. Shared so the four
+  # traversal checks cannot drift apart (checkRepoDest historically missed the
+  # `/..`-suffix form).
+  checkRelativePath =
+    what: root: p:
     if lib.hasPrefix "/" p then
       throw ''
-        katsuobushi.lib.sandbox: workspaceContext entry "${p}" must be a path
-        relative to the project root, not an absolute path.''
+        katsuobushi.lib.sandbox: ${what} "${p}" must be a path relative to
+        ${root}, not an absolute path.''
     else if
       (p == "..") || (lib.hasPrefix "../" p) || (lib.hasInfix "/../" p) || (lib.hasSuffix "/.." p)
     then
       throw ''
-        katsuobushi.lib.sandbox: workspaceContext entry "${p}" must not escape
-        the project root with "..".''
+        katsuobushi.lib.sandbox: ${what} "${p}" must not escape ${root}
+        with "..".''
     else
       p;
-  validatedContext = map checkContextPath workspaceContext;
+  validatedContext = map (
+    checkRelativePath "workspaceContext entry" "the project root"
+  ) workspaceContext;
 
   checkRepoDest =
-    r:
-    if lib.hasPrefix "/" r.dest then
-      throw ''katsuobushi.lib.sandbox: extraRepos dest "${r.dest}" must be relative to the agent home.''
-    else if (r.dest == "..") || (lib.hasPrefix "../" r.dest) || (lib.hasInfix "/../" r.dest) then
-      throw ''katsuobushi.lib.sandbox: extraRepos dest "${r.dest}" must not contain "..".''
-    else
-      r;
+    r: r // { dest = checkRelativePath "extraRepos dest" "the agent home" r.dest; };
   validatedRepos = map checkRepoDest extraRepos;
 
   # Discoverability manifest
@@ -625,11 +628,29 @@ let
     entry:
     if entry ? path && entry.path != null then "${entry.source}/${entry.path}" else "${entry.source}";
 
-  homeFilesList = lib.mapAttrsToList (dest: entry: {
-    inherit dest;
-    src = homeFileSource entry;
-    mode = entry.mode;
-  }) effectiveHomeFiles;
+  # Validate at eval time: an unknown mode would otherwise fall through every
+  # filter below and the file would silently never appear in the guest — a
+  # typo'd "immutible" deserves a loud failure, not a missing file. The dest
+  # gets the same traversal check as the other home-rooted paths.
+  homeFileModes = [
+    "immutable"
+    "seed"
+    "link"
+  ];
+  homeFilesList = lib.mapAttrsToList (
+    dest: entry:
+    if !(builtins.elem (entry.mode or null) homeFileModes) then
+      throw ''
+        katsuobushi.lib.sandbox: homeFiles."${dest}" has unknown mode
+        "${toString (entry.mode or "<unset>")}"; expected one of
+        ${lib.concatStringsSep " | " homeFileModes}.''
+    else
+      {
+        dest = checkRelativePath ''homeFiles dest'' "the agent home" dest;
+        src = homeFileSource entry;
+        mode = entry.mode;
+      }
+  ) effectiveHomeFiles;
 
   immutableHomeFiles = builtins.filter (e: e.mode == "immutable") homeFilesList;
   seedHomeFiles = builtins.filter (e: e.mode == "seed") homeFilesList;
