@@ -645,8 +645,17 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
                     ));
                     r.line("  exit 1".to_string());
                     r.line("fi".to_string());
-                    r.line(format!("printf '%s' \"${{{var}}}\" > {}", qp(&cred)));
-                    r.line(format!("chmod 0600 {}", qp(&cred)));
+                    // Recreate under a subshell umask so the file is *born* 0600 —
+                    // a plain `>` then `chmod` would leave a window where the
+                    // plaintext token is world-readable under the default umask
+                    // (the fromFile branch gets the same guarantee from
+                    // `install -m 0600`). The `rm -f` matters: `>` alone would
+                    // keep a pre-existing file's looser mode.
+                    r.line(format!(
+                        "rm -f {} && (umask 077; printf '%s' \"${{{var}}}\" > {})",
+                        qp(&cred),
+                        qp(&cred)
+                    ));
                     r.line(format!("export KATSU_CRED_{}={}", s.name, qp(&cred)));
                 }
                 SecretSource::FromFile(path) => {

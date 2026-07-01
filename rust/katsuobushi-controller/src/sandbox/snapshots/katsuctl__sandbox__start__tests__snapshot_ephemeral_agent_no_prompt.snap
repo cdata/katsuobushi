@@ -21,8 +21,7 @@ if [ -z "${HARNESS_OAUTH_TOKEN:-}" ]; then
   echo "sandbox: required secret CLAUDE_CODE_OAUTH_TOKEN is not set on the host (expected in \$HARNESS_OAUTH_TOKEN)." >&2
   exit 1
 fi
-printf '%s' "${HARNESS_OAUTH_TOKEN}" > '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/cred-CLAUDE_CODE_OAUTH_TOKEN'
-chmod 0600 '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/cred-CLAUDE_CODE_OAUTH_TOKEN'
+rm -f '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/cred-CLAUDE_CODE_OAUTH_TOKEN' && (umask 077; printf '%s' "${HARNESS_OAUTH_TOKEN}" > '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/cred-CLAUDE_CODE_OAUTH_TOKEN')
 export KATSU_CRED_CLAUDE_CODE_OAUTH_TOKEN='/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/cred-CLAUDE_CODE_OAUTH_TOKEN'
 
 # Ephemeral ssh keypair (private key stays in the runtime tmpfs; pubkey travels in the share).
