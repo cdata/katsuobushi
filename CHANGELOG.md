@@ -5,6 +5,79 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.2.5] — 2026-07-01
+
+A hardening release from a full engineering audit of the sandbox feature: shell
+quoting, secret staging, and teardown fixes on the host; turn-delivery
+correctness fixes on both sides of the agent-mode channel; guest control-plane
+hardening; and safe parallel launches. No spec or instance-state bump
+(`specVersion 4` / `instanceVersion 2` unchanged) and no config changes — but
+restart agent instances so the guest-side fixes take effect, and note the
+tightened eval-time validation. See [`MIGRATING.md`](MIGRATING.md#025).
+
+### Fixed
+
+- **Recipes single-quote host paths.** The emitted start recipe double-quoted
+  paths (the git toplevel, XDG-expanded roots, context entries), leaving `$`,
+  backticks, and `\` shell-active; every path is now single-quoted with the
+  same close-escape-reopen idiom the prompt payload already used, so a path
+  containing shell-special characters is inert.
+- **`fromEnv` secrets are born `0600`.** The credential file was created under
+  the default umask and then chmod'd, leaving a brief window where the
+  plaintext token was world-readable; it is now recreated under a subshell
+  `umask 077`, matching the `install -m 0600` guarantee the `fromFile` branch
+  already had.
+- **`sandbox:stop` confirms the VM died before removing its state.** `quit`
+  was fire-and-forget: a wedged monitor fell through to recursive removal,
+  deleting the disk images out from under a still-running qemu while reporting
+  success. Stop now polls the monitor after `quit` and refuses removal (loud,
+  nonzero, nothing deleted) while it still answers; both dir removals are also
+  attempted before an error surfaces, so a partial failure no longer strands a
+  half-torn-down instance.
+- **A failed first injection no longer wedges the turn.** The guest committed
+  a turn to in-flight before the injection ran, so if the injection failed
+  (the first-turn race) every host resend of that id was dedupe-dropped
+  forever. Delivery is now tracked separately: an undelivered turn re-injects
+  on resend, a delivered one dedupes, and a resend during the stop-grace
+  window no longer creates a fresh turn (which would have executed it twice).
+- **The turn-id counter never rewinds.** A corrupt (or schema-newer)
+  `liveness.json` silently reset `nextTurnId` to 1, and the guest's turn-id
+  dedupe would then drop the next genuinely-new prompt. A corrupt record now
+  fails `sandbox:prompt` loudly instead, the best-effort heartbeat writers
+  skip rather than clobber it, and unknown fields no longer fail the parse.
+- **`sandbox:status` no longer reports a phantom active stream.** The
+  `streamActive` flag is only cleared by a clean driver shutdown, so a
+  panicked/killed driver left `status` claiming an active stream forever; the
+  flag is now believed only while the recorded heartbeat is within the
+  watchdog deadline.
+- **A stale report cannot end the wrong turn.** Both sides applied
+  accept/terminal transitions to whatever turn was in flight, so a late `done`
+  from turn N could terminate turn N+1 and falsely satisfy its delivery ack; a
+  report naming a different turn now relays without transitioning.
+- **Parallel `sandbox:start`s cannot collide.** CID/port selection read
+  sibling instances before either launch had persisted its claim (and a
+  sibling's ssh port is not even bound until its qemu boots, so the bind probe
+  alone could not see it). The planner now skips sibling-recorded ports and
+  CIDs and holds an advisory `flock` under the project state root across the
+  probe→persist window — swarm launches allocate safely.
+
+### Changed
+
+- **The guest bounds and times out its I/O.** Inbound lines on the control and
+  report sockets are capped at 1 MiB (the report socket is reachable by the
+  unprivileged in-guest agent, so an unterminated flood was an in-guest OOM),
+  outbound writes to the host time out after 10s and drop a wedged connection
+  instead of freezing the heartbeat behind it, and the `turn-state.json`
+  persist moved off the async workers so a stalled 9p share cannot pin them.
+- **Eval-time validation is tighter.** A `homeFiles` entry with an unknown
+  `mode` now fails evaluation instead of silently never appearing in the
+  guest, and `homeFiles`/`extraRepos` destinations get the same full `..`
+  traversal check as `workspaceContext` (whose `/..`-suffix form `extraRepos`
+  historically missed).
+- **Ephemeral instance names are UTC-stamped.** The timestamp is now formatted
+  in Rust (it was the lone bare-PATH `date` invocation in an otherwise
+  pinned-tool contract) and uses UTC where the shell used host-local time.
+
 ## [0.2.4] — 2026-06-29
 
 A packaging hotfix: the `sandbox:*` menu commands failed for consumers with

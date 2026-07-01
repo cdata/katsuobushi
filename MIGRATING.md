@@ -8,6 +8,39 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.2.5
+
+**Action required: rebuild your dev shell and restart agent instances.**
+
+A hardening release; no spec or instance-state bump (`specVersion 4` /
+`instanceVersion 2` unchanged) and **no config changes** for a correctly
+configured project. Rebuild your dev shell to pick up the new controller, and
+**restart any running agent instances** — the turn-delivery fixes live in the
+guest image, so a VM booted under `0.2.4` keeps the old behavior until its next
+start. Persistent (`--name`d) instances keep working across the upgrade; they
+get the new guest on their next `sandbox:start`.
+
+Three behavioral changes are worth knowing:
+
+- **Eval-time validation is tighter, and can newly fail your flake.** A
+  `homeFiles` entry with an unknown `mode` (e.g. a typo like `"immutible"`) now
+  throws at evaluation instead of silently never appearing in the guest, and
+  `homeFiles`/`extraRepos` destinations now reject every `..` traversal form. If
+  your eval starts failing here, the entry was silently misconfigured before —
+  the file it names was not landing in the guest.
+- **`sandbox:stop` can now refuse.** If the VM's monitor keeps answering after
+  `quit`, stop exits nonzero with nothing removed instead of deleting the disk
+  images out from under a live qemu. Retry, or inspect the qemu process before
+  discarding state.
+- **`sandbox:prompt` fails loudly on a corrupt `liveness.json`.** Previously a
+  corrupt record silently rewound the turn-id counter (which could drop the next
+  prompt); now the prompt errors and names the file. Remove
+  `<state>/<instance>/liveness.json` to start the counter over if you hit it.
+
+Cosmetic: ephemeral instance names are now UTC-stamped (previously host-local
+time), and `sandbox:status` stops showing "stream active" once heartbeats go
+stale rather than trusting a leftover flag.
+
 ## 0.2.4
 
 **Action required: rebuild your dev shell.**
