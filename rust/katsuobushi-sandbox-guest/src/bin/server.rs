@@ -111,6 +111,11 @@ impl Default for TurnState {
 #[derive(Debug, Clone)]
 struct Turn {
     id: u64,
+    /// Whether `inject_prompt` actually succeeded for this turn. Creating the
+    /// turn and delivering it are distinct: if the first injection fails (the
+    /// first-turn race), a host resend of the same id must *retry delivery*
+    /// rather than be dedupe-dropped — otherwise the turn wedges forever.
+    injected: bool,
     accepted: bool,
     terminal_reported: bool,
     ended: bool,
@@ -138,6 +143,10 @@ struct Session {
 enum Event {
     /// Inbound `Prompt{turn_id}` on the control connection.
     Prompt { turn_id: u64 },
+    /// `inject_prompt` succeeded for this turn (driven by the control task
+    /// after the async injection completes, so the machine can tell a
+    /// delivered turn from one whose injection failed).
+    Injected { turn_id: u64 },
     /// A relayed `report <status> <text>` line.
     Report(Report),
     /// A `report hook <event>` lifecycle line.
@@ -178,16 +187,27 @@ impl Session {
         let mut out = Outcome::default();
         match event {
             Event::Prompt { turn_id } => {
-                // Dedupe a resend: the same in-flight, not-yet-ended
-                // id is dropped — no re-inject, no transition.
+                // A resend of the current turn: retry delivery if the first
+                // injection never succeeded (the wedge this distinction
+                // exists for), otherwise drop it — including during the
+                // grace window, where re-injecting an already-executed turn
+                // would run it twice.
                 if let Some(t) = self.turn.as_ref() {
-                    if t.id == turn_id && !t.ended {
+                    if t.id == turn_id {
+                        if !t.injected && !t.ended {
+                            self.state.last_activity_at = now.to_string();
+                            out.inject = true;
+                            out.persist = Some(PersistMode::Throttled);
+                            // Early return skips the common snapshot attach.
+                            out.snapshot = Some(self.state.clone());
+                        }
                         return out;
                     }
                 }
                 // A genuinely new (or superseding) turn.
                 self.turn = Some(Turn {
                     id: turn_id,
+                    injected: false,
                     accepted: false,
                     terminal_reported: false,
                     ended: false,
@@ -202,6 +222,15 @@ impl Session {
                 };
                 out.inject = true;
                 out.persist = Some(PersistMode::Force);
+            }
+            Event::Injected { turn_id } => {
+                // In-memory bookkeeping only: the turn's delivery is confirmed,
+                // so future resends of this id dedupe instead of re-injecting.
+                if let Some(t) = self.turn.as_mut() {
+                    if t.id == turn_id {
+                        t.injected = true;
+                    }
+                }
             }
             Event::Report(report) => {
                 let terminal = matches!(report.status, Status::Done | Status::Blocked);
@@ -577,11 +606,22 @@ where
                 Ok(HostMessage::Prompt(p)) => {
                     let outcome = drive_event(&ctl, Event::Prompt { turn_id: p.turn_id }).await;
                     if outcome.inject {
-                        if let Err(e) = inject_prompt(&peer, p.turn_id, &p.text).await {
-                            eprintln!("katsuobushi-control: inject failed: {e:#}");
+                        match inject_prompt(&peer, p.turn_id, &p.text).await {
+                            Ok(()) => {
+                                // Confirm delivery so resends of this id dedupe.
+                                let confirmed =
+                                    drive_event(&ctl, Event::Injected { turn_id: p.turn_id })
+                                        .await;
+                                execute_outcome(&ctl, confirmed).await;
+                            }
+                            // Leave `injected` unset: the host's delivery-
+                            // deadline resend will retry the injection.
+                            Err(e) => eprintln!(
+                                "katsuobushi-control: inject failed (host resend will retry): {e:#}"
+                            ),
                         }
                     } else {
-                        // dedupe: a resend for the same in-flight turn.
+                        // dedupe: a resend for an already-delivered turn.
                         eprintln!(
                             "katsuobushi-control: dropping resend for in-flight turn {}",
                             p.turn_id
@@ -792,14 +832,48 @@ mod tests {
     }
 
     #[test]
-    fn it_dedupes_a_resend_of_an_in_flight_turn() {
+    fn it_dedupes_a_resend_of_a_delivered_in_flight_turn() {
         let mut s = Session::default();
         step(&mut s, Event::Prompt { turn_id: 1 });
+        step(&mut s, Event::Injected { turn_id: 1 });
         let out = step(&mut s, Event::Prompt { turn_id: 1 });
         // Dropped: no re-inject, no transition, no persist.
         assert!(!out.inject);
         assert!(out.persist.is_none());
         assert!(out.messages.is_empty());
+    }
+
+    #[test]
+    fn it_reinjects_a_resend_when_the_first_injection_never_succeeded() {
+        let mut s = Session::default();
+        step(&mut s, Event::Prompt { turn_id: 1 });
+        // No `Injected` confirmation: the first inject failed (first-turn
+        // race). The host's delivery-deadline resend must retry delivery
+        // rather than wedge the turn behind the dedupe.
+        let out = step(&mut s, Event::Prompt { turn_id: 1 });
+        assert!(out.inject, "an undelivered turn's resend re-injects");
+        assert!(out.messages.is_empty());
+        // Same logical turn: state is not reset.
+        assert_eq!(s.state.turn_id, Some(1));
+        assert_eq!(s.state.phase, Phase::InFlight);
+        assert!(!s.turn.as_ref().unwrap().accepted);
+    }
+
+    #[test]
+    fn it_dedupes_a_resend_during_the_grace_window() {
+        let mut s = Session::default();
+        step(&mut s, Event::Prompt { turn_id: 1 });
+        step(&mut s, Event::Injected { turn_id: 1 });
+        step(&mut s, Event::Hook(HookEvent::TurnEnded)); // arms the grace window
+        // A resend of the SAME id while the turn is ended-but-unresolved must
+        // not create a fresh turn — re-injecting an already-executed turn
+        // would run it twice.
+        let out = step(&mut s, Event::Prompt { turn_id: 1 });
+        assert!(!out.inject);
+        assert!(
+            s.turn.as_ref().unwrap().ended,
+            "the ended turn is left in place for the grace resolution"
+        );
     }
 
     #[test]
