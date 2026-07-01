@@ -489,9 +489,13 @@ fn identity_json(plan: &Plan) -> String {
 
 // ---- recipe construction -------------------------------------
 
-/// Double-quote a path for the emitted shell (paths may contain spaces).
-fn dq(p: &Path) -> String {
-    format!("\"{}\"", p.display())
+/// Single-quote a path for the emitted shell. Double quotes would leave `$`,
+/// backticks, and `\` shell-active — and these paths are host-derived (the git
+/// toplevel, XDG-expanded roots, context entries), not validated like instance
+/// names — so they must never be shell-interpreted. Single quotes cover spaces
+/// too; escaping delegates to [`sq`].
+fn qp(p: &Path) -> String {
+    sq(&p.display().to_string())
 }
 
 /// Single-quote arbitrary text for the emitted shell (the `--prompt` payload is
@@ -530,11 +534,11 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     // ---- dirs + the parent clamp ----
     r.line(format!(
         "mkdir -p {} {}",
-        dq(&state_root),
-        dq(&runtime_root)
+        qp(&state_root),
+        qp(&runtime_root)
     ));
-    r.line(format!("chmod 700 {}", dq(&runtime_root)));
-    r.line(format!("chmod 700 {}", dq(&state_base)));
+    r.line(format!("chmod 700 {}", qp(&runtime_root)));
+    r.line(format!("chmod 700 {}", qp(&state_base)));
     // Open the per-instance share root itself (non-recursive, so the large
     // image files keep their perms) so the agent-run guest controller can
     // create entries here — notably turn-state.json. The 9p share is
@@ -542,7 +546,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     // agent-owned), but a host-created root-owned dir is otherwise unwritable by
     // the agent; the parent state_base is clamped 700, so this only widens
     // within the per-instance dir. Mirrors the sync.git push-perm chmod below.
-    r.line(format!("chmod a+rwX {}", dq(&state_root)));
+    r.line(format!("chmod a+rwX {}", qp(&state_root)));
 
     // ---- bare mirror (idempotent) + branch seed + push-perm chmod ----
     r.blank().comment(
@@ -551,16 +555,16 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     if plan.clone_mirror {
         r.line(format!(
             "{git} clone --bare {} {} >/dev/null 2>&1",
-            dq(&plan.project),
-            dq(&sync_git)
+            qp(&plan.project),
+            qp(&sync_git)
         ));
     }
     match &plan.seed {
         Seed::Fresh(commit) => {
             r.line(format!(
                 "{git} -C {} push --quiet {} \"{commit}:{branch}\" --force",
-                dq(&plan.project),
-                dq(&sync_git)
+                qp(&plan.project),
+                qp(&sync_git)
             ));
         }
         Seed::Resume(commit) => {
@@ -571,7 +575,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     }
     // Re-open the whole mirror to "other" writes so the guest can push (the
     // mapped-xattr saga) — run every launch, idempotent.
-    r.line(format!("chmod -R a+rwX {}", dq(&sync_git)));
+    r.line(format!("chmod -R a+rwX {}", qp(&sync_git)));
 
     // ---- importHostStoreDb snapshot, only when enabled ----
     if spec.import_host_store_db {
@@ -586,11 +590,13 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
         r.blank()
             .comment("Snapshot the host Nix DB so the guest reuses host-built paths (non-fatal).");
         r.line(r#"hostdb="${NIX_STATE_DIR:-/nix/var/nix}/db/db.sqlite""#.to_string());
+        // The dot-command is single-quoted for the *shell* (the path must not be
+        // shell-interpreted); the inner quotes are sqlite's own dot-arg quoting.
         r.line(format!(
-            "{sqlite} \"$hostdb\" \".backup '{}'\" 2>/dev/null && mv -f {} {} || true",
-            tmp.display(),
-            dq(&tmp),
-            dq(&dest)
+            "{sqlite} \"$hostdb\" {} 2>/dev/null && mv -f {} {} || true",
+            sq(&format!(".backup '{}'", tmp.display())),
+            qp(&tmp),
+            qp(&dest)
         ));
     }
 
@@ -600,8 +606,8 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
         r.blank().comment(
             "Stage declared untracked context (rsync --safe-links drops escaping symlinks).",
         );
-        r.line(format!("rm -rf {}", dq(&ctx_root)));
-        r.line(format!("mkdir -p {}", dq(&ctx_root)));
+        r.line(format!("rm -rf {}", qp(&ctx_root)));
+        r.line(format!("mkdir -p {}", qp(&ctx_root)));
         for p in &spec.context {
             let src = plan.project.join(p);
             let dst = ctx_root.join(p);
@@ -613,10 +619,10 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
             // existence guard stays in the script (the shell did the same).
             r.line(format!(
                 "[ -e {} ] && {{ mkdir -p {}; {rsync} -a --safe-links {} {}/; }} || true",
-                dq(&src),
-                dq(&dst_parent),
-                dq(&src),
-                dq(&dst_parent)
+                qp(&src),
+                qp(&dst_parent),
+                qp(&src),
+                qp(&dst_parent)
             ));
         }
     }
@@ -639,21 +645,21 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
                     ));
                     r.line("  exit 1".to_string());
                     r.line("fi".to_string());
-                    r.line(format!("printf '%s' \"${{{var}}}\" > {}", dq(&cred)));
-                    r.line(format!("chmod 0600 {}", dq(&cred)));
-                    r.line(format!("export KATSU_CRED_{}={}", s.name, dq(&cred)));
+                    r.line(format!("printf '%s' \"${{{var}}}\" > {}", qp(&cred)));
+                    r.line(format!("chmod 0600 {}", qp(&cred)));
+                    r.line(format!("export KATSU_CRED_{}={}", s.name, qp(&cred)));
                 }
                 SecretSource::FromFile(path) => {
                     let src = Path::new(path);
-                    r.line(format!("if [ ! -r {} ]; then", dq(src)));
+                    r.line(format!("if [ ! -r {} ]; then", qp(src)));
                     r.line(format!(
                         "  echo \"sandbox: required secret {} not readable at {}.\" >&2",
                         s.name, path
                     ));
                     r.line("  exit 1".to_string());
                     r.line("fi".to_string());
-                    r.line(format!("install -m 0600 {} {}", dq(src), dq(&cred)));
-                    r.line(format!("export KATSU_CRED_{}={}", s.name, dq(&cred)));
+                    r.line(format!("install -m 0600 {} {}", qp(src), qp(&cred)));
+                    r.line(format!("export KATSU_CRED_{}={}", s.name, qp(&cred)));
                 }
             }
         }
@@ -667,15 +673,15 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
         .comment("Ephemeral ssh keypair (private key stays in the runtime tmpfs; pubkey travels in the share).");
     r.line(format!(
         "[ -f {} ] || {ssh_keygen} -t ed25519 -N \"\" -f {} -q",
-        dq(&id_key),
-        dq(&id_key)
+        qp(&id_key),
+        qp(&id_key)
     ));
-    r.line(format!("cp {} {}", dq(&id_pub), dq(&authorized_keys)));
+    r.line(format!("cp {} {}", qp(&id_pub), qp(&authorized_keys)));
 
     // ---- launch environment for the microvm runner (extraArgsScript reads these) ----
     r.blank()
         .comment("Per-instance launch environment for the microvm runner.");
-    r.line(format!("export KATSU_STATE_DIR={}", dq(&state_root)));
+    r.line(format!("export KATSU_STATE_DIR={}", qp(&state_root)));
     r.line(format!("export KATSU_SSH_PORT={}", plan.ssh_port));
     if let Some(cid) = plan.vsock_cid {
         r.line(format!("export KATSU_VSOCK_CID={cid}"));
@@ -703,7 +709,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
                 "echo \"sandbox: WARNING! Hardware graphics capability widens the host-facing \
                 attack surface, increasing the risk of guest escape.\" >&2",
             );
-            r.line(format!("export KATSU_GFX_RENDERNODE={}", dq(node)));
+            r.line(format!("export KATSU_GFX_RENDERNODE={}", qp(node)));
             r.line("export KATSU_GFX_VENUS=1".to_string());
         }
         // The software rung is in-guest llvmpipe — graphics is on (announced
@@ -719,9 +725,9 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     for img in &spec.disk_images {
         let target = state_root.join(img);
         let link = runtime_root.join(img);
-        r.line(format!("ln -sfn {} {}", dq(&target), dq(&link)));
+        r.line(format!("ln -sfn {} {}", qp(&target), qp(&link)));
     }
-    r.line(format!("cd {}", dq(&runtime_root)));
+    r.line(format!("cd {}", qp(&runtime_root)));
 
     // ---- mode-specific tail ----
     match plan.mode {
@@ -769,7 +775,7 @@ fn agent_tail(
         .comment("Agent mode: detach a lingering VM (setsid) that outlives this script.");
     r.line(format!(
         "setsid {runner} > {} 2>&1 < /dev/null &",
-        dq(console_log)
+        qp(console_log)
     ));
     r.line("vm=$!".to_string());
     r.line("disown \"$vm\" 2>/dev/null || true".to_string());
@@ -788,7 +794,7 @@ fn agent_tail(
             r.comment("Wait for the VM's QMP monitor socket before delivering the first turn.");
             r.line(format!(
                 "for _ in $(seq 1 120); do [ -S {} ] && break; sleep 0.5; done",
-                dq(&qmp_sock)
+                qp(&qmp_sock)
             ));
             r.comment("Deliver the first turn by tail-calling the prompt subcommand (it bakes in the channel readiness wait).");
             // Absolute path from the spec (not a bare `katsuctl`): this line runs
@@ -798,7 +804,7 @@ fn agent_tail(
             r.line(format!(
                 "exec {} sandbox --config {} prompt \"{}\" {}",
                 spec.tools.katsuctl.display(),
-                dq(config),
+                qp(config),
                 plan.name,
                 sq(text)
             ));
@@ -844,8 +850,8 @@ fn interactive_tail(
     r.line("    kill -9 \"$vm\" 2>/dev/null || true".to_string());
     r.line("    wait \"$vm\" 2>/dev/null || true".to_string());
     r.line("  fi".to_string());
-    r.line(format!("  rm -rf {}", dq(runtime_root)));
-    r.line(format!("  [ -d {} ] || return 0", dq(state_root)));
+    r.line(format!("  rm -rf {}", qp(runtime_root)));
+    r.line(format!("  [ -d {} ] || return 0", qp(state_root)));
     if plan.named {
         // Named instances are persistent (restart with the full suffixed name).
         r.line(format!(
@@ -854,7 +860,7 @@ fn interactive_tail(
             state_root.display()
         ));
     } else {
-        r.line(format!("  rm -rf {}", dq(state_root)));
+        r.line(format!("  rm -rf {}", qp(state_root)));
     }
     r.line("}".to_string());
     r.line("trap cleanup EXIT".to_string());
@@ -867,7 +873,7 @@ fn interactive_tail(
         plan.name,
         console_log.display()
     ));
-    r.line(format!("{runner} > {} 2>&1 &", dq(console_log)));
+    r.line(format!("{runner} > {} 2>&1 &", qp(console_log)));
     r.line("vm=$!".to_string());
     r.line(format!(
         "echo \"sandbox: connecting to '{}' on 127.0.0.1:{}\"",
@@ -880,7 +886,7 @@ fn interactive_tail(
     ));
     r.line(format!(
         "{ssh} -i {} -p {} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR {agent_user}@127.0.0.1 || true",
-        dq(id_key),
+        qp(id_key),
         plan.ssh_port
     ));
 }

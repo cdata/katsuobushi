@@ -1,34 +1,34 @@
 ---
-source: rust/katsuctl/src/sandbox/start.rs
+source: rust/katsuobushi-controller/src/sandbox/start.rs
 expression: "render(&spec, &plan(\"20260627-120000-4242\", false, Mode::Interactive))"
 ---
 #!/usr/bin/env bash
 set -euo pipefail
 
 # katsuctl sandbox start: set up and boot interactive instance '20260627-120000-4242'
-mkdir -p "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242" "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
-chmod 700 "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
-chmod 700 "/state/katsuobushi"
-chmod a+rwX "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
+mkdir -p '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242' '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242'
+chmod 700 '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242'
+chmod 700 '/state/katsuobushi'
+chmod a+rwX '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242'
 
 # Per-instance bare git mirror + seeded branch (the guest clones it and pushes back).
-/nix/store/git/bin/git clone --bare "/home/user/project" "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/sync.git" >/dev/null 2>&1
-/nix/store/git/bin/git -C "/home/user/project" push --quiet "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/sync.git" "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0:refs/heads/sandbox/20260627-120000-4242" --force
-chmod -R a+rwX "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/sync.git"
+/nix/store/git/bin/git clone --bare '/home/user/project' '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/sync.git' >/dev/null 2>&1
+/nix/store/git/bin/git -C '/home/user/project' push --quiet '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/sync.git' "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0:refs/heads/sandbox/20260627-120000-4242" --force
+chmod -R a+rwX '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/sync.git'
 
 # Ephemeral ssh keypair (private key stays in the runtime tmpfs; pubkey travels in the share).
-[ -f "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id" ] || /nix/store/openssh/bin/ssh-keygen -t ed25519 -N "" -f "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id" -q
-cp "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id.pub" "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/authorized_keys"
+[ -f '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id' ] || /nix/store/openssh/bin/ssh-keygen -t ed25519 -N "" -f '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id' -q
+cp '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id.pub' '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/authorized_keys'
 
 # Per-instance launch environment for the microvm runner.
-export KATSU_STATE_DIR="/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
+export KATSU_STATE_DIR='/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242'
 export KATSU_SSH_PORT=22042
 
 # Back each guest disk image from the persistent state dir via a runtime symlink.
-ln -sfn "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/rw-store.img" "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/rw-store.img"
-ln -sfn "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/nix-db.img" "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/nix-db.img"
-ln -sfn "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/scratch.img" "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/scratch.img"
-cd "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
+ln -sfn '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/rw-store.img' '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/rw-store.img'
+ln -sfn '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/nix-db.img' '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/nix-db.img'
+ln -sfn '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/scratch.img' '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/scratch.img'
+cd '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242'
 
 # Tear the VM down on any exit; an ephemeral instance also prunes its state dir.
 cleanup() {
@@ -40,9 +40,9 @@ cleanup() {
     kill -9 "$vm" 2>/dev/null || true
     wait "$vm" 2>/dev/null || true
   fi
-  rm -rf "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
-  [ -d "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242" ] || return 0
-  rm -rf "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242"
+  rm -rf '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242'
+  [ -d '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242' ] || return 0
+  rm -rf '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242'
 }
 trap cleanup EXIT
 trap 'exit 143' TERM
@@ -50,8 +50,8 @@ trap 'exit 130' INT
 trap 'exit 129' HUP
 
 echo "sandbox: launching interactive instance '20260627-120000-4242' (logs: /state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/console.log)"
-/nix/store/microvm/bin/microvm-run > "/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/console.log" 2>&1 &
+/nix/store/microvm/bin/microvm-run > '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/console.log' 2>&1 &
 vm=$!
 echo "sandbox: connecting to '20260627-120000-4242' on 127.0.0.1:22042"
 for _ in $(seq 1 120); do (exec 3<>"/dev/tcp/127.0.0.1/22042") 2>/dev/null && break; sleep 1; done
-/nix/store/openssh/bin/ssh -i "/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id" -p 22042 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR agent@127.0.0.1 || true
+/nix/store/openssh/bin/ssh -i '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id' -p 22042 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR agent@127.0.0.1 || true
