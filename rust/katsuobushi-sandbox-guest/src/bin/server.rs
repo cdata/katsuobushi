@@ -531,6 +531,41 @@ impl ServerHandler for ControlServer {
     }
 }
 
+/// Cap on a single inbound line, on both the control and report sockets.
+/// `lines()` would otherwise buffer a newline-less flood without bound — and
+/// the report socket is reachable by the unprivileged in-guest agent, so an
+/// unbounded read is an in-guest OOM an untrusted turn could trigger. Real
+/// lines are small (a `Prompt` or a one-line report); 1 MiB is generous.
+const MAX_LINE_BYTES: u64 = 1024 * 1024;
+
+/// Read one newline-terminated line of at most [`MAX_LINE_BYTES`], through a
+/// reusable buffer. `Ok(None)` on EOF; an oversized line is an error so the
+/// caller drops the connection instead of buffering forever.
+async fn next_bounded_line<R>(reader: &mut R, buf: &mut Vec<u8>) -> std::io::Result<Option<String>>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::AsyncReadExt as _;
+    buf.clear();
+    let n = (&mut *reader)
+        .take(MAX_LINE_BYTES)
+        .read_until(b'\n', buf)
+        .await?;
+    if n == 0 {
+        return Ok(None); // EOF
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    } else if n as u64 == MAX_LINE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("line exceeds {MAX_LINE_BYTES} bytes; dropping the connection"),
+        ));
+    }
+    // else: EOF with no trailing newline — treat the tail as the final line.
+    Ok(Some(String::from_utf8_lossy(buf).into_owned()))
+}
+
 /// Push one operator directive into the live session as a `<channel>` turn.
 async fn inject_prompt(peer: &Peer<RoleServer>, turn_id: u64, text: &str) -> anyhow::Result<()> {
     // `meta` keys must be `[A-Za-z0-9_]` (hyphens are silently dropped by Claude
@@ -598,9 +633,10 @@ where
         }
     }
 
-    let mut lines = BufReader::new(read_half).lines();
+    let mut reader = BufReader::new(read_half);
+    let mut buf = Vec::new();
     loop {
-        match lines.next_line().await {
+        match next_bounded_line(&mut reader, &mut buf).await {
             Ok(Some(line)) if line.trim().is_empty() => continue,
             Ok(Some(line)) => match serde_json::from_str::<HostMessage>(&line) {
                 Ok(HostMessage::Prompt(p)) => {
@@ -700,8 +736,9 @@ async fn run_report(ctl: Arc<Control>) -> anyhow::Result<()> {
 /// machine: a `Report` relays + marks accepted/terminal; a `Hook` latches
 /// readiness, acks the turn, or resolves the grace window.
 async fn relay_report(stream: UnixStream, ctl: Arc<Control>) -> anyhow::Result<()> {
-    let mut lines = BufReader::new(stream).lines();
-    while let Some(line) = lines.next_line().await? {
+    let mut reader = BufReader::new(stream);
+    let mut buf = Vec::new();
+    while let Some(line) = next_bounded_line(&mut reader, &mut buf).await? {
         if line.trim().is_empty() {
             continue;
         }
@@ -818,6 +855,63 @@ mod tests {
             text: "shipped".into(),
             turn_id: None,
         })
+    }
+
+    // ── The bounded line reader (both socket loops) ─────────────────────────
+
+    #[tokio::test]
+    async fn it_reads_lines_and_signals_eof_within_the_bound() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut writer = client;
+        writer.write_all(b"one\ntwo\n").await.unwrap();
+        drop(writer);
+
+        let mut reader = BufReader::new(server);
+        let mut buf = Vec::new();
+        assert_eq!(
+            next_bounded_line(&mut reader, &mut buf).await.unwrap(),
+            Some("one".to_string())
+        );
+        assert_eq!(
+            next_bounded_line(&mut reader, &mut buf).await.unwrap(),
+            Some("two".to_string())
+        );
+        assert_eq!(next_bounded_line(&mut reader, &mut buf).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn it_errors_on_a_line_exceeding_the_bound() {
+        // A newline-less flood (the report socket is agent-reachable, so this
+        // is the in-guest OOM vector) must error at the cap, not buffer on.
+        let (client, server) = tokio::io::duplex((MAX_LINE_BYTES as usize) + 1024);
+        let mut writer = client;
+        writer
+            .write_all(&vec![b'A'; (MAX_LINE_BYTES as usize) + 8])
+            .await
+            .unwrap();
+        drop(writer);
+
+        let mut reader = BufReader::new(server);
+        let mut buf = Vec::new();
+        let err = next_bounded_line(&mut reader, &mut buf)
+            .await
+            .expect_err("an oversized line must error");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn it_treats_an_unterminated_tail_as_the_final_line() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut writer = client;
+        writer.write_all(b"tail-no-newline").await.unwrap();
+        drop(writer);
+
+        let mut reader = BufReader::new(server);
+        let mut buf = Vec::new();
+        assert_eq!(
+            next_bounded_line(&mut reader, &mut buf).await.unwrap(),
+            Some("tail-no-newline".to_string())
+        );
     }
 
     #[test]
