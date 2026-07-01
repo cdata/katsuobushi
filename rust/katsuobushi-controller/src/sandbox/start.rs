@@ -102,6 +102,13 @@ pub fn run(
     let host = HostImpl::new().context("initializing the host IO seam")?;
     let roots = resolve_roots(&spec.roots)?;
 
+    // Serialize the allocation window across concurrent `start`s: the CID/port
+    // picks read sibling `instance.json` files, and this launch's own record is
+    // not written until after `decide` returns — unserialized, two parallel
+    // launches (the swarm workflow) could claim the same CID or port. The
+    // advisory flock covers probe→persist and releases when this process exits.
+    let _alloc_lock = lock_allocation(&roots.state_glob)?;
+
     let mut rng = OsRng::new();
     let clock = now_timestamp(&host)?;
     let pid = std::process::id();
@@ -173,20 +180,25 @@ fn decide(
     // here, before instance.json is written or a recipe is emitted.
     let (full_name, named) = decide_name(name, clock, pid, rng)?;
 
-    // Probe a free loopback port.
-    let ssh_port = pick_port(|p| host.port_is_free(p), rng)?;
+    // Sibling claims (recorded CIDs *and* ports), gathered before any
+    // allocation: a sibling's ssh port is not bound until its qemu boots, so
+    // the bind probe alone cannot see a just-planned launch's claim.
+    let claims = gather_sibling_claims(host, &roots.state_glob, &full_name);
+
+    // Probe a free loopback port, also skipping sibling-recorded ports.
+    let ssh_port = pick_port(
+        |p| !claims.used_ports.contains(&p) && host.port_is_free(p),
+        rng,
+    )?;
 
     // Agent mode allocates a vsock CID not claimed by a sibling; a resumed named
     // instance keeps its already-recorded CID.
     let vsock_cid = match mode {
         Mode::Interactive => None,
-        Mode::Agent => {
-            let (used, own) = gather_used_cids(host, &roots.state_glob, &full_name);
-            Some(match own {
-                Some(cid) => cid,
-                None => pick_cid(&used, rng)?,
-            })
-        }
+        Mode::Agent => Some(match claims.own_cid {
+            Some(cid) => cid,
+            None => pick_cid(&claims.used_cids, rng)?,
+        }),
     };
 
     let project = resolve_project(host, &spec.tools.git)?;
@@ -310,22 +322,17 @@ fn has_hex8_suffix(name: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
-/// Collect the vsock CIDs already claimed by *sibling* instances, plus this
-/// instance's own recorded CID when it is being resumed. Each sibling's CID is
-/// read from its
-/// `instance.json` through the seam, so the whole sweep is `FakeHost`-testable. A
-/// missing/unreadable/parse-failing sibling is simply skipped (best-effort, as the
-/// shell's `cat … 2>/dev/null` was).
-fn gather_used_cids(
-    host: &impl Host,
-    state_glob: &Path,
-    current: &str,
-) -> (HashSet<u32>, Option<u32>) {
-    let mut used = HashSet::new();
-    let mut own = None;
+/// Collect the vsock CIDs and ssh ports already claimed by *sibling* instances,
+/// plus this instance's own recorded CID when it is being resumed. Each
+/// sibling's claims are read from its `instance.json` through the seam, so the
+/// whole sweep is `FakeHost`-testable. A missing/unreadable/parse-failing
+/// sibling is simply skipped (best-effort, as the shell's `cat … 2>/dev/null`
+/// was).
+fn gather_sibling_claims(host: &impl Host, state_glob: &Path, current: &str) -> SiblingClaims {
+    let mut claims = SiblingClaims::default();
     let names = match host.list_dir(state_glob) {
         Ok(names) => names,
-        Err(_) => return (used, own),
+        Err(_) => return claims,
     };
     for name in names {
         if name.starts_with('.') {
@@ -335,30 +342,47 @@ fn gather_used_cids(
         let Ok(bytes) = host.read(&path) else {
             continue;
         };
-        let Some(cid) = parse_cid(&bytes) else {
+        let Some((cid, port)) = parse_claims(&bytes) else {
             continue;
         };
         if name == current {
-            own = Some(cid);
+            claims.own_cid = cid;
         } else {
-            used.insert(cid);
+            if let Some(cid) = cid {
+                claims.used_cids.insert(cid);
+            }
+            if let Some(port) = port {
+                claims.used_ports.insert(port);
+            }
         }
     }
-    (used, own)
+    claims
 }
 
-/// Extract just the `vsockCid` from an `instance.json` blob, tolerating any other
-/// fields (this is a CID census, not a full load, so it must not fail on a
-/// schema-newer sibling).
-fn parse_cid(bytes: &[u8]) -> Option<u32> {
+/// The resources sibling instances have recorded (and the current instance's
+/// own prior CID, for a verbatim resume). Gathered once per `decide` and
+/// consulted by both the port and CID picks.
+#[derive(Debug, Default)]
+struct SiblingClaims {
+    used_cids: HashSet<u32>,
+    used_ports: HashSet<u16>,
+    own_cid: Option<u32>,
+}
+
+/// Extract just the `vsockCid` + `sshPort` from an `instance.json` blob,
+/// tolerating any other fields (this is a claims census, not a full load, so it
+/// must not fail on a schema-newer sibling).
+fn parse_claims(bytes: &[u8]) -> Option<(Option<u32>, Option<u16>)> {
     #[derive(serde::Deserialize)]
-    struct CidProbe {
+    struct ClaimProbe {
         #[serde(rename = "vsockCid")]
         vsock_cid: Option<u32>,
+        #[serde(rename = "sshPort")]
+        ssh_port: Option<u16>,
     }
-    serde_json::from_slice::<CidProbe>(bytes)
+    serde_json::from_slice::<ClaimProbe>(bytes)
         .ok()
-        .and_then(|c| c.vsock_cid)
+        .map(|c| (c.vsock_cid, c.ssh_port))
 }
 
 /// Resolve the host project root via `git rev-parse --show-toplevel` (run through
@@ -456,6 +480,27 @@ fn now_timestamp(host: &impl Host) -> Result<String> {
         bail!("`date` produced no timestamp");
     }
     Ok(stamp)
+}
+
+/// Take the project-wide allocation lock: an exclusive advisory `flock` on a
+/// dotfile under the state root (dot-prefixed, so the sibling sweep skips it).
+/// Blocks until any concurrent `start` finishes its probe→persist window; the
+/// lock releases when the returned handle drops (or the process exits, however
+/// it exits). Direct `std::fs` rather than the [`Host`] seam: this is [`run`]'s
+/// world-touching layer, and [`decide`] stays pure.
+fn lock_allocation(state_glob: &Path) -> Result<std::fs::File> {
+    std::fs::create_dir_all(state_glob)
+        .with_context(|| format!("creating the state root {}", state_glob.display()))?;
+    let path = state_glob.join(".start.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("opening the allocation lock {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("locking {}", path.display()))?;
+    Ok(file)
 }
 
 /// The `<base>/katsuobushi` directory whose mode is clamped to 700 so no *other*
@@ -1231,9 +1276,45 @@ mod tests {
         let mut host = FakeHost::new();
         host.push_list_dir(Ok(vec!["myfeature-0badf00d".into()]))
             .push_read(Ok(br#"{"vsockCid": 777}"#.to_vec()));
-        let (used, own) = gather_used_cids(&host, &host_state, "myfeature-0badf00d");
-        assert!(used.is_empty(), "the current instance is not a sibling");
-        assert_eq!(own, Some(777));
+        let claims = gather_sibling_claims(&host, &host_state, "myfeature-0badf00d");
+        assert!(
+            claims.used_cids.is_empty(),
+            "the current instance is not a sibling"
+        );
+        assert_eq!(claims.own_cid, Some(777));
+    }
+
+    #[test]
+    fn it_skips_a_port_recorded_by_a_sibling_instance() {
+        // A sibling's recorded sshPort is not bound until its qemu boots, so
+        // the bind probe alone cannot see it — the recorded claim must be
+        // enough to force a re-draw.
+        let spec = spec_with(vec![], vec![], false);
+        let mut host = FakeHost::new();
+        host.with_free_port(20_005) // free per the bind probe, but claimed
+            .with_free_port(20_010)
+            .push_list_dir(Ok(vec!["sibling-aaaaaaaa".into()]))
+            .push_read(Ok(br#"{"vsockCid": 13, "sshPort": 20005}"#.to_vec()))
+            .push_run(Ok(ok_out("/home/user/project\n")))
+            .push_run(Ok(ok_out("")))
+            .push_run(Ok(ok_out("cafebabe\n")));
+        // port rng 5 -> 20005 (claimed by the sibling; re-draw), 10 -> 20010.
+        let mut rng = FakeRng::new(&[5, 10]);
+
+        let plan = decide(
+            &host,
+            &mut rng,
+            &roots(),
+            &spec,
+            false,
+            None,
+            None,
+            "20260627-120000",
+            7,
+        )
+        .expect("planning should succeed");
+
+        assert_eq!(plan.ssh_port, 20_010, "skipped the sibling's claimed port");
     }
 
     // ---- seam: seed resolution (tier 3) ----
