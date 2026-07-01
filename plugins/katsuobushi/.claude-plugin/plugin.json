@@ -1,7 +1,7 @@
 {
   "name": "katsuobushi",
   "description": "Agent skills for the Katsuobushi Nix toolkit.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "author": {
     "name": "cdata"
   },
