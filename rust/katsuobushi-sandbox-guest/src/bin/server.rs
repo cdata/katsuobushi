@@ -237,7 +237,15 @@ impl Session {
                 self.state.last_activity_at = now.to_string();
                 let mut force = false;
                 let mut clear_turn = false;
-                if let Some(t) = self.turn.as_mut() {
+                // A report that names a *different* turn is stale (a late
+                // `done` from turn N must not end turn N+1): relay it, but
+                // apply no accept/terminal transition. One with no id keeps
+                // the documented ordering-based correlation.
+                let matches_turn = self
+                    .turn
+                    .as_ref()
+                    .is_some_and(|t| report.turn_id.is_none_or(|id| id == t.id));
+                if let Some(t) = self.turn.as_mut().filter(|_| matches_turn) {
                     let id = t.id;
                     if terminal {
                         // `done`/`blocked` → terminal_reported; phase ended-ok.
@@ -1052,6 +1060,45 @@ mod tests {
             .messages
             .iter()
             .all(|m| matches!(m, GuestMessage::Report(_))));
+    }
+
+    #[test]
+    fn it_relays_but_ignores_a_terminal_report_naming_a_different_turn() {
+        // A late `done` from turn 1 arriving while turn 2 is in flight must
+        // not end turn 2 (or satisfy its delivery ack) — but it still relays.
+        let mut s = Session::default();
+        step(&mut s, Event::Prompt { turn_id: 2 });
+        let out = step(
+            &mut s,
+            Event::Report(Report {
+                status: Status::Done,
+                text: "old turn".into(),
+                turn_id: Some(1),
+            }),
+        );
+        assert!(matches!(
+            out.messages.first(),
+            Some(GuestMessage::Report(_))
+        ));
+        assert_eq!(s.state.phase, Phase::InFlight, "turn 2 stays in flight");
+        let t = s.turn.as_ref().unwrap();
+        assert!(!t.terminal_reported);
+        assert!(!t.accepted, "a stale report is not a delivery ack");
+    }
+
+    #[test]
+    fn it_applies_a_terminal_report_naming_the_current_turn() {
+        let mut s = Session::default();
+        step(&mut s, Event::Prompt { turn_id: 2 });
+        step(
+            &mut s,
+            Event::Report(Report {
+                status: Status::Done,
+                text: "shipped".into(),
+                turn_id: Some(2),
+            }),
+        );
+        assert_eq!(s.state.phase, Phase::EndedOk);
     }
 
     #[test]

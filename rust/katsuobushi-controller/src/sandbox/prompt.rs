@@ -411,20 +411,34 @@ where
                 *last_touch = Some(*last_hb);
             }
         }
-        Ok(GuestMessage::Report(report)) => match report.status {
-            Status::Working | Status::Info => {
-                // Progress: reset the stall timer, (re)arm the one-shot notice, and
-                // treat it as the implicit delivery ack (fallback).
-                *last_prog = Instant::now();
-                *stall_surfaced = false;
-                *accepted = true;
-                sink(DriveEvent::Report(&report))?;
+        Ok(GuestMessage::Report(report)) => {
+            // A report naming a *different* turn is stale replay (a late `done`
+            // from a prior turn must neither satisfy this turn's delivery ack
+            // nor terminate it): diagnostic only, like other stale lifecycle.
+            // One with no id keeps the ordering-based correlation.
+            if report.turn_id.is_some_and(|id| id != turn_id) {
+                eprintln!(
+                    "· stale report for turn {} (current turn {turn_id}): {}",
+                    report.turn_id.unwrap_or_default(),
+                    report.text
+                );
+                return Ok(LineFlow::Continue);
             }
-            Status::Done | Status::Blocked => {
-                sink(DriveEvent::Report(&report))?;
-                return Ok(LineFlow::Break); // clean terminal
+            match report.status {
+                Status::Working | Status::Info => {
+                    // Progress: reset the stall timer, (re)arm the one-shot notice, and
+                    // treat it as the implicit delivery ack (fallback).
+                    *last_prog = Instant::now();
+                    *stall_surfaced = false;
+                    *accepted = true;
+                    sink(DriveEvent::Report(&report))?;
+                }
+                Status::Done | Status::Blocked => {
+                    sink(DriveEvent::Report(&report))?;
+                    return Ok(LineFlow::Break); // clean terminal
+                }
             }
-        },
+        }
         Ok(GuestMessage::TurnAccepted { turn_id: id }) if id == turn_id => {
             *accepted = true;
         }
@@ -1005,6 +1019,27 @@ mod tests {
         let HostMessage::Prompt(prompt) = msg;
         assert_eq!(prompt.text, "do it");
         assert_eq!(prompt.turn_id, 1);
+    }
+
+    #[test]
+    fn it_ignores_a_stale_report_naming_a_previous_turn() {
+        // A late `done` from turn 1 replayed while driving turn 2 must neither
+        // terminate the stream nor reach the sink as this turn's output; the
+        // id-less `done` (ordering-correlated) still ends it cleanly.
+        let (result, events, _, _) = drive_over_canned(
+            "go",
+            2,
+            &[
+                r#"{"type":"report","status":"done","text":"old turn","turn_id":1}"#,
+                r#"{"type":"report","status":"working","text":"now","turn_id":2}"#,
+                r#"{"type":"report","status":"done","text":"ok"}"#,
+            ],
+        );
+        result.expect("the stale done must not fail or end the live turn");
+        assert_eq!(
+            events,
+            vec![Ev::Report(Status::Working), Ev::Report(Status::Done)]
+        );
     }
 
     #[test]
