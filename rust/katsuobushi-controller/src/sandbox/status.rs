@@ -131,10 +131,18 @@ fn age_ago(now: Option<i64>, then: Option<&str>) -> Option<String> {
 ///
 /// Reads **`turn-state.json` first** (the guest-authoritative turn/agent state,
 /// needs no connection); a missing record returns `None` so `status` degrades to
-/// today's behavior. The transport tail is corroborated against QMP: an
-/// active stream is only believed while the VM is up, so a stale `streamActive`
-/// can never mask a dead server — `· no active stream` (VM up, merely idle / a
-/// hung agent) is distinguished from `· vm stopped` (server gone).
+/// today's behavior. The transport tail is corroborated twice:
+///
+/// - against **QMP**: an active stream is only believed while the VM is up, so
+///   a stale `streamActive` can never mask a dead server — `· no active
+///   stream` (VM up, merely idle / a hung agent) is distinguished from `· vm
+///   stopped` (server gone);
+/// - against **heartbeat freshness**: `streamActive` is a boolean only a
+///   *clean* `drive` shutdown clears, so a panicked/SIGKILLed driver would
+///   otherwise leave a phantom "stream active" forever. The flag is believed
+///   only while `lastHeartbeatAt` is within `hb_deadline_secs` (the N·H
+///   watchdog deadline) of `now` — the timestamp stops advancing when the
+///   driver dies, so liveness derives from cadence, not the flag.
 ///
 /// Examples:
 /// - `turn 3 ended-unreported 14m ago · no active stream` (unattended verdict)
@@ -144,6 +152,7 @@ fn render_liveness(
     lv: Option<&Liveness>,
     now: Option<i64>,
     running: bool,
+    hb_deadline_secs: i64,
 ) -> Option<String> {
     let ts = ts?;
     let mut parts: Vec<String> = Vec::new();
@@ -170,9 +179,19 @@ fn render_liveness(
         }
     }
 
-    // Transport tail, corroborated against QMP: only trust an active stream
-    // while the VM is up.
-    let stream_active = running && lv.is_some_and(|l| l.stream_active);
+    // Transport tail, corroborated against QMP (VM up) and heartbeat
+    // freshness (driver alive). `(clock unavailable, heartbeat present)`
+    // degrades to trusting the record — consistent with ages dropping —
+    // while `streamActive` with *no* recorded heartbeat is unverifiable and
+    // treated as inactive (a real drive touches within one period).
+    let hb_fresh = match (now, lv.and_then(|l| l.last_heartbeat_at.as_deref())) {
+        (Some(now_ts), Some(then)) => {
+            liveness::parse_rfc3339(then).is_some_and(|t| now_ts - t <= hb_deadline_secs)
+        }
+        (None, Some(_)) => true,
+        (_, None) => false,
+    };
+    let stream_active = running && lv.is_some_and(|l| l.stream_active) && hb_fresh;
     if stream_active {
         match age_ago(now, lv.and_then(|l| l.last_heartbeat_at.as_deref())) {
             Some(age) => parts.push(format!("heartbeat {age}")),
@@ -505,7 +524,10 @@ fn summarize(
     let inst_dir = roots.state_glob.join(name);
     let turn_state = TurnState::read(host, &inst_dir.join("turn-state.json"));
     let live = Liveness::read(host, &inst_dir.join("liveness.json"));
-    let liveness = render_liveness(turn_state.as_ref(), live.as_ref(), now, running);
+    // The N·H watchdog deadline: the longest heartbeat silence a live driver
+    // is allowed, so it doubles as the freshness bound for `streamActive`.
+    let hb_deadline = (spec.heartbeat_secs * u64::from(spec.heartbeat_miss)) as i64;
+    let liveness = render_liveness(turn_state.as_ref(), live.as_ref(), now, running, hb_deadline);
     let liveness_brief = render_liveness_brief(turn_state.as_ref(), now);
 
     InstanceView {
@@ -1257,7 +1279,7 @@ mod tests {
             Some("2026-06-28T11:46:00Z"),
             "2026-06-28T11:46:00Z",
         );
-        let line = render_liveness(Some(&state), None, now(), true).expect("a line");
+        let line = render_liveness(Some(&state), None, now(), true, 30).expect("a line");
         assert_eq!(line, "turn 3 ended-unreported 14m ago · no active stream");
     }
 
@@ -1270,11 +1292,41 @@ mod tests {
             stream_active: true,
             ..Liveness::default()
         };
-        let line = render_liveness(Some(&state), Some(&lv), now(), true).expect("a line");
+        let line = render_liveness(Some(&state), Some(&lv), now(), true, 30).expect("a line");
         assert_eq!(
             line,
             "turn 3 in-flight · last activity 9m ago · heartbeat 4s ago"
         );
+    }
+
+    #[test]
+    fn it_expires_a_stale_stream_active_flag_via_heartbeat_age() {
+        // `streamActive` is only cleared by a clean drive shutdown: a
+        // panicked/SIGKILLed driver leaves it true forever while the VM keeps
+        // running. The 14m-old heartbeat is what betrays the dead driver —
+        // the tail must read "no active stream", not a phantom heartbeat.
+        let state = turn_state(Phase::InFlight, Some(3), None, "2026-06-28T11:46:00Z");
+        let lv = Liveness {
+            last_heartbeat_at: Some("2026-06-28T11:46:00Z".to_string()),
+            stream_active: true,
+            ..Liveness::default()
+        };
+        let line = render_liveness(Some(&state), Some(&lv), now(), true, 30).expect("a line");
+        assert!(line.ends_with("· no active stream"), "{line}");
+    }
+
+    #[test]
+    fn it_treats_stream_active_with_no_heartbeat_as_inactive() {
+        // streamActive with no recorded heartbeat is unverifiable (a driver
+        // that died between connect and its first touch would leave exactly
+        // this shape forever); a live drive touches within one period.
+        let state = turn_state(Phase::InFlight, Some(3), None, "2026-06-28T11:51:00Z");
+        let lv = Liveness {
+            stream_active: true,
+            ..Liveness::default()
+        };
+        let line = render_liveness(Some(&state), Some(&lv), now(), true, 30).expect("a line");
+        assert!(line.ends_with("· no active stream"), "{line}");
     }
 
     #[test]
@@ -1285,7 +1337,7 @@ mod tests {
             Some("2026-06-28T11:57:00Z"),
             "2026-06-28T11:57:00Z",
         );
-        let line = render_liveness(Some(&state), None, now(), true).expect("a line");
+        let line = render_liveness(Some(&state), None, now(), true, 30).expect("a line");
         assert_eq!(line, "turn 3 ended-ok 3m ago · no active stream");
     }
 
@@ -1294,7 +1346,7 @@ mod tests {
         // in-flight with no Stop and a long-stale lastActivityAt: the
         // age is what surfaces the hang, with no connection.
         let state = turn_state(Phase::InFlight, Some(3), None, "2026-06-28T11:46:00Z");
-        let line = render_liveness(Some(&state), None, now(), true).expect("a line");
+        let line = render_liveness(Some(&state), None, now(), true, 30).expect("a line");
         assert_eq!(
             line,
             "turn 3 in-flight · last activity 14m ago · no active stream"
@@ -1308,10 +1360,10 @@ mod tests {
         // "vm stopped" (the server is gone, which is why the file went stale).
         let state = turn_state(Phase::InFlight, Some(3), None, "2026-06-28T11:46:00Z");
 
-        let up = render_liveness(Some(&state), None, now(), true).expect("a line");
+        let up = render_liveness(Some(&state), None, now(), true, 30).expect("a line");
         assert!(up.ends_with("· no active stream"), "VM up ⇒ idle: {up}");
 
-        let down = render_liveness(Some(&state), None, now(), false).expect("a line");
+        let down = render_liveness(Some(&state), None, now(), false, 30).expect("a line");
         assert!(down.ends_with("· vm stopped"), "VM down ⇒ dead: {down}");
     }
 
@@ -1325,7 +1377,7 @@ mod tests {
             stream_active: true,
             ..Liveness::default()
         };
-        let line = render_liveness(Some(&state), Some(&lv), now(), false).expect("a line");
+        let line = render_liveness(Some(&state), Some(&lv), now(), false, 30).expect("a line");
         assert!(line.ends_with("· vm stopped"), "{line}");
     }
 
@@ -1333,8 +1385,8 @@ mod tests {
     fn it_degrades_to_no_line_when_there_is_no_turn_state() {
         // Missing turn-state.json ⇒ no liveness line, regardless of VM state
         // (advisory: degrade to today's behavior, never an error).
-        assert!(render_liveness(None, None, now(), true).is_none());
-        assert!(render_liveness(None, None, now(), false).is_none());
+        assert!(render_liveness(None, None, now(), true, 30).is_none());
+        assert!(render_liveness(None, None, now(), false, 30).is_none());
         assert!(render_liveness_brief(None, now()).is_none());
     }
 
@@ -1347,7 +1399,7 @@ mod tests {
             Some("2026-06-28T11:46:00Z"),
             "2026-06-28T11:46:00Z",
         );
-        let line = render_liveness(Some(&state), None, None, true).expect("a line");
+        let line = render_liveness(Some(&state), None, None, true, 30).expect("a line");
         assert_eq!(line, "turn 3 ended-unreported · no active stream");
     }
 
