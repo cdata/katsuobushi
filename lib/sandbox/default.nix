@@ -754,8 +754,15 @@ let
       config,
       lib,
       pkgs,
+      utils,
       ...
     }:
+    let
+      # The systemd mount unit for a mount point, via the canonical escaping
+      # (NixOS' own `escapeSystemdPath`, not a hand-rolled replaceStrings —
+      # the two differ on `-` and other special characters).
+      mountUnit = path: "${utils.escapeSystemdPath path}.mount";
+    in
     {
       # Boot/runner shape.
       microvm = {
@@ -1305,7 +1312,7 @@ let
         description = "Install the ephemeral agent ssh authorized key";
         wantedBy = [ "multi-user.target" ];
         before = [ "sshd.service" ];
-        after = [ "${lib.replaceStrings [ "/" ] [ "-" ] (lib.removePrefix "/" shareMount)}.mount" ];
+        after = [ (mountUnit shareMount) ];
         unitConfig.ConditionPathExists = "${shareMount}/authorized_keys";
         serviceConfig = {
           Type = "oneshot";
@@ -1356,8 +1363,8 @@ let
           "katsuobushi-agent.service"
         ];
         after = [
-          "${lib.replaceStrings [ "/" ] [ "-" ] (lib.removePrefix "/" shareMount)}.mount"
-          "${lib.replaceStrings [ "/" ] [ "-" ] (lib.removePrefix "/" nixDbMount)}.mount"
+          (mountUnit shareMount)
+          (mountUnit nixDbMount)
           "local-fs.target"
         ];
         unitConfig.ConditionPathExists = "${shareMount}/nix-db.sqlite";
@@ -1445,7 +1452,7 @@ let
         description = "Materialize the Katsuobushi workspace";
         wantedBy = [ "multi-user.target" ];
         after = [
-          "${lib.replaceStrings [ "/" ] [ "-" ] (lib.removePrefix "/" shareMount)}.mount"
+          (mountUnit shareMount)
           "katsuobushi-homefiles.service"
         ];
         path = with pkgs; [
@@ -1683,97 +1690,62 @@ let
   # putting `katsuctl` on PATH. The emitted agent-start recipe's `prompt`
   # tail-call self-references the same binary via `spec.tools.katsuctl`, so no
   # command needs to mutate PATH.
+  #
+  # Business logic lives in katsuctl; these wrappers only dispatch, in one of
+  # two documented forms:
+  #
+  # - `handOff`: plain exec of the subcommand, passing the Nix-rendered spec
+  #   via --config (prompt/status/fetch/stop/screenshot).
+  # - `emitExec`: katsuctl makes every probe-dependent decision and prints only
+  #   the path of a flat recipe; the wrapper `exec`s bash on it. A planning
+  #   failure exits nonzero with no path, so the `exec` is reached only on a
+  #   clean emit (start/attach — also `apps.sandbox` below).
+  katsuctlBin = "${katsuctlPkg}/bin/katsuctl";
+  handOff = subcommand: description: {
+    inherit description;
+    command = ''
+      exec ${katsuctlBin} sandbox --config ${katsuctlSpec} ${subcommand} "$@"
+    '';
+  };
+  emitExecScript = subcommand: ''
+    script="$(${katsuctlBin} sandbox --config ${katsuctlSpec} ${subcommand} "$@")" || exit
+    exec ${pkgs.bash}/bin/bash "$script"
+  '';
+  emitExec = subcommand: description: {
+    inherit description;
+    command = emitExecScript subcommand;
+  };
+
   menuCommands = {
-    "sandbox:start" = {
-      description = "Launch an agent sandbox";
-      # Business logic now lives in katsuctl: katsuctl
-      # makes every probe-dependent decision (naming, port/CID allocation, branch
-      # seed), writes instance.json, and emits a flat setup+boot recipe, printing
-      # only its path. This wrapper is the documented emit+exec form — a planning
-      # failure exits nonzero with no path, so the `exec` is reached only on a
-      # clean emit.
-      command = ''
-        script="$(${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} start "$@")" || exit
-        exec ${pkgs.bash}/bin/bash "$script"
-      '';
-    };
-    "sandbox:prompt" = {
-      description = "Send a prompt to an agent instance (auto-starting a paused one)";
-      # Business logic now lives in katsuctl: instance
-      # resolution, the QMP liveness probe, the readiness-wait, vsock streaming,
-      # and the paused-named auto-restart. This wrapper just hands off, passing
-      # the Nix-rendered spec via --config.
-      command = ''
-        exec ${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} prompt "$@"
-      '';
-    };
-    "sandbox:status" = {
-      description = "List instances, or detail a single instance";
-      # Business logic now lives in katsuctl; this
-      # wrapper just hands off, passing the Nix-rendered spec via --config. A bare
-      # `status` still doubles as the launch prerequisite gate (nonzero exit iff a
-      # secret is missing or /dev/vhost-vsock is absent).
-      command = ''
-        exec ${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} status "$@"
-      '';
-    };
-    "sandbox:fetch" = {
-      description = "Fetch a sandbox's branch into this repo";
-      # Business logic now lives in katsuctl; this
-      # wrapper just hands off, passing the Nix-rendered spec via --config.
-      command = ''
-        exec ${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} fetch "$@"
-      '';
-    };
-    "sandbox:stop" = {
-      description = "Suspend or remove an instance";
-      # Business logic now lives in katsuctl; this
-      # wrapper just hands off, passing the Nix-rendered spec via --config.
-      command = ''
-        exec ${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} stop "$@"
-      '';
-    };
-    "sandbox:attach" = {
-      description = "SSH in and attach to a running agent's tmux session";
-      # Business logic now lives in katsuctl: katsuctl
-      # does the running/has-session probes directly and emits a tiny terminal-
-      # handoff recipe, printing only its path. This wrapper is the documented
-      # emit+exec form — a planning failure exits nonzero with no path, so the
-      # `exec` is reached only on a clean emit.
-      command = ''
-        script="$(${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} attach "$@")" || exit
-        exec ${pkgs.bash}/bin/bash "$script"
-      '';
-    };
-    "sandbox:screenshot" = {
-      description = "Grab the headless compositor framebuffer of a graphics instance";
-      # Business logic lives in katsuctl: screenshot resolves the instance and
-      # streams `grim -` over the existing loopback ssh as the agent user, landing
-      # the PNG at the requested path (or host stdout for `-`). Unlike attach it
-      # emits no recipe — it does the capture directly — so this is the plain
-      # hand-off form (like fetch/prompt/status/stop), passing the Nix-rendered
-      # spec via --config. Requires graphics.enable; katsuctl fails clearly if off.
-      command = ''
-        exec ${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} screenshot "$@"
-      '';
-    };
+    # start: naming, port/CID allocation, branch seed, instance.json, then a
+    # flat setup+boot recipe.
+    "sandbox:start" = emitExec "start" "Launch an agent sandbox";
+    # prompt: instance resolution, the QMP liveness probe, the readiness-wait,
+    # vsock streaming, and the paused-named auto-restart.
+    "sandbox:prompt" = handOff "prompt" "Send a prompt to an agent instance (auto-starting a paused one)";
+    # status: a bare `status` doubles as the launch prerequisite gate (nonzero
+    # exit iff a secret is missing or /dev/vhost-vsock is absent).
+    "sandbox:status" = handOff "status" "List instances, or detail a single instance";
+    "sandbox:fetch" = handOff "fetch" "Fetch a sandbox's branch into this repo";
+    "sandbox:stop" = handOff "stop" "Suspend or remove an instance";
+    # attach: the running/has-session probes, then a tiny terminal-handoff
+    # recipe.
+    "sandbox:attach" = emitExec "attach" "SSH in and attach to a running agent's tmux session";
+    # screenshot: streams `grim -` over the loopback ssh as the agent user,
+    # landing the PNG at the requested path (or host stdout for `-`). Requires
+    # graphics.enable; katsuctl fails clearly if off.
+    "sandbox:screenshot" = handOff "screenshot" "Grab the headless compositor framebuffer of a graphics instance";
   };
 in
 {
   # `nix run .#sandbox` needs an app; lifecycle helpers are menu commands. Its
-  # program is the documented emit+exec wrapper around `katsuctl sandbox start`
-  # (step 3): katsuctl makes every probe-dependent
-  # decision, writes instance.json, and prints the path of a flat setup+boot
-  # recipe; the wrapper `exec`s bash on it (a planning failure exits nonzero with
-  # no path, so the `exec` runs only on a clean emit). katsuctl is invoked by its
-  # absolute store path, and the emitted agent-start tail-call self-references the
-  # same binary via `spec.tools.katsuctl` — so nothing here touches PATH.
+  # program is the SAME emit+exec wrapper `sandbox:start` uses (one definition,
+  # not a third copy). katsuctl is invoked by its absolute store path, and the
+  # emitted agent-start tail-call self-references the same binary via
+  # `spec.tools.katsuctl` — so nothing here touches PATH.
   apps.sandbox = {
     type = "app";
-    program = "${pkgs.writeShellScript "sandbox" ''
-      script="$(${katsuctlPkg}/bin/katsuctl sandbox --config ${katsuctlSpec} start "$@")" || exit
-      exec ${pkgs.bash}/bin/bash "$script"
-    ''}";
+    program = "${pkgs.writeShellScript "sandbox" (emitExecScript "start")}";
     meta.description = "Launch an ephemeral Katsuobushi agent sandbox VM";
   };
 
