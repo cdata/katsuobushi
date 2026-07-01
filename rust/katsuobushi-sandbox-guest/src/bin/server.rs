@@ -427,11 +427,18 @@ async fn persist(ctl: &Arc<Control>, snapshot: &TurnState, mode: PersistMode) {
             }
         }
     }
-    if let Err(e) = write_turn_state(&ctl.share, snapshot) {
-        eprintln!("katsuobushi-control: turn-state write failed: {e:#}");
-        return;
+    // The write itself runs on the blocking pool: the share is a 9p mount, so
+    // a stalled host write must not pin a tokio worker thread. The (tokio)
+    // lock stays held across the await so snapshots still land in order —
+    // only other *persisters* queue behind a slow write, never the heartbeat
+    // or report relays.
+    let share = ctl.share.clone();
+    let snap = snapshot.clone();
+    match tokio::task::spawn_blocking(move || write_turn_state(&share, &snap)).await {
+        Ok(Ok(())) => *guard = Some(Instant::now()),
+        Ok(Err(e)) => eprintln!("katsuobushi-control: turn-state write failed: {e:#}"),
+        Err(e) => eprintln!("katsuobushi-control: turn-state write task failed: {e}"),
     }
-    *guard = Some(Instant::now());
 }
 
 /// The atomic write itself (temp + rename), factored out for testability.
@@ -582,14 +589,39 @@ async fn inject_prompt(peer: &Peer<RoleServer>, turn_id: u64, text: &str) -> any
         .context("send channel notification")
 }
 
-/// Write one `GuestMessage` as a JSON line to the host, if connected.
+/// Bound on one outbound write to the host. The writer mutex is held across
+/// the write, so without a bound a host that stops draining the stream would
+/// park *every* outbound path — heartbeats included, the very signal meant to
+/// disambiguate a wedged host — behind one stuck `write_all` forever.
+const HOST_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Write one `GuestMessage` as a JSON line to the host, if connected. A write
+/// error or timeout **drops the connection** (the writer is cleared, so
+/// subsequent sends no-op until the host reconnects and installs a fresh one)
+/// rather than leaving a wedged stream holding the mutex.
 async fn send_to_host(host: &HostWriter, msg: &GuestMessage) -> anyhow::Result<()> {
     let mut guard = host.lock().await;
     if let Some(w) = guard.as_mut() {
         let mut line = serde_json::to_vec(msg).context("encode guest message")?;
         line.push(b'\n');
-        w.write_all(&line).await.context("write to host")?;
-        w.flush().await.ok();
+        let write = async {
+            w.write_all(&line).await?;
+            w.flush().await
+        };
+        match tokio::time::timeout(HOST_WRITE_TIMEOUT, write).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                *guard = None;
+                return Err(e).context("write to host (connection dropped)");
+            }
+            Err(_) => {
+                *guard = None;
+                anyhow::bail!(
+                    "write to host timed out after {}s; dropping the connection",
+                    HOST_WRITE_TIMEOUT.as_secs()
+                );
+            }
+        }
     }
     Ok(())
 }
