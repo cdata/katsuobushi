@@ -5,6 +5,50 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.2.6] — 2026-07-03
+
+Dev-shell menu commands are now organized as subcommand trees, so a namespace
+collapses to a single command + menu row instead of one row per verb. The
+`sandbox:*` and `format:*` / `lint:*` commands are renamed accordingly — the one
+consumer-facing break in this release. No spec or instance-state bump
+(`specVersion 4` / `instanceVersion 2` unchanged). See
+[`MIGRATING.md`](MIGRATING.md#026).
+
+### Added
+
+- **`makeMenu` command trees.** A menu command may now be a _branch_ — an entry
+  with a `subcommands` attrset instead of a `command` — which compiles to one
+  shell application that dispatches on its first argument and recurses to any
+  depth. Both leaves and branches take an optional `help` string; running a
+  branch bare (or with `-h` / `--help`) prints that preamble plus an aligned
+  table of its subcommands. Flat command sets are unchanged, so an existing menu
+  keeps working untouched.
+- **Sandbox usage lines read as `sandbox …`.** clap prints its errors and
+  `Usage:` lines qualified by katsuctl's real path (e.g.
+  `katsuctl sandbox --config <CONFIG> attach <INSTANCE>`); the menu wrappers now
+  rewrite that prefix back to the command the user typed
+  (`sandbox attach <INSTANCE>`) in katsuctl's stderr. Only stderr is filtered,
+  so streaming stdout — notably `sandbox prompt`'s live report stream — is
+  untouched.
+
+### Changed
+
+- **`lib.sandbox` menu commands are now `sandbox <verb>`.** The seven
+  `sandbox:*` entries collapse into one `sandbox` branch with `start`, `prompt`,
+  `status`, `fetch`, `stop`, `attach`, and `screenshot` subcommands. Each verb
+  keeps its exact behavior, and `nix run .#sandbox` is unchanged.
+- **`lib.markdown` menu commands are now `<name> <verb>`.** Each invocation's
+  `format:<name>` / `lint:<name>` pair becomes a single `<name>` branch with
+  `format` and `lint` subcommands (default name `markdown`, so `markdown format`
+  / `markdown lint`). The flake `check` name is unchanged.
+
+### Removed
+
+- **The colon-namespaced command names.** `sandbox:start` (and the other six
+  `sandbox:*`), `format:<name>`, and `lint:<name>` no longer exist as dev-shell
+  commands — use the subcommand forms above. Update any script, CI step, or
+  `nix develop -c …` invocation that calls an old name.
+
 ## [0.2.5] — 2026-07-01
 
 A hardening release from a full engineering audit of the sandbox feature: shell
@@ -19,47 +63,46 @@ tightened eval-time validation. See [`MIGRATING.md`](MIGRATING.md#025).
 
 - **Recipes single-quote host paths.** The emitted start recipe double-quoted
   paths (the git toplevel, XDG-expanded roots, context entries), leaving `$`,
-  backticks, and `\` shell-active; every path is now single-quoted with the
-  same close-escape-reopen idiom the prompt payload already used, so a path
+  backticks, and `\` shell-active; every path is now single-quoted with the same
+  close-escape-reopen idiom the prompt payload already used, so a path
   containing shell-special characters is inert.
 - **`fromEnv` secrets are born `0600`.** The credential file was created under
-  the default umask and then chmod'd, leaving a brief window where the
-  plaintext token was world-readable; it is now recreated under a subshell
-  `umask 077`, matching the `install -m 0600` guarantee the `fromFile` branch
-  already had.
-- **`sandbox:stop` confirms the VM died before removing its state.** `quit`
-  was fire-and-forget: a wedged monitor fell through to recursive removal,
-  deleting the disk images out from under a still-running qemu while reporting
-  success. Stop now polls the monitor after `quit` and refuses removal (loud,
-  nonzero, nothing deleted) while it still answers; both dir removals are also
-  attempted before an error surfaces, so a partial failure no longer strands a
+  the default umask and then chmod'd, leaving a brief window where the plaintext
+  token was world-readable; it is now recreated under a subshell `umask 077`,
+  matching the `install -m 0600` guarantee the `fromFile` branch already had.
+- **`sandbox:stop` confirms the VM died before removing its state.** `quit` was
+  fire-and-forget: a wedged monitor fell through to recursive removal, deleting
+  the disk images out from under a still-running qemu while reporting success.
+  Stop now polls the monitor after `quit` and refuses removal (loud, nonzero,
+  nothing deleted) while it still answers; both dir removals are also attempted
+  before an error surfaces, so a partial failure no longer strands a
   half-torn-down instance.
-- **A failed first injection no longer wedges the turn.** The guest committed
-  a turn to in-flight before the injection ran, so if the injection failed
-  (the first-turn race) every host resend of that id was dedupe-dropped
-  forever. Delivery is now tracked separately: an undelivered turn re-injects
-  on resend, a delivered one dedupes, and a resend during the stop-grace
-  window no longer creates a fresh turn (which would have executed it twice).
+- **A failed first injection no longer wedges the turn.** The guest committed a
+  turn to in-flight before the injection ran, so if the injection failed (the
+  first-turn race) every host resend of that id was dedupe-dropped forever.
+  Delivery is now tracked separately: an undelivered turn re-injects on resend,
+  a delivered one dedupes, and a resend during the stop-grace window no longer
+  creates a fresh turn (which would have executed it twice).
 - **The turn-id counter never rewinds.** A corrupt (or schema-newer)
   `liveness.json` silently reset `nextTurnId` to 1, and the guest's turn-id
   dedupe would then drop the next genuinely-new prompt. A corrupt record now
-  fails `sandbox:prompt` loudly instead, the best-effort heartbeat writers
-  skip rather than clobber it, and unknown fields no longer fail the parse.
+  fails `sandbox:prompt` loudly instead, the best-effort heartbeat writers skip
+  rather than clobber it, and unknown fields no longer fail the parse.
 - **`sandbox:status` no longer reports a phantom active stream.** The
   `streamActive` flag is only cleared by a clean driver shutdown, so a
   panicked/killed driver left `status` claiming an active stream forever; the
-  flag is now believed only while the recorded heartbeat is within the
-  watchdog deadline.
+  flag is now believed only while the recorded heartbeat is within the watchdog
+  deadline.
 - **A stale report cannot end the wrong turn.** Both sides applied
   accept/terminal transitions to whatever turn was in flight, so a late `done`
   from turn N could terminate turn N+1 and falsely satisfy its delivery ack; a
   report naming a different turn now relays without transitioning.
-- **Parallel `sandbox:start`s cannot collide.** CID/port selection read
-  sibling instances before either launch had persisted its claim (and a
-  sibling's ssh port is not even bound until its qemu boots, so the bind probe
-  alone could not see it). The planner now skips sibling-recorded ports and
-  CIDs and holds an advisory `flock` under the project state root across the
-  probe→persist window — swarm launches allocate safely.
+- **Parallel `sandbox:start`s cannot collide.** CID/port selection read sibling
+  instances before either launch had persisted its claim (and a sibling's ssh
+  port is not even bound until its qemu boots, so the bind probe alone could not
+  see it). The planner now skips sibling-recorded ports and CIDs and holds an
+  advisory `flock` under the project state root across the probe→persist window
+  — swarm launches allocate safely.
 
 ### Changed
 
@@ -67,13 +110,13 @@ tightened eval-time validation. See [`MIGRATING.md`](MIGRATING.md#025).
   report sockets are capped at 1 MiB (the report socket is reachable by the
   unprivileged in-guest agent, so an unterminated flood was an in-guest OOM),
   outbound writes to the host time out after 10s and drop a wedged connection
-  instead of freezing the heartbeat behind it, and the `turn-state.json`
-  persist moved off the async workers so a stalled 9p share cannot pin them.
+  instead of freezing the heartbeat behind it, and the `turn-state.json` persist
+  moved off the async workers so a stalled 9p share cannot pin them.
 - **Eval-time validation is tighter.** A `homeFiles` entry with an unknown
-  `mode` now fails evaluation instead of silently never appearing in the
-  guest, and `homeFiles`/`extraRepos` destinations get the same full `..`
-  traversal check as `workspaceContext` (whose `/..`-suffix form `extraRepos`
-  historically missed).
+  `mode` now fails evaluation instead of silently never appearing in the guest,
+  and `homeFiles`/`extraRepos` destinations get the same full `..` traversal
+  check as `workspaceContext` (whose `/..`-suffix form `extraRepos` historically
+  missed).
 - **Ephemeral instance names are UTC-stamped.** The timestamp is now formatted
   in Rust (it was the lone bare-PATH `date` invocation in an otherwise
   pinned-tool contract) and uses UTC where the shell used host-local time.
@@ -81,29 +124,29 @@ tightened eval-time validation. See [`MIGRATING.md`](MIGRATING.md#025).
 ## [0.2.4] — 2026-06-29
 
 A packaging hotfix: the `sandbox:*` menu commands failed for consumers with
-`katsuctl: command not found`. They invoked `katsuctl` by bare name and relied on
-it already being on the dev shell's PATH — which only Katsuobushi's own dev shell
-arranged, so a project that wired in just `sandbox.menuCommands` got commands that
-could not find their own controller. The instance spec bumps to `specVersion 4`;
-see [`MIGRATING.md`](MIGRATING.md#024).
+`katsuctl: command not found`. They invoked `katsuctl` by bare name and relied
+on it already being on the dev shell's PATH — which only Katsuobushi's own dev
+shell arranged, so a project that wired in just `sandbox.menuCommands` got
+commands that could not find their own controller. The instance spec bumps to
+`specVersion 4`; see [`MIGRATING.md`](MIGRATING.md#024).
 
 ### Fixed
 
 - **`sandbox:*` commands work without `katsuctl` on PATH.** Every menu command
   (and `nix run .#sandbox`) now invokes the controller by its absolute store
   path, and the agent-mode `start` recipe self-references it through a new
-  `tools.katsuctl` spec field instead of a bare `katsuctl … prompt` tail-call run
-  in a child shell. A consumer that wires only `sandbox.menuCommands` into a dev
-  shell no longer hits `katsuctl: command not found`. No PATH manipulation remains
-  in any command.
+  `tools.katsuctl` spec field instead of a bare `katsuctl … prompt` tail-call
+  run in a child shell. A consumer that wires only `sandbox.menuCommands` into a
+  dev shell no longer hits `katsuctl: command not found`. No PATH manipulation
+  remains in any command.
 
 ### Added
 
-- **`lib.sandbox` exposes `katsuctl`.** The host controller derivation (built via
-  `lib.rust`/crane from Katsuobushi's pinned source) is now returned from
+- **`lib.sandbox` exposes `katsuctl`.** The host controller derivation (built
+  via `lib.rust`/crane from Katsuobushi's pinned source) is now returned from
   `lib.sandbox` as `katsuctl`, so a project can put a bare `katsuctl` on its dev
-  shell PATH for direct use. The sandbox template wires it in for power users; the
-  `sandbox:*` commands no longer require it.
+  shell PATH for direct use. The sandbox template wires it in for power users;
+  the `sandbox:*` commands no longer require it.
 
 ## [0.2.3] — 2026-06-29
 
@@ -114,33 +157,34 @@ A graphics hotfix: in a graphics guest an X11 app — or any tool that probes
 ### Fixed
 
 - **X11 apps work in a graphics guest.** The guest now exports `DISPLAY=:0`
-  alongside `WAYLAND_DISPLAY` (in both the sshd `SetEnv` and the login shell) and
-  ships `xwayland`, so sway's XWayland shim serves X clients on `:0`. A tool that
-  probes `DISPLAY`, or an X-only app, now runs with no per-invocation ceremony.
-  Gated on the graphics opt-in; a graphics-off guest is byte-for-byte unchanged.
+  alongside `WAYLAND_DISPLAY` (in both the sshd `SetEnv` and the login shell)
+  and ships `xwayland`, so sway's XWayland shim serves X clients on `:0`. A tool
+  that probes `DISPLAY`, or an X-only app, now runs with no per-invocation
+  ceremony. Gated on the graphics opt-in; a graphics-off guest is byte-for-byte
+  unchanged.
 
 ## [0.2.2] — 2026-06-29
 
 Opt-in **graphics**: a sandbox can now boot a headless compositor and a
 paravirtual GPU so a browser or Wayland app actually renders. It is off by
-default, so existing consumers are unaffected; enabling it widens the host-facing
-attack surface (the GPU command stream is parsed in the host QEMU process), which
-the README documents plainly. The instance spec bumps to `specVersion 3`; see
-[`MIGRATING.md`](MIGRATING.md#022).
+default, so existing consumers are unaffected; enabling it widens the
+host-facing attack surface (the GPU command stream is parsed in the host QEMU
+process), which the README documents plainly. The instance spec bumps to
+`specVersion 3`; see [`MIGRATING.md`](MIGRATING.md#022).
 
 ### Added
 
 - **`lib.sandbox`: opt-in `graphics` capability.** A new `graphics` attrset
   (`enable`, default `false`; `gpu` role-preference list, default
-  `["integrated" "discrete" "software"]`; `output`, default `1920×1080@60`) boots
-  a headless sway compositor on a virtual output and, when a GPU rung resolves,
-  hands QEMU a `virtio-gpu-gl` device against a host render node — so a browser
-  (WebDriver/Playwright) or a Wayland app can render. The browser/app goes in the
-  existing `packages` list. Pinning `gpu = ["software"]` keeps the full original
-  boundary (llvmpipe, no GPU device) at a performance cost. When enabled,
-  `sandbox:status` adds a `graphics` preflight row that runs the real GPU
-  resolver against the host and flags a missing `render`-group membership, and a
-  launch-time notice records the widened attack surface. See
+  `["integrated" "discrete" "software"]`; `output`, default `1920×1080@60`)
+  boots a headless sway compositor on a virtual output and, when a GPU rung
+  resolves, hands QEMU a `virtio-gpu-gl` device against a host render node — so
+  a browser (WebDriver/Playwright) or a Wayland app can render. The browser/app
+  goes in the existing `packages` list. Pinning `gpu = ["software"]` keeps the
+  full original boundary (llvmpipe, no GPU device) at a performance cost. When
+  enabled, `sandbox:status` adds a `graphics` preflight row that runs the real
+  GPU resolver against the host and flags a missing `render`-group membership,
+  and a launch-time notice records the widened attack surface. See
   [`lib/sandbox/README.md`](lib/sandbox/README.md#graphics-opt-in).
 - **`sandbox:screenshot <instance|#> [path]`.** A new menu command that grabs a
   PNG of the headless-sway output by running `grim` over the existing loopback
@@ -154,9 +198,9 @@ the README documents plainly. The instance spec bumps to `specVersion 3`; see
 
 ### Changed
 
-- **The instance spec is now `specVersion 3`** (carrying the `graphics` block); a
-  stale v2 spec is rejected loudly. Rebuild your dev shell (`nix develop`) so the
-  spec re-renders. No config changes are required.
+- **The instance spec is now `specVersion 3`** (carrying the `graphics` block);
+  a stale v2 spec is rejected loudly. Rebuild your dev shell (`nix develop`) so
+  the spec re-renders. No config changes are required.
 - **`instance.json` is now `instanceVersion 2`** (it records the resolved
   graphics rung). A v1 instance state from an earlier release is rejected on
   read, so recreate any persistent (`--name`d) instance after upgrading —
@@ -185,14 +229,16 @@ rebuilding (the instance spec bumps to `specVersion 2`); see
   a dead transport, a one-shot progress-stall notice, and a pre-send ready-gate
   that closes the first-turn race — a prompt to a just-booted instance no longer
   lands in the arming gap. Heartbeats are silent, so a backgrounded drive is
-  never woken by a tick, and a monotonic, persisted `turn_id` makes resends safe.
+  never woken by a tick, and a monotonic, persisted `turn_id` makes resends
+  safe.
 - **`sandbox:status` liveness line.** Status reads `turn-state.json` (and the
-  host-written `liveness.json`) to show per-instance turn/transport state with no
-  connection — e.g. `turn 3 ended-unreported 14m ago · no active stream` —
+  host-written `liveness.json`) to show per-instance turn/transport state with
+  no connection — e.g. `turn 3 ended-unreported 14m ago · no active stream` —
   corroborated against QMP.
 - **Seven liveness tunables** (`heartbeatSecs`, `heartbeatMiss`,
-  `progressStallSecs`, `deliveryDeadlineSecs`, `deliveryRetries`, `readyGateSecs`,
-  `stopGraceMs`), Nix-driven from one source into both the spec and the guest env.
+  `progressStallSecs`, `deliveryDeadlineSecs`, `deliveryRetries`,
+  `readyGateSecs`, `stopGraceMs`), Nix-driven from one source into both the spec
+  and the guest env.
 
 ### Changed
 
@@ -210,24 +256,26 @@ rebuilding (the instance spec bumps to `specVersion 2`); see
 
 ## [0.2.0] — 2026-06-27
 
-The host side of the sandbox is rewritten from an unmaintainable pile of untested
-shell into a compiled, tested Rust binary, **`katsuctl`**. From a devshell user's
-perspective this is a no-op — `sandbox:start`, `sandbox:prompt`, `sandbox:status`,
-`sandbox:fetch`, `sandbox:stop`, and `sandbox:attach` keep their names and
-behavior — but their logic now lives in `katsuctl <domain> <command>` with unit,
-golden-snapshot, and seam-level tests, verified end-to-end against a real KVM
-boot. The three in-tree Rust crates are also renamed for clarity (breaking only
-for anyone depending on them directly — see [`MIGRATING.md`](MIGRATING.md#020)).
+The host side of the sandbox is rewritten from an unmaintainable pile of
+untested shell into a compiled, tested Rust binary, **`katsuctl`**. From a
+devshell user's perspective this is a no-op — `sandbox:start`, `sandbox:prompt`,
+`sandbox:status`, `sandbox:fetch`, `sandbox:stop`, and `sandbox:attach` keep
+their names and behavior — but their logic now lives in
+`katsuctl <domain> <command>` with unit, golden-snapshot, and seam-level tests,
+verified end-to-end against a real KVM boot. The three in-tree Rust crates are
+also renamed for clarity (breaking only for anyone depending on them directly —
+see [`MIGRATING.md`](MIGRATING.md#020)).
 
 ### Added
 
-- **`katsuctl` host-side controller** (`katsuctl sandbox <command>`) absorbing all
-  the sandbox host logic: instance naming / ssh-port / vsock-CID / seed-commit
-  decisions made in tested Rust, a Nix-rendered instance spec passed via
-  `--config`, a native QMP client (liveness + quit), a consolidated
+- **`katsuctl` host-side controller** (`katsuctl sandbox <command>`) absorbing
+  all the sandbox host logic: instance naming / ssh-port / vsock-CID /
+  seed-commit decisions made in tested Rust, a Nix-rendered instance spec passed
+  via `--config`, a native QMP client (liveness + quit), a consolidated
   `instance.json` per-instance metadata file, an emit-script harness for the
-  `start`/`attach` terminal hand-offs, and dual human/`--json` output with strict
-  color gating. Built reproducibly via the flake (`nix build .#katsuctl`).
+  `start`/`attach` terminal hand-offs, and dual human/`--json` output with
+  strict color gating. Built reproducibly via the flake
+  (`nix build .#katsuctl`).
 
 ### Changed
 
@@ -275,9 +323,9 @@ auto-start when prompting a paused instance. See
   overlay, the workspace clone (with build artifacts), the relocated
   `cargo`/`rustup`/XDG caches, and the guest Nix database now live on
   per-instance sparse disk images instead of tmpfs. Capacity scales with host
-  disk rather than a fraction of `mem`, so a Rust `target/` can no longer exhaust
-  guest RAM; the guest root `/` stays a tmpfs. A **named** instance keeps these
-  images across a stop/restart, so warm build caches (and host-path
+  disk rather than a fraction of `mem`, so a Rust `target/` can no longer
+  exhaust guest RAM; the guest root `/` stays a tmpfs. A **named** instance
+  keeps these images across a stop/restart, so warm build caches (and host-path
   registrations) survive a pause; ephemeral instances get fresh images each
   launch.
 - **`importHostStoreDb`: the guest Nix database now persists and is seeded
@@ -290,8 +338,8 @@ auto-start when prompting a paused instance. See
 
 - **`storeOverlaySize` is replaced by `storeVolumeSize` / `scratchVolumeSize` /
   `dbVolumeSize`.** The old single tmpfs-size string is gone; the three new
-  arguments size the disk images (in MiB, sparse). Defaults: 16384 / 32768 /
-  4096. See [`MIGRATING.md`](MIGRATING.md#0110).
+  arguments size the disk images (in MiB, sparse). Defaults: 16384 / 32768
+  / 4096. See [`MIGRATING.md`](MIGRATING.md#0110).
 
 ## [0.1.9] — 2026-06-26
 
@@ -332,25 +380,25 @@ transparent in normal use; see [`MIGRATING.md`](MIGRATING.md#018).
 - **`lib.sandbox`: `importHostStoreDb` option.** A new argument (default `true`)
   that makes the guest reuse everything the host has already built instead of
   re-downloading it. The guest already mounts the host `/nix/store` read-only,
-  but microvm registers only the guest's _system_ closure as valid, so other host
-  paths (e.g. a `nix develop` toolchain) were present on the mount yet
+  but microvm registers only the guest's _system_ closure as valid, so other
+  host paths (e.g. a `nix develop` toolchain) were present on the mount yet
   re-substituted from the network. The runner now snapshots the host's
-  `db.sqlite` at launch (a consistent SQLite `.backup`, ~0.5s) into the share, and
-  a guest boot service transplants it over the system-only DB — after microvm's
-  own closure registration — so every host-built path becomes valid with no
-  network and no copying. The transplant is best-effort: a missing snapshot or a
-  host/guest Nix schema mismatch rolls back to the system-only DB, so a sandbox
-  always boots. No new read exposure — the whole host store was already readable
-  over the mount. Set `importHostStoreDb = false` to opt out.
+  `db.sqlite` at launch (a consistent SQLite `.backup`, ~0.5s) into the share,
+  and a guest boot service transplants it over the system-only DB — after
+  microvm's own closure registration — so every host-built path becomes valid
+  with no network and no copying. The transplant is best-effort: a missing
+  snapshot or a host/guest Nix schema mismatch rolls back to the system-only DB,
+  so a sandbox always boots. No new read exposure — the whole host store was
+  already readable over the mount. Set `importHostStoreDb = false` to opt out.
 
 ### Changed
 
 - **`lib.sandbox` (this repo's own config): allowlist `static.rust-lang.org`.**
-  Dropping into `nix develop` inside the sandbox provisions the Rust toolchain via
-  rust-overlay, which fetches from `static.rust-lang.org`; that host was missing
-  from the egress allowlist. With `importHostStoreDb` on, the toolchain is reused
-  from the host offline, so this is only the fallback for picking up a newly
-  bumped `rust-toolchain.toml`.
+  Dropping into `nix develop` inside the sandbox provisions the Rust toolchain
+  via rust-overlay, which fetches from `static.rust-lang.org`; that host was
+  missing from the egress allowlist. With `importHostStoreDb` on, the toolchain
+  is reused from the host offline, so this is only the fallback for picking up a
+  newly bumped `rust-toolchain.toml`.
 
 ## [0.1.7] — 2026-06-25
 
@@ -377,10 +425,10 @@ A docs-and-features release; nothing to migrate (see
 ### Changed
 
 - **`lib.sandbox`: `sandbox:*` menu descriptions trimmed to short summaries.**
-  The dev-shell menu entries for `sandbox:start` / `prompt` / `status` /
-  `fetch` / `stop` dropped their inline usage hints (e.g. `sandbox:fetch
-  <instance>`), leaving a one-line summary; full usage lives in the `sandbox`
-  skill. Command names and behavior are unchanged.
+  The dev-shell menu entries for `sandbox:start` / `prompt` / `status` / `fetch`
+  / `stop` dropped their inline usage hints (e.g. `sandbox:fetch <instance>`),
+  leaving a one-line summary; full usage lives in the `sandbox` skill. Command
+  names and behavior are unchanged.
 - **`lib.sandbox`: `sandbox:status` preflight names the OAuth token fix.** When
   `CLAUDE_CODE_OAUTH_TOKEN`'s host source is missing, the `environment:` report
   now appends a `run 'claude setup-token'` hint alongside the variable to
@@ -394,10 +442,10 @@ A skill-and-docs release; nothing to migrate (see
 ### Changed
 
 - **`sandbox` skill: fan out via sub-agents; refined jj landing guidance.** The
-  skill now drives parallel fan-out by giving each task its own sub-agent —
-  each launches and drives its own `--name`d VM to `done` and returns its
-  branch plus the agent's `done` summary — while integration stays serial in
-  the orchestrator. The jj landing step now anchors accepted work on the
+  skill now drives parallel fan-out by giving each task its own sub-agent — each
+  launches and drives its own `--name`d VM to `done` and returns its branch plus
+  the agent's `done` summary — while integration stays serial in the
+  orchestrator. The jj landing step now anchors accepted work on the
   working-copy commit `@` (`jj new <tip>`) and leaves bookmark placement to the
   user, keeping landed work durable across the git imports the sandbox commands
   trigger. Touches `plugins/katsuobushi/skills/sandbox/SKILL.md` and
@@ -405,7 +453,8 @@ A skill-and-docs release; nothing to migrate (see
 
 ## [0.1.5] — 2026-06-24
 
-A docs-only release; nothing to migrate (see [`MIGRATING.md`](MIGRATING.md#015)).
+A docs-only release; nothing to migrate (see
+[`MIGRATING.md`](MIGRATING.md#015)).
 
 ### Changed
 
@@ -445,15 +494,16 @@ A docs-and-internals release; nothing to migrate (see
 
 ## [0.1.2] — 2026-06-24
 
-A docs-only release; nothing to migrate (see [`MIGRATING.md`](MIGRATING.md#012)).
+A docs-only release; nothing to migrate (see
+[`MIGRATING.md`](MIGRATING.md#012)).
 
 ### Changed
 
 - **`sandbox` skill docs reworked** — clearer `sandbox:status` guidance, a note
   that `sandbox:*` are dev-shell menu commands (`nix develop -c sandbox:status`
   from outside the shell), and Prettier reflow.
-- **Markdown linting now covers `plugins/**/*.md`.** Repo-internal; no consumer
-  impact.
+- **Markdown linting now covers `plugins/**/\*.md`.\*\* Repo-internal; no
+  consumer impact.
 
 ## [0.1.1] — 2026-06-24
 
@@ -500,10 +550,10 @@ everything tracked on untagged `main` up to this tag are in
 - **`lib.sandbox`** — a new library that assembles a [`microvm.nix`] guest which
   boots into a working dev environment where an agent harness (Claude Code by
   default) runs with its blast radius bounded by a real VM. Provides
-  `apps.sandbox` (`nix run .#sandbox`), the `sandbox:*` menu commands
-  (`start`, `prompt`, `status`, `fetch`, `stop`), `checks.sandbox`, and
-  `nixosConfiguration`. Scaffold with `nix flake init -t
-  github:cdata/katsuobushi#sandbox`.
+  `apps.sandbox` (`nix run .#sandbox`), the `sandbox:*` menu commands (`start`,
+  `prompt`, `status`, `fetch`, `stop`), `checks.sandbox`, and
+  `nixosConfiguration`. Scaffold with
+  `nix flake init -t github:cdata/katsuobushi#sandbox`.
 - **`sandbox` template** and **`sandbox` agent skill** for the above.
 - **`rust` template** for scaffolding Rust projects.
 - **Transitive infra dependency inheritance.** Katsuobushi now owns `crane`,

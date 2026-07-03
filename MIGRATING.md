@@ -8,6 +8,43 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.2.6
+
+**Action required: rebuild your dev shell, and rename any calls to the menu
+commands.**
+
+Dev-shell menu commands are now subcommand trees: a namespace is a single
+command with subcommands rather than one command per verb. This is purely a
+menu/command-wiring change — there is **no spec or instance-state bump**
+(`specVersion 4` / `instanceVersion 2` unchanged) and no change to what any
+command does — but the command _names_ change, which breaks a script, CI step,
+or muscle memory that calls the old colon-namespaced names.
+
+Rebuild your dev shell (`nix develop`) to pick up the renamed commands, then
+update call sites:
+
+| Before                             | After                              |
+| ---------------------------------- | ---------------------------------- |
+| `sandbox:start`                    | `sandbox start`                    |
+| `sandbox:prompt <inst> "…"`        | `sandbox prompt <inst> "…"`        |
+| `sandbox:status [inst]`            | `sandbox status [inst]`            |
+| `sandbox:attach <inst>`            | `sandbox attach <inst>`            |
+| `sandbox:fetch <inst>`             | `sandbox fetch <inst>`             |
+| `sandbox:stop [--remove] <inst>`   | `sandbox stop [--remove] <inst>`   |
+| `sandbox:screenshot <inst> [path]` | `sandbox screenshot <inst> [path]` |
+| `format:<name>`                    | `<name> format`                    |
+| `lint:<name>`                      | `<name> lint`                      |
+
+A bare `sandbox` (or `sandbox -h`) now prints the subcommand list, and
+`nix run .#sandbox` is unchanged. Sandbox usage/error text also now names the
+command you typed (`sandbox attach …`) rather than the underlying
+`katsuctl sandbox --config <CONFIG> attach …`.
+
+If you build your own menu with `katsuobushi.makeMenu`, nothing forces a change:
+the flat `{ description; command; }` command shape still works. Grouping is
+opt-in — give an entry a `subcommands` attrset instead of a `command` to make it
+a branch.
+
 ## 0.2.5
 
 **Action required: rebuild your dev shell and restart agent instances.**
