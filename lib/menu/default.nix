@@ -72,12 +72,20 @@ let
   # makeMenu :: { commands, title, graphic?, graphicFile?, colorizer?, colorizeGraphic? } -> { header, menuText, commands }
   #
   # Accepts:
-  #   commands  — An attribute set of command definitions. Each key becomes the
-  #               command name, and each value is an attrset with:
-  #                 description : string  — One-line summary shown in the menu.
-  #                 command     : string  — Shell script body to execute.
-  #                 env         : attrset — (Optional) Environment variables
-  #                                         injected via runtimeEnv.
+  #   commands  — An attribute set of command *nodes* forming a tree. Each
+  #               top-level key becomes one binary + one menu row. A node is
+  #               either a leaf or a branch:
+  #                 description : string  — One-line summary (menu row / listing).
+  #                 help        : string  — (Optional) Multi-line usage preamble,
+  #                                         shown when a branch is run bare or
+  #                                         with -h/--help.
+  #                 command     : string  — (Leaf) Shell body; sees the argv left
+  #                                         after dispatch as "$@".
+  #                 env         : attrset — (Leaf, optional) Environment variables
+  #                                         exported before the command runs.
+  #                 subcommands : attrset — (Branch) Child nodes, keyed by the
+  #                                         token that selects them; nests to any
+  #                                         depth. Mutually exclusive with command.
   #   title     — The project/devshell title, rendered large via figlet.
   #   graphic   — (Optional, default "") ASCII art displayed above the title,
   #               inlined as a string. Best for plain text; if the art contains
@@ -118,58 +126,142 @@ let
       # Sorted list of command names (attrNames returns them alphabetically).
       names = builtins.attrNames commands;
 
-      # makeCommand :: { name, script, description?, env? } -> { name, description, package }
+      # Command nodes form a tree. A node is either a LEAF (has `command`) or a
+      # BRANCH (has `subcommands`, an attrset of child nodes); the two are
+      # mutually exclusive. Every node carries a one-line `description` (its menu
+      # row and its entry in a parent's listing) and an optional multi-line
+      # `help`. Each top-level node compiles to exactly ONE shell application
+      # whose body is the whole subtree inlined:
+      #   * a branch becomes a `case` that dispatches on the next argv token,
+      #     `shift`s it, and recurses into the matched child; bare invocation (or
+      #     `-h`/`--help`) prints usage and exits 0; an unknown token errors;
+      #   * a leaf prints its figlet banner + description, then runs `command`
+      #     with the post-dispatch argv still available as "$@".
+      # Only top-level nodes become binaries and menu rows — subcommands are
+      # reached by walking argv inside their group's single binary.
+
+      # nodeKind :: string -> node -> "leaf" | "branch"  (throws on an ill-formed
+      # node so a typo fails loudly at eval time instead of vanishing).
+      nodeKind =
+        pathStr: node:
+        if (node ? command) && (node ? subcommands) then
+          throw "katsuobushi menu: '${pathStr}' has both `command` and `subcommands`; a node must be exactly one."
+        else if node ? command then
+          "leaf"
+        else if node ? subcommands then
+          "branch"
+        else
+          throw "katsuobushi menu: '${pathStr}' has neither `command` nor `subcommands`.";
+
+      # NAME=value exports for a leaf's optional `env`, safely quoted and emitted
+      # inside the leaf's own case arm so sibling subcommands never inherit each
+      # other's environment.
+      envExports =
+        env:
+        pkgs.lib.concatStrings (
+          pkgs.lib.mapAttrsToList (k: v: "export ${k}=${pkgs.lib.escapeShellArg v}\n") env
+        );
+
+      # renderLeaf :: string -> node -> string
       #
-      # Wraps a single command definition into a shell application derivation.
-      # When the resulting program is executed, it:
-      #   1. Renders the command name as large ASCII text via figlet.
-      #   2. Prints the description beneath the banner.
-      #   3. Pipes both through lolcat for colorful output.
-      #   4. Runs the actual script body.
-      makeCommand =
-        {
-          name,
-          script,
-          description ? "<No description given>",
-          env ? { },
-        }:
-        {
-          inherit name description;
+      # Banner (figlet title + description via the colorizer) then the script,
+      # which sees the argv left after dispatch as "$@".
+      renderLeaf = name: node: ''
+        TITLE="$(${pkgs.figlet}/bin/figlet -t '${name}')"
+        SUBTITLE="${node.description}"
 
-          package = pkgs.writeShellApplication {
-            inherit name;
-            runtimeEnv = env;
-            text = ''
-              TITLE="$(${pkgs.figlet}/bin/figlet -t '${name}')"
-              SUBTITLE="${description}"
+        echo "$TITLE
+        $SUBTITLE
+        " | ${colorizer}
 
-              echo "$TITLE
-              $SUBTITLE
-              " | ${colorizer}
+        ${envExports (node.env or { })}${node.command}
+      '';
 
-              ${script}
-            '';
-          };
-        };
+      # renderUsage :: string -> node -> attrset -> string
+      #
+      # The optional `help` preamble, a Usage line, and the aligned subcommand
+      # table (';'-delimited, aligned by `column`). Arbitrary node text (which
+      # may contain `$`, backticks, or quotes) is emitted through double-quoted
+      # echo/printf with escapeForDoubleQuotes neutralizing shell
+      # metacharacters — so the printed text is literal and the generated script
+      # still passes writeShellApplication's shellcheck (single-quoted bodies
+      # would trip SC2016 on any `$`/backtick in a description).
+      renderUsage =
+        fullPath: node: children:
+        let
+          helpPreamble =
+            if (node.help or null) != null then
+              ''printf '%s\n\n' "${escapeForDoubleQuotes node.help}"'' + "\n"
+            else
+              "";
+          listing = escapeForDoubleQuotes (
+            pkgs.lib.concatStringsSep "\n" (
+              pkgs.lib.mapAttrsToList (n: c: "${n};${c.description}") children
+            )
+          );
+        in
+        ''
+          ${helpPreamble}echo "Usage: ${fullPath} <subcommand> [args]"
+          echo ""
+          echo "Subcommands:"
+          echo "${listing}" | ${pkgs.util-linux}/bin/column -t -s ';'
+        '';
+
+      # renderBranch :: [string] -> string -> node -> string
+      #
+      # `path` is the chain of ancestor names (for the Usage line); the branch's
+      # own name is appended. Each child becomes a case arm that shifts the
+      # matched token and recurses.
+      renderBranch =
+        path: name: node:
+        let
+          fullPath = pkgs.lib.concatStringsSep " " (path ++ [ name ]);
+          children = node.subcommands;
+          arms = pkgs.lib.concatStrings (
+            pkgs.lib.mapAttrsToList (childName: child: ''
+              '${childName}')
+                shift
+                ${renderNode (path ++ [ name ]) childName child}
+                ;;
+            '') children
+          );
+          usage = renderUsage fullPath node children;
+        in
+        ''
+          case "''${1:-}" in
+          ${arms}  "" | -h | --help)
+              ${usage}
+              exit 0
+              ;;
+            *)
+              {
+                echo "Unknown subcommand: ''${1}"
+                echo ""
+                ${usage}
+              } >&2
+              exit 2
+              ;;
+          esac
+        '';
+
+      # renderNode :: [string] -> string -> node -> string  (leaf or branch).
+      renderNode =
+        path: name: node:
+        let
+          pathStr = pkgs.lib.concatStringsSep " " (path ++ [ name ]);
+        in
+        if nodeKind pathStr node == "leaf" then renderLeaf name node else renderBranch path name node;
 
       # intoPackages :: string -> derivation
       #
-      # Maps a command name to its writeShellApplication derivation by looking
-      # up the command definition in the `commands` attrset and passing it
-      # through makeCommand.
+      # Compiles a top-level node into its single shell application; the whole
+      # subtree below it is inlined into that one script.
       intoPackages =
         name:
-        let
-          element = builtins.getAttr name commands;
-
-          task = makeCommand {
-            inherit name;
-            description = element.description;
-            script = element.command;
-            env = if builtins.hasAttr "env" element then element.env else { };
-          };
-        in
-        task.package;
+        pkgs.writeShellApplication {
+          inherit name;
+          text = renderNode [ ] name (builtins.getAttr name commands);
+        };
 
       # escapeForSingleQuotes :: string -> string
       #

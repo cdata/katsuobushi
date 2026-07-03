@@ -51,6 +51,37 @@ pkgs.mkShell {
 }
 ```
 
+### Subcommands
+
+A command is a tree. The leaves above carry a `command`; a **branch** instead
+carries a `subcommands` attrset of child nodes, and compiles to a single binary
+that dispatches on its first argument. This keeps a cluster of related commands
+to one menu row (and one PATH binary) instead of one row each:
+
+```nix
+commands = {
+  db = {
+    description = "Database tasks";
+    help = "Run `db <subcommand>` to migrate or seed the local database.";
+    subcommands = {
+      migrate = {
+        description = "Apply pending migrations";
+        command = "diesel migration run";
+      };
+      seed = {
+        description = "Load seed data";
+        command = ''psql < ./seed.sql "$@"'';  # sees the post-dispatch argv
+      };
+    };
+  };
+};
+```
+
+`db migrate` runs the leaf; a bare `db` (or `db -h` / `db --help`) prints the
+`help` preamble and the subcommand table. Branches nest to any depth, and only
+top-level keys become menu rows and binaries.
+
 Other Katsuobushi libraries expose a `menuCommands` attrset designed to merge
-straight into `makeMenu`'s `commands` (e.g. `markdown.menuCommands`,
-`sandbox.menuCommands`).
+straight into `makeMenu`'s `commands` — `markdown.menuCommands` (a `<name>`
+branch with `format` / `lint` subcommands) and `sandbox.menuCommands` (a
+`sandbox` branch with the lifecycle verbs).
