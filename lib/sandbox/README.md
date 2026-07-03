@@ -30,7 +30,7 @@ There are two ways to drive it:
   app and checks are Linux-only.
 - **Agent mode also needs vsock**: the host `vhost_vsock` kernel module
   (`/dev/vhost-vsock`). Load it with `sudo modprobe vhost_vsock` if absent;
-  `sandbox:status` flags it and the runner warns at launch when it is missing.
+  `sandbox status` flags it and the runner warns at launch when it is missing.
 - Nix with flakes.
 
 ## Quick start
@@ -50,7 +50,7 @@ allowlist, and the packages (your agent harness), then:
 export CLAUDE_CODE_OAUTH_TOKEN="$(claude setup-token)"
 
 nix develop          # drops you into the menu; `showMenu` lists commands
-sandbox:start        # interactive: boots a VM and ssh's you in
+sandbox start        # interactive: boots a VM and ssh's you in
 ```
 
 To add the sandbox to an existing flake, call the library with your `pkgs` and a
@@ -113,7 +113,7 @@ sandbox = katsuobushi.lib.sandbox {
   # The guest always sees CLAUDE_CODE_OAUTH_TOKEN; `fromEnv` chooses which *host*
   # variable supplies it. If an agent harness will launch the sandbox, source it
   # from a differently-named var — it scrubs CLAUDE_CODE_OAUTH_TOKEN from its
-  # children (see "Auth"). `sandbox:status` reports which host var feeds each.
+  # children (see "Auth"). `sandbox status` reports which host var feeds each.
   secrets = {
     CLAUDE_CODE_OAUTH_TOKEN.fromEnv = "CLAUDE_CODE_OAUTH_TOKEN";
     # SOME_API_KEY.fromFile = "/run/secrets/some-api-key";
@@ -203,7 +203,7 @@ export CLAUDE_CODE_OAUTH_TOKEN="$(claude setup-token)"
 > `secrets.CLAUDE_CODE_OAUTH_TOKEN.fromEnv = "HARNESS_OAUTH_TOKEN"`, and export
 > `HARNESS_OAUTH_TOKEN` on the host.
 
-You never have to guess the name: `sandbox:status` reports exactly which host
+You never have to guess the name: `sandbox status` reports exactly which host
 variable feeds each secret and flags any that is missing (see
 [Checking your setup](#checking-your-setup)). The runner also fails fast at
 launch if it is unset. The token is injected into the guest via `fw_cfg` into a
@@ -211,7 +211,7 @@ RAM-backed file — never written to the Nix store, argv, or disk.
 
 ## Checking your setup
 
-A bare `sandbox:status` doubles as a preflight: before it lists instances it
+A bare `sandbox status` doubles as a preflight: before it lists instances it
 prints an `environment:` block that verifies **each declared secret at its host
 source** (the `fromEnv` variable is set, or the `fromFile` path is readable) and
 checks for `/dev/vhost-vsock`. A clean run — every row `ok`, exit status `0` —
@@ -228,8 +228,8 @@ environment:
 ## Interactive mode
 
 ```sh
-sandbox:start                 # ephemeral instance, ssh attaches
-sandbox:start --name work     # named (persistent) instance you can restart
+sandbox start                 # ephemeral instance, ssh attaches
+sandbox start --name work     # named (persistent) instance you can restart
 ```
 
 You land in the project workspace with the agent harness on `PATH`. The VM is
@@ -252,13 +252,13 @@ branch, and reports status back.
 ### Driving it
 
 ```sh
-sandbox:prompt task1 "Now add tests for the new module, then report done."
+sandbox prompt task1 "Now add tests for the new module, then report done."
 ```
 
 Each prompt to a **running** instance is the next turn in the **same**
 conversation — context is retained across pokes, with no `--resume` plumbing.
 The host iterates: _"do X" → done → "now Y" → done → "looks good, finish"_.
-`sandbox:prompt` streams the agent's status lines until it reports `done` or
+`sandbox prompt` streams the agent's status lines until it reports `done` or
 `blocked`:
 
 - `working` — progress (optional).
@@ -266,8 +266,8 @@ The host iterates: _"do X" → done → "now Y" → done → "looks good, finish
 - `blocked` — it needs something; it then waits for your next directive.
 - `info` — anything else worth surfacing.
 
-If you prompt a **paused** instance (one stopped with `sandbox:stop` but kept
-because it is named), `sandbox:prompt` restarts it for you — booting and arming
+If you prompt a **paused** instance (one stopped with `sandbox stop` but kept
+because it is named), `sandbox prompt` restarts it for you — booting and arming
 the channel (~30–60s) before delivering the turn — instead of hanging against
 the powered-off VM. A pause discards the VM's RAM, so the live conversation does
 not carry across it; only the pushed branch does. The restarted agent therefore
@@ -279,13 +279,13 @@ context, so phrase such a prompt to stand on its own.
 A real human can attach to the live agent session with one command:
 
 ```sh
-sandbox:attach task1         # ssh in and attach the agent's tmux session
-sandbox:attach 2             # …or reference it by its sandbox:status index
+sandbox attach task1         # ssh in and attach the agent's tmux session
+sandbox attach 2             # …or reference it by its sandbox status index
 ```
 
-`sandbox:attach` SSHes into the instance, pins `TERM=xterm-256color` for the
+`sandbox attach` SSHes into the instance, pins `TERM=xterm-256color` for the
 remote session (so terminals like ghostty don't confuse the guest's `tmux`), and
-attaches to the running `katsuobushi` tmux session. `sandbox:status <instance>`
+attaches to the running `katsuobushi` tmux session. `sandbox status <instance>`
 still prints the raw ssh command if you want to build on it.
 
 The serial console is also teed to `console.log` in the instance's state dir.
@@ -293,7 +293,7 @@ The serial console is also teed to `console.log` in the instance's state dir.
 ### Ending a session
 
 The agent powers the VM off itself when you tell it you are finished (it runs
-`systemctl poweroff`), or you stop it from the host with `sandbox:stop`.
+`systemctl poweroff`), or you stop it from the host with `sandbox stop`.
 
 ## Getting work back
 
@@ -301,7 +301,7 @@ Work returns as **ordinary git**: the agent commits on `sandbox/<instance>` and
 pushes to a per-instance bare mirror. Pull it into your repo with:
 
 ```sh
-sandbox:fetch task1          # fetches sandbox/task1 into this repo
+sandbox fetch task1          # fetches sandbox/task1 into this repo
 ```
 
 The channel only ever carries control + status — never code. The pushed branch
@@ -311,25 +311,25 @@ is the artifact.
 
 | Command                                             | Description                                                                                                   |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `sandbox:start [--agent] [--prompt "…"] [--name N]` | Launch a VM (interactive, or lingering agent mode). Alias: `nix run .#sandbox -- …`.                          |
-| `sandbox:prompt <instance\|#> "<text>"`             | Push a prompt to an agent instance and stream its reports; auto-starts a paused (stopped-but-kept) one first. |
-| `sandbox:status [instance\|#]`                      | List instances (numbered, running/stopped, ephemeral/named), or detail one (ssh command, agent CID, branch).  |
-| `sandbox:attach <instance\|#>`                      | SSH into a running instance and attach the agent's `tmux` session (`TERM=xterm-256color`).                    |
-| `sandbox:fetch <instance\|#>`                       | Fetch the instance's `sandbox/<instance>` branch into this repo.                                              |
-| `sandbox:screenshot <instance\|#> [path]`           | Grab a PNG of the headless-sway output (requires the graphics opt-in). Default: timestamped PNG in the cwd.   |
-| `sandbox:stop [--remove] <instance\|#>`             | Stop a VM (and remove a named instance's state with `--remove`).                                              |
+| `sandbox start [--agent] [--prompt "…"] [--name N]` | Launch a VM (interactive, or lingering agent mode). Alias: `nix run .#sandbox -- …`.                          |
+| `sandbox prompt <instance\|#> "<text>"`             | Push a prompt to an agent instance and stream its reports; auto-starts a paused (stopped-but-kept) one first. |
+| `sandbox status [instance\|#]`                      | List instances (numbered, running/stopped, ephemeral/named), or detail one (ssh command, agent CID, branch).  |
+| `sandbox attach <instance\|#>`                      | SSH into a running instance and attach the agent's `tmux` session (`TERM=xterm-256color`).                    |
+| `sandbox fetch <instance\|#>`                       | Fetch the instance's `sandbox/<instance>` branch into this repo.                                              |
+| `sandbox screenshot <instance\|#> [path]`           | Grab a PNG of the headless-sway output (requires the graphics opt-in). Default: timestamped PNG in the cwd.   |
+| `sandbox stop [--remove] <instance\|#>`             | Stop a VM (and remove a named instance's state with `--remove`).                                              |
 
 Every command that takes an `<instance>` also accepts the **index** shown in the
-`#` column of `sandbox:status` — a convenience shorthand for the full suffixed
+`#` column of `sandbox status` — a convenience shorthand for the full suffixed
 name. The numbering is positional over the current instance list, so it can
-shift as instances come and go; re-run `sandbox:status` to see the current map.
+shift as instances come and go; re-run `sandbox status` to see the current map.
 
 Unnamed instances are **ephemeral** (removed on stop); `--name` makes an
 instance **persistent** — it keeps its branch. To keep names collision-free, a
 provided `--name foo` is suffixed with random entropy at launch (e.g.
 `foo-a3f9c2d1`), so every launch is a fresh instance rather than a silent resume
 of an older same-named branch. The full suffixed name is printed at launch (and
-by `sandbox:stop`); pass _that_ full name to restart and resume the agent's
+by `sandbox stop`); pass _that_ full name to restart and resume the agent's
 accumulated work.
 
 ## What the boundary enforces
@@ -400,7 +400,7 @@ command parser in the host process there. What still contains a GPU rung: QEMU
 runs as your unprivileged launching uid (a successful escape lands with that
 user's privileges, the same ceiling as any QEMU escape), and nothing new is
 exposed to the network — virtio-gpu is a local device, the default-deny egress
-firewall is untouched, and `sandbox:screenshot` rides ssh-over-loopback. The
+firewall is untouched, and `sandbox screenshot` rides ssh-over-loopback. The
 delta is purely a host-_integrity_ surface, not a data-egress one. A launch-time
 notice repeats this when you enable graphics, mirroring the
 `vhost-vsock`-missing warning.
@@ -439,7 +439,7 @@ your back:
 Opening a host render node (`/dev/dri/renderD128`) is the one host prerequisite.
 The portable default for those nodes is `root:render 0660`, so the launching
 user's uid may need to be in the `render` group before a GPU rung is usable. You
-do not have to guess: when graphics is enabled, `sandbox:status` adds a
+do not have to guess: when graphics is enabled, `sandbox status` adds a
 `graphics` preflight row that runs the real GPU resolver against the host now
 and reports the outcome —
 
@@ -471,11 +471,11 @@ glance:
 ### Grabbing a screenshot
 
 ```sh
-sandbox:screenshot task1            # timestamped PNG in the cwd
-sandbox:screenshot task1 shot.png   # to a path; "-" streams the PNG to stdout
+sandbox screenshot task1            # timestamped PNG in the cwd
+sandbox screenshot task1 shot.png   # to a path; "-" streams the PNG to stdout
 ```
 
-`sandbox:screenshot` runs `grim` over the existing loopback ssh against the
+`sandbox screenshot` runs `grim` over the existing loopback ssh against the
 headless-sway output and streams the PNG back — no daemon, no new port, no new
 channel. It works in both interactive and agent mode, and requires the graphics
 opt-in (with graphics off it fails with a clear "graphics not enabled" message

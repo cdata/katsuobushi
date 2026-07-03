@@ -120,7 +120,7 @@
           #
           # Generate the token on the host with `claude setup-token` and export
           # it before `nix run .#sandbox`. The runner fails fast if it is missing,
-          # and `sandbox:status` reports which host variable feeds each secret.
+          # and `sandbox status` reports which host variable feeds each secret.
           #
           # The guest always sees CLAUDE_CODE_OAUTH_TOKEN; `fromEnv` picks which
           # *host* variable supplies it. If an agent harness will launch the
@@ -165,10 +165,10 @@
               command = ''echo "Hello from My Project!"'';
             };
           }
-          # Adds `sandbox:start` plus `sandbox:prompt <inst> "…"` /
-          # `sandbox:status [inst]` / `sandbox:attach <inst>` / `sandbox:fetch
-          # <inst>` / `sandbox:stop <inst>` to the dev shell. Every `<inst>`
-          # also accepts the index shown in `sandbox:status`.
+          # Adds `sandbox start` plus `sandbox prompt <inst> "…"` /
+          # `sandbox status [inst]` / `sandbox attach <inst>` / `sandbox fetch
+          # <inst>` / `sandbox stop <inst>` to the dev shell. Every `<inst>`
+          # also accepts the index shown in `sandbox status`.
           // sandbox.menuCommands;
         };
       in
@@ -180,7 +180,7 @@
         checks.sandbox = sandbox.checks.sandbox;
 
         devShells.default = pkgs.mkShell {
-          # The `sandbox:*` commands invoke `katsuctl` by its absolute store path,
+          # The `sandbox` subcommands invoke `katsuctl` by its absolute store path,
           # so they work out of the box. `sandbox.katsuctl` here is optional — it
           # only puts a bare `katsuctl` on the shell PATH for power users who want
           # to drive the controller directly.

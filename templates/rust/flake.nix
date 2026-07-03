@@ -79,8 +79,9 @@
           ;
 
         # Markdown helpers: a shared Prettier configuration driving the
-        # `format:markdown` / `lint:markdown` menu commands and the check below.
-        # Formats every tracked `.md` file by default; scope with `include`.
+        # `markdown` menu command (with `format` / `lint` subcommands) and the
+        # check below. Formats every tracked `.md` file by default; scope with
+        # `include`.
         markdown = katsuobushi.lib.markdown {
           inherit pkgs;
           workspaceRoot = ./.;

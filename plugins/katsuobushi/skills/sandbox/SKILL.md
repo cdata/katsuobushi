@@ -7,10 +7,9 @@ description:
   VM, run risky / long-running / parallel work in isolation, spin up an
   agent-mode sandbox, push prompts to a running sandbox instance, check on or
   fetch a sandbox's work, attach to a running sandbox's live session, screenshot
-  a graphics-enabled sandbox, or stop one — i.e. anything involving the
-  sandbox:start / sandbox:prompt / sandbox:status / sandbox:attach /
-  sandbox:fetch / sandbox:screenshot / sandbox:stop commands or `nix run
-  .#sandbox`.
+  a graphics-enabled sandbox, or stop one — i.e. anything involving the sandbox
+  start / sandbox prompt / sandbox status / sandbox attach / sandbox fetch /
+  sandbox screenshot / sandbox stop commands or `nix run .#sandbox`.
 ---
 
 # Driving a Katsuobushi sandbox
@@ -37,12 +36,12 @@ delegated work.
 
 ## Prerequisites
 
-**Run `sandbox:status` to get your bearings** before you do anything else.
+**Run `sandbox status` to get your bearings** before you do anything else.
 
 It may reveal the following problems:
 
-- Missing command; if `sandbox:status` is not available, then you probably need
-  to drop into the Nix dev shell. `nix develop -c sandbox:status` should work if
+- Missing command; if `sandbox status` is not available, then you probably need
+  to drop into the Nix dev shell. `nix develop -c sandbox status` should work if
   you are in a folder with a viable dev shell.
 - Missing environment variables; if any are detected as missing, share which
   ones with the user and ask them to export them by name (give them a helpful
@@ -54,9 +53,9 @@ It may reveal the following problems:
 
 ## Configuring a project's sandbox
 
-If a project doesn't yet expose the `sandbox:*` commands, offer to wire the
-library into the local flake. The call lives in the per-system outputs
-(alongside `apps.sandbox` / `checks.sandbox` and the dev-shell menu; see
+If a project doesn't yet expose the `sandbox` command, offer to wire the library
+into the local flake. The call lives in the per-system outputs (alongside
+`apps.sandbox` / `checks.sandbox` and the dev-shell menu; see
 `templates/sandbox/flake.nix` in the katsuobushi repo for the full flake). A
 comprehensive call exercising every consumer-facing argument:
 
@@ -87,7 +86,7 @@ sandbox = katsuobushi.lib.sandbox {
   # The guest always sees CLAUDE_CODE_OAUTH_TOKEN; `fromEnv` picks which *host*
   # var supplies it. An agent harness scrubs CLAUDE_CODE_OAUTH_TOKEN from its
   # children, so when one launches the sandbox, source it from a differently-
-  # named var (e.g. "HARNESS_OAUTH_TOKEN"). `sandbox:status` reports which.
+  # named var (e.g. "HARNESS_OAUTH_TOKEN"). `sandbox status` reports which.
   secrets = {
     CLAUDE_CODE_OAUTH_TOKEN.fromEnv = "CLAUDE_CODE_OAUTH_TOKEN";
     # SOME_API_KEY.fromFile = "/run/secrets/some-api-key";
@@ -165,7 +164,7 @@ orchestrator:
   it applies to every instance of that project; offer to add the `graphics`
   block (and raise `vcpu`/`mem` to the floor) when the user wants browser/GUI
   work. The browser/app is an ordinary entry in `packages`.
-- **`sandbox:status` shows it.** When graphics is enabled, the instance list
+- **`sandbox status` shows it.** When graphics is enabled, the instance list
   gains a **GRAPHICS** column — `integrated` / `discrete` / `software` (the rung
   the instance actually launched on), or `none` when graphics is off — and the
   preflight gains a `graphics` row that resolves the GPU against the host now.
@@ -174,7 +173,7 @@ orchestrator:
   `render` group; the row reads `MISSING - … add yourself to the 'render' group`
   (non-zero exit) when no node is openable and the `gpu` list has no `software`
   tail. Surface that fix to the user as you would a missing secret.
-- **`sandbox:screenshot <name|#> [path]`** grabs a PNG of the headless-sway
+- **`sandbox screenshot <name|#> [path]`** grabs a PNG of the headless-sway
   output over the existing ssh (`-` streams to stdout; default is a timestamped
   PNG in the cwd). Works in both modes; requires the opt-in. A purely offscreen
   workload that never puts a surface on the compositor screenshots **blank** —
@@ -189,10 +188,10 @@ orchestrator:
 
 ```sh
 # Boot a lingering agent VM; returns immediately once it's up.
-sandbox:start --agent --name "<name>"
+sandbox start --agent --name "<name>"
 
 # …or boot AND send the first directive, streaming reports until done/blocked:
-sandbox:start --agent --name "<name>" --prompt "<directive>"
+sandbox start --agent --name "<name>" --prompt "<directive>"
 
 # Alternatively for debugging you can invoke the sandbox binary directly e.g.,
 # nix run .#sandbox -- --agent --name <name>
@@ -201,7 +200,7 @@ sandbox:start --agent --name "<name>" --prompt "<directive>"
 Agent-mode VMs **linger** (they outlive the launch command). A dormant Claude
 session runs inside the VM with the controller armed. After a no-`--prompt`
 launch, the VM still needs ~30–60s to finish booting and arm the channel before
-it will answer — if `sandbox:prompt` can't connect, wait and retry.
+it will answer — if `sandbox prompt` can't connect, wait and retry.
 
 Give a directive that says how to finish, e.g.: _"Do X. Commit and push on the
 branch. Run `report done \"<summary>\"` when complete;
@@ -210,7 +209,7 @@ branch. Run `report done \"<summary>\"` when complete;
 ## Driving the agent
 
 ```sh
-sandbox:prompt <name> "<the next directive>"
+sandbox prompt <name> "<the next directive>"
 ```
 
 Each prompt to a **running** instance is the next turn in the **same**
@@ -223,9 +222,9 @@ returns when the agent reports a terminal status:
 - `blocked` — it needs something; address it and send the next prompt.
 - `info` — anything else worth surfacing.
 
-**Prompting a paused instance auto-starts it.** `sandbox:stop <name>` on a named
+**Prompting a paused instance auto-starts it.** `sandbox stop <name>` on a named
 instance _pauses_ it: the VM powers off but its state dir (and branch) are kept.
-If you `sandbox:prompt` a paused instance, the command restarts it for you —
+If you `sandbox prompt` a paused instance, the command restarts it for you —
 booting and arming the channel (~30–60s) before delivering the turn — rather
 than hanging against the dead VM. The catch: a pause wipes the VM's RAM, so the
 live conversation **does not** survive it; only the committed branch does. The
@@ -244,10 +243,10 @@ to a per-instance mirror. The channel carries control/status only — the branch
 is the artifact.
 
 ```sh
-sandbox:fetch <name>            # git fetch <mirror> sandbox/<name>:sandbox/<name>
+sandbox fetch <name>            # git fetch <mirror> sandbox/<name>:sandbox/<name>
 ```
 
-`sandbox:fetch` brings the branch into your repo but **never merges**.
+`sandbox fetch` brings the branch into your repo but **never merges**.
 Integration is yours to drive, and the goal is to land the work as automatically
 as a built-in sub-agent would — pausing only on a genuine dead-end. A sandbox is
 meant to be a _more secure_ substitute for sub-agent spawning, so the back-half
@@ -262,11 +261,11 @@ prompt.
 
 Speak the user's VCS tool: `.jj/` present → use `jj`; else `.git` → `git`; if
 neither or it's ambiguous, ask. The sync layer is always git (the mirror +
-`sandbox:fetch`), but the host-side landing is done in their tool.
+`sandbox fetch`), but the host-side landing is done in their tool.
 
 **Land a single branch via rebase workflow:**
 
-1. `sandbox:fetch <name>`.
+1. `sandbox fetch <name>`.
 2. **Snapshot the host first.** If the working copy is dirty, capture it as a
    `wip: …` commit (jj: the working copy already _is_ a commit; git: commit the
    dirty tree) — never a stash. Concurrent host edits must survive the landing.
@@ -278,8 +277,8 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
    durable across the git imports the sandbox commands trigger. In `git`,
    fast-forward your branch onto the landed commits. Either way, confirm the
    files materialize in the working copy, then run
-   `sandbox:stop --remove <name>` — the instance's unit of work is accepted, so
-   it's spent (a plain `sandbox:stop` removes an ephemeral instance; `--remove`
+   `sandbox stop --remove <name>` — the instance's unit of work is accepted, so
+   it's spent (a plain `sandbox stop` removes an ephemeral instance; `--remove`
    also tears down a named one). Keep the `sandbox/<name>` ref as the revert
    artifact, and surface the agent's `done` summary plus a diffstat of what
    landed — that digest is the orchestrator's "return value".
@@ -297,7 +296,7 @@ result conflicts.
 
 Every normal delegation behavior applies unchanged: it works the task, `report`s
 `done` or `blocked`, you answer a `blocked` by relaying it to the user and
-sending the reply with `sandbox:prompt`, and you involve the user directly only
+sending the reply with `sandbox prompt`, and you involve the user directly only
 when the agent truly can't proceed. There is no conflict-specific role, ceiling,
 or path.
 
@@ -327,23 +326,23 @@ still land on accumulated work and need a follow-up sandbox, exactly as above.)
 ## Observing & lifecycle
 
 ```sh
-sandbox:status                  # list instances; numbered, running/stopped, graphics rung, branch
-sandbox:status <name|#>         # detail, incl. the ssh command to watch live
-sandbox:attach <name|#>         # ssh in + attach the agent's tmux session live
-sandbox:screenshot <name|#> [path] # PNG of the headless-sway output (graphics opt-in; "-" = stdout)
-sandbox:stop [--remove] <name|#> # stop (and remove a named instance with --remove)
+sandbox status                  # list instances; numbered, running/stopped, graphics rung, branch
+sandbox status <name|#>         # detail, incl. the ssh command to watch live
+sandbox attach <name|#>         # ssh in + attach the agent's tmux session live
+sandbox screenshot <name|#> [path] # PNG of the headless-sway output (graphics opt-in; "-" = stdout)
+sandbox stop [--remove] <name|#> # stop (and remove a named instance with --remove)
 ```
 
-`sandbox:status` numbers every instance in a `#` column. That index is an
+`sandbox status` numbers every instance in a `#` column. That index is an
 alternative to the full suffixed name for **every** instance-taking command
 (`prompt`, `status`, `attach`, `fetch`, `screenshot`, `stop`) — handy
 interactively, but positional, so it can shift as instances appear or disappear;
-re-check `sandbox:status` before trusting a number across a change.
+re-check `sandbox status` before trusting a number across a change.
 
-To watch the agent work live, run `sandbox:attach <name|#>` — it SSHes in, pins
+To watch the agent work live, run `sandbox attach <name|#>` — it SSHes in, pins
 `TERM=xterm-256color` (so terminals like ghostty don't trip up the guest's
 `tmux`), and attaches the running `katsuobushi` tmux session.
-`sandbox:status <name>` still prints the raw ssh command if you need it. The
+`sandbox status <name>` still prints the raw ssh command if you need it. The
 serial console is teed to `console.log` in the instance's state dir — read it to
 diagnose a stuck boot.
 
@@ -358,7 +357,7 @@ accumulated work.
 A persistent instance is kept only while its work is still in flight. Once that
 unit of work is **complete and accepted** — its branch landed, or otherwise
 signed off — the instance is spent: remove it with
-`sandbox:stop --remove <name>`. Don't leave accepted sandboxes lingering; the
+`sandbox stop --remove <name>`. Don't leave accepted sandboxes lingering; the
 `sandbox/<name>` ref is the durable artifact, not the VM.
 
 ## Notes
@@ -366,5 +365,5 @@ signed off — the instance is spent: remove it with
 - One serial session per VM: reports answer prompts in order. `done`/`blocked`
   are the signals to act on; the pushed branch is the deliverable.
 - Agent mode relies on Claude Code's experimental "channels" feature; if a
-  launch never arms the channel, check `console.log` and `sandbox:status`.
+  launch never arms the channel, check `console.log` and `sandbox status`.
 - Treat the OAuth token as a live credential; it stays on subscription billing.

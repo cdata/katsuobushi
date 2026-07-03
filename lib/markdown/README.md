@@ -14,7 +14,7 @@ Exposed via `katsuobushi.lib.markdown`.
 markdown = katsuobushi.lib.markdown {
   inherit pkgs;
   workspaceRoot = ./.;
-  name = "readmes"; # labels the commands + check (default: "markdown")
+  name = "readmes"; # names the command group + check (default: "markdown")
   include = [ "README.md" "lib/*/README.md" ]; # default: [ "**/*.md" ]
   # exclude = [ "vendor/**" ]; # written to a Prettier ignore file
   # settings = { printWidth = 100; }; # merged over the defaults
@@ -23,7 +23,7 @@ markdown = katsuobushi.lib.markdown {
 
 ```nix
 devShells.default = pkgs.mkShell {
-  # adds the `format:<name>` / `lint:<name>` commands + the `prettier` tool
+  # adds the `<name>` command (with `format` / `lint` subcommands) + `prettier`
   nativeBuildInputs = menu.commands ++ [ markdown.prettier ];
 };
 
@@ -35,11 +35,11 @@ checks = markdown.checks; # fails when documents drift from the format
 Each invocation is **namespaced** by `name`, so several invocations compose
 without collision (there is no shared/global command).
 
-| Output                                           | Purpose                                                                                       |
-| ------------------------------------------------ | --------------------------------------------------------------------------------------------- |
-| `menuCommands`                                   | `format:<name>` (rewrite in place) and `lint:<name>` (read-only check), to merge into a menu. |
-| `checks`                                         | `checks.<name>`, fails when included files aren't formatted. Merge into the flake's `checks`. |
-| `prettier` / `prettierConfig` / `prettierIgnore` | The pinned tool, generated config, and generated ignore file, for ad-hoc use.                 |
+| Output                                           | Purpose                                                                                                            |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `menuCommands`                                   | A `<name>` branch with `format` (rewrite in place) and `lint` (read-only check) subcommands, to merge into a menu. |
+| `checks`                                         | `checks.<name>`, fails when included files aren't formatted. Merge into the flake's `checks`.                      |
+| `prettier` / `prettierConfig` / `prettierIgnore` | The pinned tool, generated config, and generated ignore file, for ad-hoc use.                                      |
 
 ## Scoping
 

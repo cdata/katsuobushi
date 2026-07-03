@@ -1139,7 +1139,7 @@ let
           PermitRootLogin = "no";
           AllowUsers = [ agentUser ];
         };
-        # Graphics: `sandbox:screenshot` runs `ssh agent@… 'grim -'`, a
+        # Graphics: `sandbox screenshot` runs `ssh agent@… 'grim -'`, a
         # non-interactive remote command that does NOT source /etc/profile, so the
         # loginShellInit export below never reaches it. Set WAYLAND_DISPLAY
         # server-side instead (sway binds `wayland-1`), plus DISPLAY=:0 so X11
@@ -1221,7 +1221,7 @@ let
         ]
         # Graphics (opt-in): the headless compositor (sway, also provides
         # `swaymsg` for the real-boot `get_outputs` check), the screenshot tool the
-        # `sandbox:screenshot` feature itself shells (grim), the nested
+        # `sandbox screenshot` feature itself shells (grim), the nested
         # micro-compositor for the game path (gamescope), and the X server sway's
         # XWayland shim execs so X11 clients reach `DISPLAY=:0` (sway looks for
         # `Xwayland` on PATH; systemPackages puts it on the user service's PATH).
@@ -1694,21 +1694,48 @@ let
   # Business logic lives in katsuctl; these wrappers only dispatch, in one of
   # two documented forms:
   #
-  # - `handOff`: plain exec of the subcommand, passing the Nix-rendered spec
-  #   via --config (prompt/status/fetch/stop/screenshot).
+  # - `handOff`: run the subcommand, passing the Nix-rendered spec via --config
+  #   (prompt/status/fetch/stop/screenshot).
   # - `emitExec`: katsuctl makes every probe-dependent decision and prints only
   #   the path of a flat recipe; the wrapper `exec`s bash on it. A planning
   #   failure exits nonzero with no path, so the `exec` is reached only on a
   #   clean emit (start/attach — also `apps.sandbox` below).
+  #
+  # Usage-line rewrite: clap qualifies its usage/error text with the real binary
+  # path — e.g. `Usage: katsuctl sandbox --config <CONFIG> attach <INSTANCE>` —
+  # which is confusing when the user typed `sandbox attach`. Both wrappers pass
+  # katsuctl's STDERR (where clap prints errors and `Usage:` lines) through
+  # `usageSed`, which rewrites that prefix back to `sandbox `. Only stderr is
+  # filtered, so a subcommand's real stdout — notably `sandbox prompt`'s live
+  # report stream — flows straight through, unbuffered. (A `--help` invocation,
+  # which clap prints to stdout, is not rewritten for that reason.)
   katsuctlBin = "${katsuctlPkg}/bin/katsuctl";
+  usageSed = "${pkgs.gnused}/bin/sed -E 's|katsuctl sandbox --config <CONFIG> |sandbox |g'";
+
+  # handOff runs katsuctl in the foreground (not `exec`, so the filter shell
+  # survives to post-process stderr). stdout is routed to fd3 → the real stdout,
+  # untouched; stderr goes through usageSed. `|| ret=$?` keeps errexit from
+  # exiting before we capture katsuctl's status (pipefail makes the pipeline
+  # yield it), which is then re-raised.
   handOff = subcommand: description: {
     inherit description;
     command = ''
-      exec ${katsuctlBin} sandbox --config ${katsuctlSpec} ${subcommand} "$@"
+      ret=0
+      { ${katsuctlBin} sandbox --config ${katsuctlSpec} ${subcommand} "$@" 2>&1 1>&3 | ${usageSed} >&2; } 3>&1 || ret=$?
+      exit "$ret"
     '';
   };
+  # emitExec captures katsuctl's stdout (the recipe path), so its stderr is
+  # buffered to a temp file and rewritten after the run — deterministic, with no
+  # process-substitution flush race. On success the path is exec'd; on failure
+  # the (rewritten) usage/error has already been shown and we exit nonzero.
   emitExecScript = subcommand: ''
-    script="$(${katsuctlBin} sandbox --config ${katsuctlSpec} ${subcommand} "$@")" || exit
+    err="$(${pkgs.coreutils}/bin/mktemp)"
+    ret=0
+    script="$(${katsuctlBin} sandbox --config ${katsuctlSpec} ${subcommand} "$@" 2>"$err")" || ret=$?
+    ${usageSed} <"$err" >&2
+    ${pkgs.coreutils}/bin/rm -f "$err"
+    [ "$ret" -eq 0 ] || exit "$ret"
     exec ${pkgs.bash}/bin/bash "$script"
   '';
   emitExec = subcommand: description: {
@@ -1716,30 +1743,39 @@ let
     command = emitExecScript subcommand;
   };
 
+  # One `sandbox` branch; the lifecycle verbs are its subcommands (`sandbox
+  # start`, `sandbox prompt`, …). Each leaf keeps the same handOff/emitExec body
+  # as before — the branch only groups them into a single binary + menu row.
   menuCommands = {
-    # start: naming, port/CID allocation, branch seed, instance.json, then a
-    # flat setup+boot recipe.
-    "sandbox:start" = emitExec "start" "Launch an agent sandbox";
-    # prompt: instance resolution, the QMP liveness probe, the readiness-wait,
-    # vsock streaming, and the paused-named auto-restart.
-    "sandbox:prompt" = handOff "prompt" "Send a prompt to an agent instance (auto-starting a paused one)";
-    # status: a bare `status` doubles as the launch prerequisite gate (nonzero
-    # exit iff a secret is missing or /dev/vhost-vsock is absent).
-    "sandbox:status" = handOff "status" "List instances, or detail a single instance";
-    "sandbox:fetch" = handOff "fetch" "Fetch a sandbox's branch into this repo";
-    "sandbox:stop" = handOff "stop" "Suspend or remove an instance";
-    # attach: the running/has-session probes, then a tiny terminal-handoff
-    # recipe.
-    "sandbox:attach" = emitExec "attach" "SSH in and attach to a running agent's tmux session";
-    # screenshot: streams `grim -` over the loopback ssh as the agent user,
-    # landing the PNG at the requested path (or host stdout for `-`). Requires
-    # graphics.enable; katsuctl fails clearly if off.
-    "sandbox:screenshot" = handOff "screenshot" "Grab the headless compositor framebuffer of a graphics instance";
+    sandbox = {
+      description = "Launch and drive ephemeral agent sandbox VMs";
+      help = "Manage Katsuobushi agent sandbox VMs. Run `sandbox <subcommand> --help` for a subcommand's own options.";
+      subcommands = {
+        # start: naming, port/CID allocation, branch seed, instance.json, then a
+        # flat setup+boot recipe.
+        start = emitExec "start" "Launch an agent sandbox";
+        # prompt: instance resolution, the QMP liveness probe, the readiness-wait,
+        # vsock streaming, and the paused-named auto-restart.
+        prompt = handOff "prompt" "Send a prompt to an agent instance (auto-starting a paused one)";
+        # status: a bare `status` doubles as the launch prerequisite gate (nonzero
+        # exit iff a secret is missing or /dev/vhost-vsock is absent).
+        status = handOff "status" "List instances, or detail a single instance";
+        fetch = handOff "fetch" "Fetch a sandbox's branch into this repo";
+        stop = handOff "stop" "Suspend or remove an instance";
+        # attach: the running/has-session probes, then a tiny terminal-handoff
+        # recipe.
+        attach = emitExec "attach" "SSH in and attach to a running agent's tmux session";
+        # screenshot: streams `grim -` over the loopback ssh as the agent user,
+        # landing the PNG at the requested path (or host stdout for `-`). Requires
+        # graphics.enable; katsuctl fails clearly if off.
+        screenshot = handOff "screenshot" "Grab the headless compositor framebuffer of a graphics instance";
+      };
+    };
   };
 in
 {
   # `nix run .#sandbox` needs an app; lifecycle helpers are menu commands. Its
-  # program is the SAME emit+exec wrapper `sandbox:start` uses (one definition,
+  # program is the SAME emit+exec wrapper `sandbox start` uses (one definition,
   # not a third copy). katsuctl is invoked by its absolute store path, and the
   # emitted agent-start tail-call self-references the same binary via
   # `spec.tools.katsuctl` — so nothing here touches PATH.

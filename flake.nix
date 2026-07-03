@@ -196,9 +196,9 @@
           title = "Katsuobushi";
           graphicFile = ./hero.ansi;
           colorizeGraphic = false;
-          # Each library configuration contributes its own namespaced commands
-          # (e.g. format:design / lint:design, format:markdown / lint:markdown);
-          # there is no global aggregate command.
+          # Each library configuration contributes its own namespaced group
+          # (e.g. a `design` branch with format/lint subcommands, a `markdown`
+          # branch, a `sandbox` branch); there is no global aggregate command.
           commands = markdown.menuCommands // (pkgs.lib.optionalAttrs isLinux sandbox.menuCommands);
         };
       in
