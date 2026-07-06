@@ -134,9 +134,12 @@ let
       # whose body is the whole subtree inlined:
       #   * a branch becomes a `case` that dispatches on the next argv token,
       #     `shift`s it, and recurses into the matched child; bare invocation (or
-      #     `-h`/`--help`) prints usage and exits 0; an unknown token errors;
+      #     `-h`/`--help`) prints its banner + usage and exits 0; an unknown
+      #     token errors;
       #   * a leaf prints its figlet banner + description, then runs `command`
       #     with the post-dispatch argv still available as "$@".
+      # The banner (see `banner`) shows the full command chain up to the node —
+      # `sandbox status`, not just `status` — and goes to stderr.
       # Only top-level nodes become binaries and menu rows — subcommands are
       # reached by walking argv inside their group's single binary.
 
@@ -162,18 +165,30 @@ let
           pkgs.lib.mapAttrsToList (k: v: "export ${k}=${pkgs.lib.escapeShellArg v}\n") env
         );
 
+      # banner :: string -> string -> string
+      #
+      # The figlet title — the full command chain up to this node, e.g.
+      # `sandbox status` — plus the description, colorized, emitted to STDERR.
+      # stderr because the banner is decorative, not data: keeping it off stdout
+      # leaves a command's real stdout pristine — pipeable for `handOff`
+      # commands, and safe to capture for `emitExec` ones (`sandbox start` /
+      # `attach` exec the recipe path katsuctl prints on stdout). The chain is
+      # the part of the invocation encoded in the Nix menu tree; anything past a
+      # leaf (an aliased binary's own args) is not shown.
+      banner = titleText: description: ''
+        {
+          ${pkgs.figlet}/bin/figlet -t '${escapeForSingleQuotes titleText}'
+          echo "${escapeForDoubleQuotes description}"
+          echo ""
+        } | ${colorizer} >&2
+      '';
+
       # renderLeaf :: string -> node -> string
       #
-      # Banner (figlet title + description via the colorizer) then the script,
+      # Banner (full command chain + description, to stderr) then the script,
       # which sees the argv left after dispatch as "$@".
-      renderLeaf = name: node: ''
-        TITLE="$(${pkgs.figlet}/bin/figlet -t '${name}')"
-        SUBTITLE="${node.description}"
-
-        echo "$TITLE
-        $SUBTITLE
-        " | ${colorizer}
-
+      renderLeaf = fullPath: node: ''
+        ${banner fullPath node.description}
         ${envExports (node.env or { })}${node.command}
       '';
 
@@ -230,6 +245,7 @@ let
         ''
           case "''${1:-}" in
           ${arms}  "" | -h | --help)
+              ${banner fullPath node.description}
               ${usage}
               exit 0
               ;;
@@ -248,9 +264,9 @@ let
       renderNode =
         path: name: node:
         let
-          pathStr = pkgs.lib.concatStringsSep " " (path ++ [ name ]);
+          fullPath = pkgs.lib.concatStringsSep " " (path ++ [ name ]);
         in
-        if nodeKind pathStr node == "leaf" then renderLeaf name node else renderBranch path name node;
+        if nodeKind fullPath node == "leaf" then renderLeaf fullPath node else renderBranch path name node;
 
       # intoPackages :: string -> derivation
       #
@@ -388,15 +404,29 @@ let
   #
   # Consumes the output of makeMenu and produces a shellHook string. When the
   # devshell starts, it:
-  #   1. Clears the terminal.
-  #   2. Prints the full header (graphic + title + menu).
-  #   3. Defines and exports a `showMenu` function so the user can re-display
+  #   1. Greets — clears the screen and prints the full header (graphic + title
+  #      + menu).
+  #   2. Defines and exports a `showMenu` function so the user can re-display
   #      the command table at any time by typing `showMenu` in the shell.
+  #
+  # The whole greeting goes to STDERR so it never muddies a command's stdout:
+  # `nix develop -c 'markdown format' | jq` (or `> out`) still greets on the
+  # terminal yet leaves the useful output clean and pipeable.
+  #
+  # We deliberately do NOT gate the greeting (or the clear) on an
+  # interactive-vs-not test. The shellHook runs for `nix develop -c <cmd>` too,
+  # and nothing at hook time reliably separates `-c zsh` (drop into a shell,
+  # want the greeting) from `-c markdown format` (a batch command): both are a
+  # non-interactive `-c` bash, so a `$-`-interactivity gate wrongly suppresses
+  # the `-c zsh` case. Until there is a more elegant signal, the greeting always
+  # shows; keeping it on stderr is what makes that harmless to piped output.
   makeDevShellHook =
     { header, menuText, ... }:
     ''
-      clear
-      ${header}
+      {
+        clear
+        ${header}
+      } >&2
 
       function showMenu() {
         ${menuText}
