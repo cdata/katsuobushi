@@ -5,6 +5,30 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.2.7] — 2026-07-06
+
+A menu-polish follow-up to 0.2.6: subcommand banners regained their figlet
+header, and all menu decoration moved to stderr so it can no longer muddy a
+command's stdout. Menu-only; no spec or instance-state bump (`specVersion 4` /
+`instanceVersion 2` unchanged). See [`MIGRATING.md`](MIGRATING.md#027).
+
+### Fixed
+
+- **Subcommand banners show the full command chain again.** 0.2.6's subcommand
+  trees dropped the pretty figlet header other commands show — a branch printed
+  none, and a leaf would at most have shown its own bare key. A resolved leaf
+  now banners with its whole Nix-encoded chain (`sandbox status`, not `status`;
+  `markdown format`), and a bare branch banners with its own name (`markdown`).
+
+### Changed
+
+- **Menu decoration goes to stderr.** The dev-shell greeting (hero + command
+  table) and every command's figlet banner now write to stderr instead of
+  stdout, so `nix develop -c 'sandbox status --json' | jq` — and any
+  captured/piped menu command — keeps clean, pipeable stdout. The greeting still
+  displays on the terminal and still clears the screen on entry; the per-command
+  banner still precedes the command's real output.
+
 ## [0.2.6] — 2026-07-03
 
 Dev-shell menu commands are now organized as subcommand trees, so a namespace

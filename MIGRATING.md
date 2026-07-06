@@ -8,6 +8,21 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.2.7
+
+**Action required: rebuild your dev shell.** No config, spec, or instance-state
+change (`specVersion 4` / `instanceVersion 2` unchanged) — just rebuild
+(`nix develop`) to pick up the menu fixes.
+
+One behavioral change worth knowing: **menu decoration now goes to stderr.** The
+dev-shell greeting and every menu command's figlet banner previously printed to
+stdout; they now print to stderr. This is what lets a captured or piped menu
+command keep clean output — e.g. `nix develop -c 'sandbox status --json' | jq`
+now sees only the JSON, where before the greeting could land in the pipe. If you
+have anything that scraped the greeting or a banner from a command's **stdout**,
+read it from stderr instead. The greeting still displays on an interactive
+terminal (it is not gated on interactivity — it always shows, just on stderr).
+
 ## 0.2.6
 
 **Action required: rebuild your dev shell, and rename any calls to the menu
