@@ -63,11 +63,7 @@ let
   # arbitrary text — such as ASCII art — to be safely embedded in an
   # `echo "..."` expression without triggering unintended shell interpretation.
   escapeForDoubleQuotes =
-    str:
-    builtins.replaceStrings
-      [ "\\" "\"" "`" "$" ]
-      [ "\\\\" "\\\"" "\\`" "\\$" ]
-      str;
+    str: builtins.replaceStrings [ "\\" "\"" "`" "$" ] [ "\\\\" "\\\"" "\\`" "\\$" ] str;
 
   # makeMenu :: { commands, title, graphic?, graphicFile?, colorizer?, colorizeGraphic? } -> { header, menuText, commands }
   #
@@ -86,6 +82,10 @@ let
   #                 subcommands : attrset — (Branch) Child nodes, keyed by the
   #                                         token that selects them; nests to any
   #                                         depth. Mutually exclusive with command.
+  #               A built-in `menu` leaf ("Print this menu.") is always added,
+  #               reprinting the command table (with its own figlet banner, like
+  #               any command, but not the graphic greeting); supply your own
+  #               `menu` in commands to override it.
   #   title     — The project/devshell title, rendered large via figlet.
   #   graphic   — (Optional, default "") ASCII art displayed above the title,
   #               inlined as a string. Best for plain text; if the art contains
@@ -124,7 +124,7 @@ let
     }:
     let
       # Sorted list of command names (attrNames returns them alphabetically).
-      names = builtins.attrNames commands;
+      names = builtins.attrNames allCommands;
 
       # Command nodes form a tree. A node is either a LEAF (has `command`) or a
       # BRANCH (has `subcommands`, an attrset of child nodes); the two are
@@ -210,9 +210,7 @@ let
             else
               "";
           listing = escapeForDoubleQuotes (
-            pkgs.lib.concatStringsSep "\n" (
-              pkgs.lib.mapAttrsToList (n: c: "${n};${c.description}") children
-            )
+            pkgs.lib.concatStringsSep "\n" (pkgs.lib.mapAttrsToList (n: c: "${n};${c.description}") children)
           );
         in
         ''
@@ -276,7 +274,7 @@ let
         name:
         pkgs.writeShellApplication {
           inherit name;
-          text = renderNode [ ] name (builtins.getAttr name commands);
+          text = renderNode [ ] name (builtins.getAttr name allCommands);
         };
 
       # escapeForSingleQuotes :: string -> string
@@ -296,7 +294,7 @@ let
       intoLines =
         acc: name:
         let
-          description = (builtins.getAttr name commands).description;
+          description = (builtins.getAttr name allCommands).description;
         in
         acc + " && echo '${escapeForSingleQuotes name};${escapeForSingleQuotes description}'";
 
@@ -307,10 +305,35 @@ let
       menuLines = builtins.foldl' intoLines "echo ''" names;
 
       # Shell snippet that pipes the menu lines through `column` for aligned
-      # tabular output, using ";" as the field separator.
+      # tabular output, using ";" as the field separator. The `&&` chain is
+      # wrapped in a group so `column` receives its combined stdout rather than
+      # only the last echo (`|` binds tighter than `&&`).
       menu = ''
-        echo "$(${menuLines})" | column -t -s ';'
+        { ${menuLines}; } | ${pkgs.util-linux}/bin/column -t -s ';'
       '';
+
+      # Shell snippet: the command table, colorized. Used by the built-in `menu`
+      # command, the returned `menuText`, and (via that) the `showMenu` shell
+      # function. Written without a useless-echo wrapper so it also passes
+      # writeShellApplication's shellcheck when inlined as the `menu` body.
+      menuText = ''
+        { ${menuLines}; } | ${pkgs.util-linux}/bin/column -t -s ';' | ${colorizer}
+      '';
+
+      # The built-in `menu` command reprints the command table. Like any other
+      # command it shows its own figlet banner + description first; it just does
+      # not reprint the graphic greeting (that is the shellHook's job, once, on
+      # entry). Placed under user commands in the merge so a caller-supplied
+      # `menu` overrides it.
+      defaultCommands = {
+        menu = {
+          description = "Print the commands available to this project";
+          command = menuText;
+        };
+      };
+
+      # User commands win over the built-in defaults on key collision.
+      allCommands = defaultCommands // commands;
 
       # Prefix the graphic with a trailing newline if present, otherwise empty.
       # The graphic is escaped for safe inclusion inside echo "...".
@@ -362,9 +385,7 @@ let
 
       # menuText: Just the command table, colorized. Handy for showing the menu
       # again without reprinting the entire greeting.
-      menuText = ''
-        echo "$(${menu})" | ${colorizer}
-      '';
+      inherit menuText;
 
       # commands: List of derivations to include in mkShell's `packages`.
       commands = scripts;
@@ -383,8 +404,7 @@ let
   makeColorizer =
     hex:
     let
-      cleanHex =
-        if builtins.substring 0 1 hex == "#" then builtins.substring 1 6 hex else hex;
+      cleanHex = if builtins.substring 0 1 hex == "#" then builtins.substring 1 6 hex else hex;
       rHex = builtins.substring 0 2 cleanHex;
       gHex = builtins.substring 2 2 cleanHex;
       bHex = builtins.substring 4 2 cleanHex;

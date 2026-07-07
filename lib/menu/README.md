@@ -15,6 +15,12 @@ Each command becomes its own shell application (added to the dev shell's
 packages), so users can invoke commands by name; running one prints a figlet
 banner + description before executing.
 
+A built-in `menu` command ("Print this menu.") is always added. It reprints the
+command table on demand, with its own figlet banner + description just like any
+other command — but without the graphic greeting, which is shown once when you
+first drop into the dev shell (via `makeDevShellHook`), not every time you list
+the commands. Supply your own `menu` in `commands` to override the built-in.
+
 ## Usage
 
 Apply the overlay when importing nixpkgs, then use `pkgs.katsuobushi`:
