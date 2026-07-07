@@ -8,6 +8,18 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.2.8
+
+**Action required: rebuild your dev shell.** No config, spec, or instance-state
+change (`specVersion 4` / `instanceVersion 2` unchanged) — just rebuild
+(`nix develop`) to pick up the new command.
+
+Every dev shell now gains a built-in `menu` command that reprints the command
+table (handy after the screen scrolls). It is added automatically by `makeMenu`;
+if you already define a command named `menu`, yours still wins. Nothing else
+changes — existing commands, their banners, and the drop-in greeting are
+unchanged.
+
 ## 0.2.7
 
 **Action required: rebuild your dev shell.** No config, spec, or instance-state

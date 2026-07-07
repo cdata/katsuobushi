@@ -5,6 +5,21 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.2.8] — 2026-07-06
+
+Adds a built-in `menu` command to every dev shell, so the command table can be
+reprinted on demand. Menu-only; no spec or instance-state bump (`specVersion 4`
+/ `instanceVersion 2` unchanged). See [`MIGRATING.md`](MIGRATING.md#028).
+
+### Added
+
+- **Built-in `menu` command.** `makeMenu` now always contributes a `menu`
+  command ("Print this menu.") that reprints the top-level command table. Like
+  any command it shows its own figlet banner + description first, but it does
+  not reprint the hero graphic — that stays a one-time greeting shown when you
+  drop into the dev shell. Define your own `menu` in `commands` to override the
+  built-in.
+
 ## [0.2.7] — 2026-07-06
 
 A menu-polish follow-up to 0.2.6: subcommand banners regained their figlet
