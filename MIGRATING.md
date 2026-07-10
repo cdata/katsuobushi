@@ -8,6 +8,21 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.2.9
+
+**Action required: rebuild your dev shell** (`nix develop`) to pick up the fixed
+controller. No config, spec, or instance-state change (`specVersion 4` /
+`instanceVersion 2` unchanged).
+
+A bugfix release: `sandbox prompt` can once again resume a paused, **named**
+instance to deliver a turn. The 0.2.6 command-tree rename removed the
+`sandbox:start` menu binary, but the auto-resume path kept invoking that name,
+so prompting a powered-off named instance failed. The fix is entirely host-side,
+so a dev-shell rebuild is all that is needed — running instances are unaffected.
+If anything you own scraped a `sandbox:*` name out of a hint or error message,
+note those lines now print the subcommand form (`sandbox status`, not
+`sandbox:status`).
+
 ## 0.2.8
 
 **Action required: rebuild your dev shell.** No config, spec, or instance-state

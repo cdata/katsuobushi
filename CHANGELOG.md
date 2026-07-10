@@ -5,6 +5,28 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.2.9] — 2026-07-09
+
+Fixes a regression from the 0.2.6 command-tree rename: prompting a paused, named
+sandbox no longer fails trying to resume it. The fix is host-side, so a
+dev-shell rebuild picks up the corrected controller; no spec or instance-state
+bump (`specVersion 4` / `instanceVersion 2` unchanged). See
+[`MIGRATING.md`](MIGRATING.md#029).
+
+### Fixed
+
+- **`sandbox prompt` resumes a paused named instance again.** The 0.2.6 rename
+  removed the `sandbox:start` menu binary, but `sandbox prompt`'s auto-resume
+  still shelled out to that name — so prompting a powered-off named instance
+  errored instead of booting it to deliver the turn. Resume is now
+  self-contained: it re-runs the `start` subcommand and execs the boot recipe
+  that emits, via the pinned `katsuctl` / `bash` store paths, depending on no
+  menu command being on `PATH`.
+- **Stale `sandbox:*` command names in hints.** Status, attach, resolve, and
+  stop messages — and the post-launch `start` echo — still suggested the removed
+  colon-namespaced commands (`sandbox:status`, `sandbox:fetch`, …); they now
+  name the current subcommand forms (`sandbox status`, `sandbox fetch`, …).
+
 ## [0.2.8] — 2026-07-06
 
 Adds a built-in `menu` command to every dev shell, so the command table can be
