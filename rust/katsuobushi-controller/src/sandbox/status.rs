@@ -463,19 +463,19 @@ fn render_detail(v: &InstanceView, ssh: Option<&str>, console_log: &str, r: &Ren
     if let Some(ssh) = ssh {
         lines.push(format!("ssh:        {ssh}"));
         lines.push(format!(
-            "attach:     sandbox:attach {} (ssh in + attach the agent's tmux session)",
+            "attach:     sandbox attach {} (ssh in + attach the agent's tmux session)",
             v.name
         ));
     }
     if v.branch_present {
         lines.push(format!(
-            "branch:     sandbox/{0} (fetch: sandbox:fetch {0})",
+            "branch:     sandbox/{0} (fetch: sandbox fetch {0})",
             v.name
         ));
     }
     if let Some(cid) = v.cid {
         lines.push(format!(
-            "agent:      cid {cid} (prompt: sandbox:prompt {0} \"...\")",
+            "agent:      cid {cid} (prompt: sandbox prompt {0} \"...\")",
             v.name
         ));
     }
@@ -1056,9 +1056,9 @@ mod tests {
         assert!(text.contains("state:      running"));
         assert!(text.contains("persistent: named (persistent)"));
         assert!(text.contains("ssh:        ssh -i /run/inst-x/id"));
-        assert!(text.contains("attach:     sandbox:attach inst-x"));
-        assert!(text.contains("branch:     sandbox/inst-x (fetch: sandbox:fetch inst-x)"));
-        assert!(text.contains("agent:      cid 4242 (prompt: sandbox:prompt inst-x"));
+        assert!(text.contains("attach:     sandbox attach inst-x"));
+        assert!(text.contains("branch:     sandbox/inst-x (fetch: sandbox fetch inst-x)"));
+        assert!(text.contains("agent:      cid 4242 (prompt: sandbox prompt inst-x"));
         assert!(text.contains("console:    /state/inst-x/console.log"));
     }
 

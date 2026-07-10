@@ -9,12 +9,12 @@
 //! - **running** (QMP answers): connect over vsock and stream `Report`s until a
 //!   terminal status (`done`/`blocked`);
 //! - **paused + named** (QMP silent, `instance.json.named`): the VM is powered
-//!   off but kept on disk, so resume it via the `sandbox:start` menu command
-//!   (`--agent --name <inst>`, boot only — *no* `--prompt`), then fall through to
-//!   the same vsock delivery the running branch uses so `katsuctl` itself streams
-//!   the turn once the channel arms. (The shell `start` runner no longer delivers
-//!   `--prompt`; delivering it here keeps restart self-contained — the turn is
-//!   never silently dropped.);
+//!   off but kept on disk, so resume it by re-running our own `start` subcommand
+//!   (`--agent --name <inst>`, boot only — *no* `--prompt`) and `exec`ing the
+//!   boot recipe it emits, then fall through to the same vsock delivery the
+//!   running branch uses so `katsuctl` itself streams the turn once the channel
+//!   arms. (The shell `start` runner no longer delivers `--prompt`; delivering it
+//!   here keeps restart self-contained — the turn is never silently dropped.);
 //! - **not running + ephemeral**: there is nothing to resume — error clearly.
 //!
 //! The vsock streaming keeps the proven async/tokio + `tokio-vsock` machinery
@@ -115,12 +115,12 @@ enum Action {
     Delivered { cid: u32 },
     /// The instance was paused but named; it was resumed and then the prompt was
     /// delivered over vsock (restart is self-contained — it does not rely on
-    /// `sandbox:start --prompt`).
+    /// `start --prompt`).
     Restarted,
 }
 
 /// Production entry point: load the spec, stand up the host seam, then run the
-/// branch logic with the real `instance.json` read, the real `sandbox:start`
+/// branch logic with the real `instance.json` read, the real `start`-subcommand
 /// resume (boot only), and the real vsock streaming delivery.
 pub fn run(config: &Path, instance: &str, text: Vec<String>, global: Global) -> Result<()> {
     let spec = load_spec(config)?;
@@ -133,13 +133,16 @@ pub fn run(config: &Path, instance: &str, text: Vec<String>, global: Global) -> 
     let port = spec.vsock_port;
     let watchdog = Watchdog::from_spec(&spec);
 
+    let katsuctl = spec.tools.katsuctl.as_path();
+    let bash = spec.tools.bash.as_path();
+
     prompt_core(
         &host,
         &roots,
         instance,
         &text,
         |inst| instance::read(state_glob, inst),
-        resume_via_start,
+        |inst| resume_via_start(katsuctl, config, bash, inst),
         |cid, inst| {
             // The turn id is allocated from (and the heartbeat record written to)
             // `liveness.json` beside the instance's `instance.json`.
@@ -311,7 +314,7 @@ fn set_stream_active(host: &impl Host, path: &Path, active: bool) {
 fn stopped_message(turn_id: u64) -> String {
     format!(
         "agent stopped without reporting (turn {turn_id}) — possible silent \
-         completion or unreported hang; inspect with `sandbox:attach` / `sandbox:fetch`"
+         completion or unreported hang; inspect with `sandbox attach` / `sandbox fetch`"
     )
 }
 
@@ -637,7 +640,7 @@ where
             }
             _ = sleep_until(last_prog + progress_deadline), if !stall_surfaced => {
                 let note = format!(
-                    "no progress for {}s — the agent may be stuck (inspect with `sandbox:attach`)",
+                    "no progress for {}s — the agent may be stuck (inspect with `sandbox attach`)",
                     progress_deadline.as_secs()
                 );
                 sink(DriveEvent::Stalled(&note))?;
@@ -678,38 +681,72 @@ fn render_report(renderer: &Renderer, report: &Report) -> Result<()> {
     renderer.emit(report, |r| r.report(kind, &report.text))
 }
 
-/// The `sandbox:start` arguments that resume a paused named instance: launch the
-/// detached agent VM under its full (already-suffixed) name, with **no**
-/// `--prompt`. Passing the verbatim suffixed name resumes that exact instance
-/// (rather than minting a fresh one); the turn is delivered separately by the
-/// caller's `deliver` over vsock, so `--prompt` must not appear here. Factored out
-/// so the argv shape is unit-testable without spawning anything.
-fn resume_via_start_args(inst: &str) -> Vec<String> {
+/// The `katsuctl … start` argv that resumes a paused named instance: run the
+/// `start` subcommand against this same spec, launching the detached agent VM
+/// under its full (already-suffixed) name, with **no** `--prompt`. Passing the
+/// verbatim suffixed name resumes that exact instance (rather than minting a fresh
+/// one); the turn is delivered separately by the caller's `deliver` over vsock, so
+/// `--prompt` must not appear here. Factored out so the argv shape is
+/// unit-testable without spawning anything.
+fn resume_via_start_args(config: &Path, inst: &str) -> Vec<String> {
     vec![
+        "sandbox".to_string(),
+        "--config".to_string(),
+        config.to_string_lossy().into_owned(),
+        "start".to_string(),
         "--agent".to_string(),
         "--name".to_string(),
         inst.to_string(),
     ]
 }
 
-/// Resume a paused named instance by running the `sandbox:start` menu command on
-/// PATH (`--agent --name <inst>`, no prompt). The no-prompt agent launch returns
-/// promptly after detaching the VM, so this spawns-and-waits (not `exec`) and then
+/// Resume a paused named instance by re-running our own `start` subcommand and
+/// then `exec`ing the recipe it emits — the same emit+exec dance the `sandbox
+/// start` menu wrapper performs, done inline so restart depends on **no** menu
+/// command being on PATH (the old code shelled out to a `sandbox:start` binary
+/// that the 0.2.8 command-tree rename removed). `start --agent` emits only the
+/// path of a flat boot recipe on stdout (stderr carries any planning error); we
+/// run `bash` on that path to actually detach the VM. Both `katsuctl` and `bash`
+/// are the pinned store paths from the spec, so this works from a shell that has
+/// neither on PATH.
+///
+/// No `--prompt`: the boot only launches the detached VM. The no-prompt agent
+/// launch returns promptly after detaching, so this spawns-and-waits and then
 /// returns to `prompt_core`, which streams the turn over vsock once the channel
 /// arms — making restart self-contained rather than depending on `start` to
-/// deliver `--prompt` (which it no longer does; that lands natively in).
-fn resume_via_start(inst: &str) -> Result<()> {
+/// deliver `--prompt` (which it no longer does).
+fn resume_via_start(katsuctl: &Path, config: &Path, bash: &Path, inst: &str) -> Result<()> {
     eprintln!(
         "sandbox prompt: {inst:?} is paused — resuming it to deliver this turn \
          (boot + arm ~30-60s)..."
     );
-    let status = Command::new("sandbox:start")
-        .args(resume_via_start_args(inst))
+    let out = Command::new(katsuctl)
+        .args(resume_via_start_args(config, inst))
+        .output()
+        .with_context(|| format!("running {katsuctl:?} start to resume paused instance {inst:?}"))?;
+    if !out.status.success() {
+        // Surface katsuctl's own planning error (it wrote nothing to stdout).
+        std::io::Write::write_all(&mut std::io::stderr(), &out.stderr).ok();
+        bail!(
+            "planning the resume of {inst:?} failed (exit {})",
+            out.status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string())
+        );
+    }
+    let script = String::from_utf8_lossy(&out.stdout);
+    let script = script.trim();
+    if script.is_empty() {
+        bail!("resume of {inst:?} emitted no boot recipe path");
+    }
+    let status = Command::new(bash)
+        .arg(script)
         .status()
-        .with_context(|| format!("running sandbox:start to resume paused instance {inst:?}"))?;
+        .with_context(|| format!("running the boot recipe {script:?} to resume {inst:?}"))?;
     if !status.success() {
         bail!(
-            "sandbox:start failed to resume {inst:?} (exit {})",
+            "the boot recipe failed to resume {inst:?} (exit {})",
             status
                 .code()
                 .map(|c| c.to_string())
@@ -821,7 +858,7 @@ mod tests {
     fn it_resumes_then_delivers_to_a_paused_named_instance() {
         // QMP silent + named -> boot (resume) the instance, THEN fall through to
         // the same vsock delivery the running path uses, so the turn is not
-        // dropped waiting on `sandbox:start --prompt` (which no longer delivers).
+        // dropped waiting on `start --prompt` (which no longer delivers).
         let host = host_with_instance("inst-kept");
 
         let (outcome, booted, delivered) = run_core(
@@ -846,13 +883,23 @@ mod tests {
 
     #[test]
     fn it_resumes_with_agent_name_and_no_prompt() {
-        // The resume argv must NOT carry the prompt: start only boots, katsuctl
-        // delivers. Asserting the exact args guards against re-introducing
-        // --prompt (which the shell start runner silently drops, dropping the turn).
-        let args = resume_via_start_args("katsuobushi-20260627-abc123");
+        // The resume argv re-invokes our own `start` subcommand against this same
+        // spec (--config), and must NOT carry the prompt: start only boots,
+        // katsuctl delivers. Asserting the exact args guards against
+        // re-introducing --prompt (which the shell start runner silently drops,
+        // dropping the turn) and against regressing to the removed `sandbox:start`
+        // menu binary.
+        let args = resume_via_start_args(
+            Path::new("/spec.json"),
+            "katsuobushi-20260627-abc123",
+        );
         assert_eq!(
             args,
             vec![
+                "sandbox".to_string(),
+                "--config".to_string(),
+                "/spec.json".to_string(),
+                "start".to_string(),
                 "--agent".to_string(),
                 "--name".to_string(),
                 "katsuobushi-20260627-abc123".to_string(),

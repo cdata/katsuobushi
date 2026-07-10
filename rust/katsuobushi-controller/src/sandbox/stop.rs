@@ -42,8 +42,8 @@ impl Stopped {
             format!("stopped and removed {}", self.instance)
         } else {
             format!(
-                "stopped {0} (named; kept — restart: sandbox:start --name {0}, \
-                 discard: sandbox:stop --remove {0})",
+                "stopped {0} (named; kept — restart: sandbox start --name {0}, \
+                 discard: sandbox stop --remove {0})",
                 self.instance
             )
         }
@@ -250,11 +250,11 @@ mod tests {
         // The human line carries the restart + discard hints.
         let line = stopped.human();
         assert!(
-            line.contains("restart: sandbox:start --name inst-named"),
+            line.contains("restart: sandbox start --name inst-named"),
             "{line}"
         );
         assert!(
-            line.contains("discard: sandbox:stop --remove inst-named"),
+            line.contains("discard: sandbox stop --remove inst-named"),
             "{line}"
         );
     }

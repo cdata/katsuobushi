@@ -26,7 +26,7 @@ pub fn resolve_instance(state_glob: &Path, host: &impl Host, arg: &str) -> Resul
     // the git layer. Reject it up front with a usage-style error, mirroring the
     // old wrapper guard.
     if arg.is_empty() {
-        bail!("usage: an instance name or 1-based index is required (see sandbox:status)");
+        bail!("usage: an instance name or 1-based index is required (see sandbox status)");
     }
     if is_index(arg) {
         return resolve_index(state_glob, host, arg);
@@ -36,7 +36,7 @@ pub fn resolve_instance(state_glob: &Path, host: &impl Host, arg: &str) -> Resul
     if host.exists(&state_glob.join(arg)) {
         Ok(arg.to_string())
     } else {
-        bail!("no sandbox named {arg:?} (see sandbox:status)")
+        bail!("no sandbox named {arg:?} (see sandbox status)")
     }
 }
 
@@ -56,7 +56,7 @@ fn resolve_index(state_glob: &Path, host: &impl Host, arg: &str) -> Result<Strin
     match index.checked_sub(1).and_then(|i| instances.get(i)) {
         Some(name) => Ok(name.clone()),
         None => bail!(
-            "no sandbox at index {arg} (see sandbox:status; {} instance(s) present)",
+            "no sandbox at index {arg} (see sandbox status; {} instance(s) present)",
             instances.len()
         ),
     }

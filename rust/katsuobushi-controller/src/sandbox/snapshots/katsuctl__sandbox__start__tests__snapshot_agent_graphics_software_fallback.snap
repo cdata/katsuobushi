@@ -37,5 +37,5 @@ setsid /nix/store/microvm/bin/microvm-run > '/state/katsuobushi/cdata/katsuobush
 vm=$!
 disown "$vm" 2>/dev/null || true
 echo "sandbox: agent instance '20260627-120000-4242' running (cid 4242)."
-echo "sandbox: prompt it with: sandbox:prompt 20260627-120000-4242 \"<text>\""
+echo "sandbox: prompt it with: sandbox prompt 20260627-120000-4242 \"<text>\""
 exit 0

@@ -76,7 +76,7 @@ struct Plan {
 }
 
 impl Plan {
-    /// The GPU rung to record in `instance.json` (and surface in `sandbox:status`):
+    /// The GPU rung to record in `instance.json` (and surface in `sandbox status`):
     /// the role a hardware rung satisfied, `software` for the llvmpipe rung, or
     /// `None` when graphics is disabled.
     fn gpu_rung(&self) -> Option<crate::sandbox::spec::GpuRole> {
@@ -860,7 +860,7 @@ fn agent_tail(
         }
         None => {
             r.line(format!(
-                "echo \"sandbox: prompt it with: sandbox:prompt {} \\\"<text>\\\"\"",
+                "echo \"sandbox: prompt it with: sandbox prompt {} \\\"<text>\\\"\"",
                 plan.name
             ));
             r.line("exit 0".to_string());

@@ -74,7 +74,7 @@ fn attach_with(
     let roots = resolve_roots(&spec.roots)?;
 
     // Verify the VM is running via QMP (the one true liveness probe);
-    // same socket path as `sandbox:stop`.
+    // same socket path as `sandbox stop`.
     let sock = roots.runtime_glob.join(inst).join("katsuobushi.sock");
     if !host.qmp_alive(&sock) {
         return Ok(Outcome::Guidance(not_running(inst)));
@@ -136,7 +136,7 @@ fn attach_recipe(key: &Path, ssh_port: u16, agent_user: &str) -> Recipe {
 /// Guidance for a stopped instance (QMP says it is not running).
 fn not_running(inst: &str) -> String {
     format!(
-        "sandbox:attach: '{inst}' is not running\n{}",
+        "sandbox attach: '{inst}' is not running\n{}",
         guidance_tail(inst)
     )
 }
@@ -144,7 +144,7 @@ fn not_running(inst: &str) -> String {
 /// Guidance when the VM is up but has no live agent tmux session yet.
 fn no_session(inst: &str) -> String {
     format!(
-        "sandbox:attach: no live '{SESSION}' tmux session in '{inst}'\n{}",
+        "sandbox attach: no live '{SESSION}' tmux session in '{inst}'\n{}",
         guidance_tail(inst)
     )
 }
@@ -155,7 +155,7 @@ fn no_session(inst: &str) -> String {
 fn guidance_tail(inst: &str) -> String {
     format!(
         "  - if it just launched, give it ~30-60s to arm, then retry\n  \
-         - only --agent instances run a '{SESSION}' tmux session (check: sandbox:status {inst})\n"
+         - only --agent instances run a '{SESSION}' tmux session (check: sandbox status {inst})\n"
     )
 }
 

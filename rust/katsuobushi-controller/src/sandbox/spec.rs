@@ -159,7 +159,7 @@ pub struct GraphicsSpec {
 /// no GPU device, no host attack surface.
 ///
 /// `Serialize` so the resolved rung can be persisted in `instance.json` (the
-/// `graphics` field) and surfaced by `sandbox:status`.
+/// `graphics` field) and surfaced by `sandbox status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GpuRole {

@@ -89,7 +89,7 @@ fn capture(
     if !spec.graphics.enable {
         bail!(
             "graphics not enabled for this instance '{inst}' — there is no compositor to \
-             screenshot; start it with graphics.enable=true (see sandbox:status {inst})"
+             screenshot; start it with graphics.enable=true (see sandbox status {inst})"
         );
     }
 

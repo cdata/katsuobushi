@@ -30,7 +30,7 @@
 //! interleaving (including the grace window that disambiguates a `Stop` with vs.
 //! without a terminal report, /) is unit-testable. Every transition is
 //! persisted to `${KATSU_SHARE}/turn-state.json`, the durable record
-//! `sandbox:status` reads out-of-band, closing the unattended gap.
+//! `sandbox status` reads out-of-band, closing the unattended gap.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -82,7 +82,7 @@ enum Phase {
 }
 
 /// The on-disk turn-state record. Guest-authored, authoritative for
-/// turn/agent state; read out-of-band by `sandbox:status` with no connection.
+/// turn/agent state; read out-of-band by `sandbox status` with no connection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TurnState {

@@ -72,7 +72,7 @@ pub struct Instance {
     pub vsock_cid: Option<u32>,
     /// The GPU rung this instance resolved to at launch (`integrated`,
     /// `discrete`, or `software`); `None` when graphics is disabled. Recorded so
-    /// `sandbox:status` can show what the instance actually booted with. Omitted
+    /// `sandbox status` can show what the instance actually booted with. Omitted
     /// from the JSON when `None` (graphics-off instances stay byte-identical).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphics: Option<GpuRole>,
