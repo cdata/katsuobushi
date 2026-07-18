@@ -2,7 +2,9 @@ result
 result-*
 .direnv
 .env
-design
+# Local scratch design notes (root only — anchored so it never catches a
+# tracked `project/design` scaffold or a nested `design/` elsewhere).
+/design
 # Cargo build output. lib.rust steers cargo at an out-of-tree CARGO_TARGET_DIR
 # in the dev shell, but an ad-hoc `cargo build` lands here.
 /target

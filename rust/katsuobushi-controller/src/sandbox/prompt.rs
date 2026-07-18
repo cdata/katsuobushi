@@ -723,7 +723,9 @@ fn resume_via_start(katsuctl: &Path, config: &Path, bash: &Path, inst: &str) -> 
     let out = Command::new(katsuctl)
         .args(resume_via_start_args(config, inst))
         .output()
-        .with_context(|| format!("running {katsuctl:?} start to resume paused instance {inst:?}"))?;
+        .with_context(|| {
+            format!("running {katsuctl:?} start to resume paused instance {inst:?}")
+        })?;
     if !out.status.success() {
         // Surface katsuctl's own planning error (it wrote nothing to stdout).
         std::io::Write::write_all(&mut std::io::stderr(), &out.stderr).ok();
@@ -794,6 +796,7 @@ mod tests {
             ssh_port: 2222,
             vsock_cid: Some(4242),
             graphics: None,
+            seed: None,
         }
     }
 
@@ -889,10 +892,7 @@ mod tests {
         // re-introducing --prompt (which the shell start runner silently drops,
         // dropping the turn) and against regressing to the removed `sandbox:start`
         // menu binary.
-        let args = resume_via_start_args(
-            Path::new("/spec.json"),
-            "katsuobushi-20260627-abc123",
-        );
+        let args = resume_via_start_args(Path::new("/spec.json"), "katsuobushi-20260627-abc123");
         assert_eq!(
             args,
             vec![

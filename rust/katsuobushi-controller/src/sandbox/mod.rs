@@ -5,6 +5,7 @@ use crate::{Global, SandboxArgs, SandboxCommand};
 use anyhow::Result;
 
 mod attach;
+mod dispatch;
 pub mod emit;
 mod fetch;
 pub mod gfx;
@@ -30,6 +31,11 @@ pub fn dispatch(args: SandboxArgs, global: Global) -> Result<()> {
             name,
             prompt,
         } => start::run(&config, agent, name, prompt, global),
+        SandboxCommand::Dispatch {
+            card,
+            board_dir,
+            force,
+        } => dispatch::run(&config, &card, &board_dir, force, global),
         SandboxCommand::Prompt { instance, text } => prompt::run(&config, &instance, text, global),
         SandboxCommand::Status { instance } => status::run(&config, instance, global),
         SandboxCommand::Fetch { instance } => fetch::run(&config, &instance, global),

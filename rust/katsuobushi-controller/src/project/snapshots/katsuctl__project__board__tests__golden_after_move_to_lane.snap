@@ -1,0 +1,30 @@
+---
+source: rust/katsuobushi-controller/src/project/board.rs
+expression: b.to_text()
+---
+---
+
+kanban-plugin: basic
+
+---
+
+## To-do
+
+- [ ] [[1a2b3c]]
+
+## In Progress
+
+- [ ] [[ff09ab]]
+- [ ] [[a3f7b2]]
+
+## Needs Review
+
+
+## Ready
+
+
+%% kanban:settings
+```
+{"kanban-plugin":"basic"}
+```
+%%

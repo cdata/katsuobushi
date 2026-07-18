@@ -45,6 +45,16 @@ enum Seed {
     Fresh(String),
 }
 
+impl Seed {
+    /// The seed commit SHA, regardless of variant. Persisted into `instance.json`
+    /// so `sandbox fetch` can tell whether the branch advanced past it.
+    fn commit(&self) -> &str {
+        match self {
+            Seed::Resume(c) | Seed::Fresh(c) => c,
+        }
+    }
+}
+
 /// Every decision `katsuctl` makes before emitting — the act-directly results the
 /// flat recipe is built from. Returned by [`decide`] so the seam
 /// tests can assert each decision without a real boot.
@@ -142,6 +152,7 @@ pub fn run(
         ssh_port: plan.ssh_port,
         vsock_cid: plan.vsock_cid,
         graphics: plan.gpu_rung(),
+        seed: Some(plan.seed.commit().to_string()),
     };
     instance::write(&roots.state_glob, &meta).context("writing instance.json")?;
 

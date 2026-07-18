@@ -85,7 +85,7 @@
         markdown = katsuobushi.lib.markdown {
           inherit pkgs;
           workspaceRoot = ./.;
-          # include = [ "README.md" "design" ];
+          # include = [ "README.md" "project/design" ];
         };
 
         # Example crate — uncomment once you have a Cargo workspace under

@@ -1754,6 +1754,11 @@ let
         # start: naming, port/CID allocation, branch seed, instance.json, then a
         # flat setup+boot recipe.
         start = emitExec "start" "Launch an agent sandbox";
+        # dispatch: reads a project-board card, guards Available-only, claims it to
+        # in-progress, and emit-execs the same agent-start recipe as `start` —
+        # seeded with the card body as the directive. `--board-dir` defaults to
+        # `project/kanban`; pass it for a non-default board.
+        dispatch = emitExec "dispatch" "Launch an agent VM to work a project-board card";
         # prompt: instance resolution, the QMP liveness probe, the readiness-wait,
         # vsock streaming, and the paused-named auto-restart.
         prompt = handOff "prompt" "Send a prompt to an agent instance (auto-starting a paused one)";

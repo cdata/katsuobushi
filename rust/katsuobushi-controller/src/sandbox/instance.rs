@@ -76,6 +76,17 @@ pub struct Instance {
     /// from the JSON when `None` (graphics-off instances stay byte-identical).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphics: Option<GpuRole>,
+    /// The commit the instance branch was seeded from at launch (the full SHA
+    /// resolved by `start::resolve_seed` — a stash snapshot, `HEAD`, or a resumed
+    /// branch tip). `sandbox fetch` compares it to the fetched branch tip to tell
+    /// whether any work was committed. Optional-additive: an instance written
+    /// before this field simply reads back `None`, and `fetch` then assumes work
+    /// landed rather than raise a false alarm. Being optional-additive, it needs
+    /// no [`SUPPORTED_INSTANCE_VERSION`] bump — new fields are back-compatible;
+    /// only a field with *changed meaning* would (the guest reads `instance.json`
+    /// tolerantly and never writes it, so it is unaffected regardless).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
 }
 
 /// The `instance.json` path for `name` under the durable state root `state_dir`
@@ -110,8 +121,10 @@ pub fn read(state_dir: &Path, name: &str) -> Result<Instance> {
 }
 
 /// Parse + version-check `instance.json` bytes. Split out from [`read`] so the
-/// schema and skew checks are unit-testable without touching the filesystem.
-fn from_json_bytes(bytes: &[u8]) -> Result<Instance> {
+/// schema and skew checks are unit-testable without touching the filesystem, and
+/// so a caller reading the bytes through another seam (e.g. `sandbox fetch` over
+/// the [`Host`](crate::sandbox::host::Host) trait) can parse them the same way.
+pub fn from_json_bytes(bytes: &[u8]) -> Result<Instance> {
     let instance: Instance = serde_json::from_slice(bytes).context("parsing instance.json")?;
     if instance.instance_version != SUPPORTED_INSTANCE_VERSION {
         bail!(
@@ -166,6 +179,7 @@ mod tests {
             ssh_port: 2222,
             vsock_cid: Some(4242),
             graphics: None,
+            seed: None,
         }
     }
 
@@ -220,6 +234,23 @@ mod tests {
             !off.contains("graphics"),
             "graphics-off omits the key: {off}"
         );
+    }
+
+    #[test]
+    fn it_round_trips_the_seed_commit() {
+        // The seed SHA round-trips; a seedless instance omits the key entirely
+        // (byte-identical to a pre-seed instance.json).
+        let dir = TempDir::new("seed");
+        let instance = Instance {
+            seed: Some("a1b2c3d4e5f6".to_string()),
+            ..agent_instance()
+        };
+        write(dir.path(), &instance).expect("write should succeed");
+        let read_back = read(dir.path(), &instance.name).expect("read should succeed");
+        assert_eq!(read_back.seed.as_deref(), Some("a1b2c3d4e5f6"));
+
+        let off = serde_json::to_string(&agent_instance()).expect("serialize");
+        assert!(!off.contains("seed"), "seedless omits the key: {off}");
     }
 
     #[test]
