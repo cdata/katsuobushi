@@ -32,6 +32,9 @@ kanban-plugin: basic
 - [x] [[394a3c]]
 - [x] [[fa0c31]]
 - [x] [[a9c135]]
+- [x] [[94bc4f]]
+- [x] [[55cfca]]
+- [x] [[86419c]]
 
 %% kanban:settings
 ```
