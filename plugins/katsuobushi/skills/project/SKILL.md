@@ -1,22 +1,21 @@
 ---
 name: project
 description:
-  Manage a file-backed, Obsidian-Kanban project backlog with the `katsuctl
-  project` commands (or the devshell `project` menu command). Use this skill
-  when the user wants to track work on a project board, create or file an
-  issue/card/ticket, move a card through its lifecycle (to-do, in progress,
-  needs review, ready, accepted), reprioritize the backlog, check what's ready
-  to work on, mark work done/blocked/cancelled, or run `project init / new /
-  status / status set / prioritize / lint`. Also use it whenever you see a
-  `project/kanban/` directory with a `BOARD.md` and `<id>.md` cards.
+  Manage a file-backed, Obsidian-Kanban project backlog with the `project`
+  command. Use this skill when the user wants to track work on a project board,
+  create or file an issue/card/ticket, move a card through its lifecycle (to-do,
+  in progress, needs review, ready, accepted), reprioritize the backlog, check
+  what's ready to work on, mark work done/blocked/cancelled, or run `project
+  init / new / status / status set / prioritize / lint`. Also use it whenever
+  you see a `project/kanban/` directory with a `BOARD.md` and `<id>.md` cards.
 ---
 
-# Project backlog (`katsuctl project`)
+# Project backlog (`project`)
 
 A lightweight, file-backed backlog rendered as an Obsidian Kanban board. Prefer
-the `katsuctl project` commands over hand-editing files — they enforce the
-lifecycle and keep the board consistent. Pass `--json` for machine-readable
-output when you need to parse results.
+the `project` commands over hand-editing files — they enforce the lifecycle and
+keep the board consistent. Pass `--json` for machine-readable output when you
+need to parse results.
 
 ## The model (read this first)
 
@@ -93,8 +92,8 @@ reached `ready` or `accepted` (downstream builds only on reviewed work). Find
 grabbable work with:
 
 ```bash
-katsuctl project status --available          # or `project status --available`
-katsuctl project status --available --json   # to parse
+project status --available          # grabbable work
+project status --available --json   # to parse
 ```
 
 ## Common tasks

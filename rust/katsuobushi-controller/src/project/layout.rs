@@ -176,8 +176,8 @@ pub fn readme() -> String {
     format!(
         r#"# Project board
 
-An Obsidian-Kanban-native backlog managed by `katsuctl project` (or the devshell
-`project` command). **`{BOARD_FILE}` is the source of truth for lifecycle and
+An Obsidian-Kanban-native backlog managed by the `project` command.
+**`{BOARD_FILE}` is the source of truth for lifecycle and
 priority** — its lanes are the status and a card's vertical position is its
 priority. Card notes live in `issues/` and hold everything else (title, type,
 `blocked_by`, detail).

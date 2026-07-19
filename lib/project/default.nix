@@ -55,7 +55,8 @@ let
       # `--board-dir` is a global arg so it may precede any subcommand (incl.
       # `status set`). katsuctl runs in the foreground (not `exec`) so the filter
       # shell survives to post-process output; `|| ret=$?` + pipefail preserve
-      # its exit code. Agents wanting raw output call `katsuctl project` directly.
+      # its exit code. Agents wanting raw output pass `--json`, which flows
+      # through untouched (see the stdout/fd3 note below).
       #
       # The prefix rewrite is unsafe on data stdout (a card titled "fix katsuctl
       # project lint" must not be mangled), so we normally filter only stderr —

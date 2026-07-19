@@ -47,8 +47,8 @@ bypasses). **Only a human moves a card to `accepted`.**
 | `project status <id>`              | Show one card's status, frontmatter, and body                       |
 | `project lint [--fix]`             | Check board ↔ note consistency                                      |
 
-Ids accept a unique prefix. `--json` gives machine output for in-sandbox agents
-(they invoke `katsuctl project …` directly, bypassing the menu banner).
+Ids accept a unique prefix. `--json` gives machine output for agents parsing the
+board — the menu wrapper passes `--json` payloads through untouched.
 
 ## Usage
 
