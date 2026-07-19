@@ -5,6 +5,24 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.3.2] — 2026-07-19
+
+Corrects the project-board guidance so agents are pointed at the `project` menu
+command rather than the underlying `katsuctl project` binary, which is meant to
+be a hidden implementation detail. Docs-only; no spec or instance-state bump
+(`specVersion 4` / `instanceVersion 2` unchanged). See
+[`MIGRATING.md`](MIGRATING.md#032).
+
+### Changed
+
+- **The `project` skill and board docs reference the `project` command, not
+  `katsuctl`.** The `project` skill, the scaffolded `project/kanban/README.md`
+  (and its generator in `katsuctl`), and the `lib.project` README/notes now
+  present `project` as the interface — `katsuctl` is an implementation detail
+  behind the menu command, which forwards `--json` payloads through untouched.
+  Newly scaffolded boards get the corrected README; existing boards are
+  unaffected.
+
 ## [0.3.1] — 2026-07-19
 
 Makes `katsuctl` build on non-Linux (macOS): the `project` domain is
