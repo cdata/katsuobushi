@@ -185,9 +185,9 @@
 
         # In-tree Rust: the host↔guest sandbox controller crate for agent mode.
         # Built via lib.rust (crane) so the build is reproducible and sandboxed,
-        # with deps vendored from the
-        # root Cargo.lock. tokio-vsock pins these to Linux, matching the
-        # sandbox's own platform gate, so the packages/checks are isLinux-only.
+        # with deps vendored from the root Cargo.lock. The guest crate and the
+        # sandbox *domain* are Linux-only (tokio-vsock), but `katsuctl` itself now
+        # cfg's the sandbox domain out on non-Linux, so it builds everywhere.
         rust = rustLib {
           inherit pkgs;
           workspaceRoot = ./.;
@@ -200,16 +200,17 @@
           pname = "katsuobushi-sandbox-guest";
           cargoExtraArgs = "--package katsuobushi-sandbox-guest";
         };
-        # Host-side sandbox controller. Built the same way;
-        # stays in `packages` (= controlCrates) and goes on the devshell PATH.
+        # Host-side sandbox controller. Built the same way; cross-platform (the
+        # sandbox domain cfg's out on non-Linux), so it goes into `packages` and
+        # on the devshell PATH on every system.
         controlCrates.katsuctl = rust.buildCrate {
           pname = "katsuctl";
           cargoExtraArgs = "--package katsuobushi-controller";
         };
 
         # Dogfood the project backlog on a fresh root `project/kanban/`. Shares
-        # the one katsuctl build; Linux-only, like the crate. `project` is only
-        # forced inside the isLinux guards below, so non-Linux never builds it.
+        # the one katsuctl build; cross-platform, like the `project` domain of the
+        # crate (the `katsuctl project` subcommands build on every OS).
         project = projectLib {
           inherit pkgs;
           katsuctl = controlCrates.katsuctl;
@@ -225,7 +226,8 @@
           # branch, a `sandbox` branch); there is no global aggregate command.
           commands =
             markdown.menuCommands
-            // (pkgs.lib.optionalAttrs isLinux (sandbox.menuCommands // project.menuCommands));
+            // project.menuCommands
+            // (pkgs.lib.optionalAttrs isLinux sandbox.menuCommands);
         };
       in
       {
@@ -240,20 +242,25 @@
               # Used by the sandbox lifecycle commands (QMP over the qemu monitor)
               # and by the sandbox controller spike harness.
               pkgs.socat
-            ]
-            # A bare `katsuctl` on the PATH for power users (additive). The
-            # `sandbox:*` commands invoke it by absolute store path, so this is
-            # no longer required for them to work. Linux-only, like the sandbox
-            # controller crate it lives beside (tokio-vsock gate). Same store path
-            # as `sandbox.katsuctl`, so it is built once.
-            ++ pkgs.lib.optionals isLinux [ controlCrates.katsuctl ];
+              # A bare `katsuctl` on the PATH for power users (additive). The
+              # `sandbox:*` commands invoke it by absolute store path, so this is
+              # not required for them to work. Cross-platform now (the sandbox
+              # domain cfg's out on non-Linux), so it is on the PATH everywhere.
+              controlCrates.katsuctl
+            ];
           shellHook = rust.rustEnvironmentHook + makeDevShellHook menu;
         };
+        # `katsuctl` builds on every system (its sandbox domain cfg's out on
+        # non-Linux), so expose it — and only it — cross-platform. The Linux-only
+        # guest crate is added to `packages` under the isLinux guard below.
+        packages.katsuctl = controlCrates.katsuctl;
       }
       // pkgs.lib.optionalAttrs isLinux {
         # `nix run .#sandbox [-- --agent [--prompt "…"] | --name N]`
         apps.sandbox = sandbox.apps.sandbox;
-        # The sandbox controller crate, built reproducibly via lib.rust/crane.
+        # The full controller crate set (adds the Linux-only guest server); this
+        # supersedes the cross-platform `packages.katsuctl` above on Linux, and
+        # `controlCrates.katsuctl` is the same derivation, so nothing is lost.
         packages = controlCrates;
         # CI builds the guest image, and clippy/rustfmt/workspace-dep hygiene
         # on the controller crate, so a broken config or crate fails fast.
