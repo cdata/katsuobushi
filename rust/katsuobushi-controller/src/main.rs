@@ -6,6 +6,10 @@
 
 mod output;
 mod project;
+// The `sandbox` domain rides tokio-vsock / QMP, which only build on Linux; it is
+// compiled out elsewhere so `katsuctl` still builds (with `project` + shared
+// bits) on macOS. Keep every Linux-only symbol behind this same gate.
+#[cfg(target_os = "linux")]
 mod sandbox;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -36,6 +40,7 @@ enum ColorWhen {
 #[derive(Subcommand)]
 enum Domain {
     /// Control Katsuobushi agent sandboxes.
+    #[cfg(target_os = "linux")]
     Sandbox(SandboxArgs),
     /// Manage an Obsidian-Kanban-native project backlog.
     Project(ProjectArgs),
@@ -174,6 +179,7 @@ enum StatusArg {
     Cancelled,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Args)]
 struct SandboxArgs {
     /// Path to the Nix-rendered instance spec (JSON). Required for every
@@ -184,6 +190,7 @@ struct SandboxArgs {
     command: SandboxCommand,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Subcommand)]
 enum SandboxCommand {
     /// Boot a new sandbox instance.
@@ -297,6 +304,7 @@ fn main() -> anyhow::Result<()> {
         color: cli.color,
     };
     let result = match cli.domain {
+        #[cfg(target_os = "linux")]
         Domain::Sandbox(args) => sandbox::dispatch(args, global),
         Domain::Project(args) => project::dispatch(args, global),
     };
@@ -328,6 +336,7 @@ mod tests {
     /// An all-digit `instance` is accepted verbatim as a String (it later
     /// resolves as a 1-based index; resolution is not clap's job). See
     /// on index-vs-name.
+    #[cfg(target_os = "linux")]
     #[test]
     fn all_digit_instance_is_a_string() {
         let cli = parse(&[
@@ -347,10 +356,13 @@ mod tests {
         }
     }
 
+    // The global flags (`--json` / `--color`) are cross-platform, so exercise
+    // them through the `project` domain — which builds on every OS — rather than
+    // `sandbox` (Linux-only), so this coverage survives on macOS too.
     #[test]
     fn json_and_color_parse() {
         let cli = parse(&[
-            "katsuctl", "--json", "--color", "always", "sandbox", "--config", "/x", "status",
+            "katsuctl", "--json", "--color", "always", "project", "status",
         ]);
         assert!(cli.json);
         assert_eq!(cli.color, ColorWhen::Always);
@@ -358,7 +370,7 @@ mod tests {
 
     #[test]
     fn color_defaults_to_auto_and_json_off() {
-        let cli = parse(&["katsuctl", "sandbox", "--config", "/x", "status"]);
+        let cli = parse(&["katsuctl", "project", "status"]);
         assert_eq!(cli.color, ColorWhen::Auto);
         assert!(!cli.json);
     }
@@ -366,19 +378,18 @@ mod tests {
     /// Global flags are accepted after the subcommand too (`global = true`).
     #[test]
     fn global_flags_accepted_after_subcommand() {
-        let cli = parse(&["katsuctl", "sandbox", "--config", "/x", "status", "--json"]);
+        let cli = parse(&["katsuctl", "project", "status", "--json"]);
         assert!(cli.json);
     }
 
     #[test]
     fn color_never_parses() {
-        let cli = parse(&[
-            "katsuctl", "sandbox", "--config", "/x", "--color", "never", "status",
-        ]);
+        let cli = parse(&["katsuctl", "project", "--color", "never", "status"]);
         assert_eq!(cli.color, ColorWhen::Never);
     }
 
     /// Trailing `text` args are collected into a Vec (joined with spaces later).
+    #[cfg(target_os = "linux")]
     #[test]
     fn prompt_text_is_collected() {
         let cli = parse(&[
@@ -396,6 +407,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn stop_remove_flag_and_instance() {
         let cli = parse(&[
@@ -413,6 +425,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn start_flags_parse() {
         let cli = parse(&[
@@ -447,6 +460,7 @@ mod tests {
     }
 
     /// `screenshot` takes an instance and an optional path (defaulting later).
+    #[cfg(target_os = "linux")]
     #[test]
     fn screenshot_instance_and_optional_path_parse() {
         let with_path = parse(&[
@@ -490,6 +504,7 @@ mod tests {
     }
 
     /// `--config` is mandatory for the sandbox domain.
+    #[cfg(target_os = "linux")]
     #[test]
     fn missing_config_is_an_error() {
         assert!(Cli::try_parse_from(["katsuctl", "sandbox", "status"]).is_err());
