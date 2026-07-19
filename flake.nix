@@ -46,6 +46,7 @@
       # dogfooding dev shell (below) share one definition.
       rustLib = import ./lib/rust { inherit crane nix-filter rust-overlay; };
       markdownLib = import ./lib/markdown;
+      projectLib = import ./lib/project;
       # sandbox carries the rust helper + this repo's workspace source so it can
       # build the in-tree sandbox controller crate (agent mode) internally — the
       # consumer never sees them. `./.` is katsuobushi's own root, pinned for
@@ -82,6 +83,11 @@
       # dev-shell formatter command and a flake check. Called with the
       # consumer's `pkgs`.
       lib.markdown = markdownLib;
+
+      # Project-backlog helpers: wraps the `katsuctl project` domain (the
+      # Obsidian-Kanban-native board) as dev-shell menu commands. Called with the
+      # consumer's `pkgs` and the built `katsuctl` (`packages.<system>.katsuctl`).
+      lib.project = projectLib;
 
       # Agent sandbox helpers: assembles a microvm.nix guest that boots into a
       # working dev environment in which an agent harness can run with a bounded
@@ -140,18 +146,27 @@
 
         # The Katsuobushi sandbox, configured for this repo. The lean
         # Anthropic+Nix baseline covers building the guest image and most flake
-        # inputs (github + cache.nixos.org). The one extra origin is the Rust
-        # toolchain dist server: `nix develop` provisions the toolchain via
-        # rust-overlay, which fetches it from static.rust-lang.org. With
-        # importHostStoreDb on (default) the guest reuses the host's already-built
-        # toolchain offline, so this is only the fallback for picking up a *new*
-        # toolchain the host hasn't built yet (e.g. after bumping
-        # rust-toolchain.toml).
+        # inputs (github + cache.nixos.org). The extra origins serve in-guest
+        # Rust builds:
+        #   - static.rust-lang.org — the Rust toolchain dist server; `nix develop`
+        #     provisions the toolchain via rust-overlay from here (only a fallback
+        #     for a *new* toolchain the host hasn't built, since importHostStoreDb
+        #     lets the guest reuse the host's built toolchain offline).
+        #   - crates.io / index.crates.io / static.crates.io — the cargo registry
+        #     API, the sparse index, and crate tarball downloads. Without these a
+        #     guest `cargo build`/`test` can't fetch dependencies and must fall
+        #     back to a brittle `--offline` build against crane-vendored deps;
+        #     allowing them lets dispatched agents build the crate normally.
         sandbox = sandboxLib {
           inherit pkgs;
           workspaceRoot = ./.;
           projectId = "cdata/katsuobushi";
-          allowedOrigins = [ "static.rust-lang.org" ];
+          allowedOrigins = [
+            "static.rust-lang.org"
+            "crates.io"
+            "index.crates.io"
+            "static.crates.io"
+          ];
           # Carry local agent context into the VM (both are gitignored).
           workspaceContext = [
             ".claude"
@@ -192,6 +207,15 @@
           cargoExtraArgs = "--package katsuobushi-controller";
         };
 
+        # Dogfood the project backlog on a fresh root `project/kanban/`. Shares
+        # the one katsuctl build; Linux-only, like the crate. `project` is only
+        # forced inside the isLinux guards below, so non-Linux never builds it.
+        project = projectLib {
+          inherit pkgs;
+          katsuctl = controlCrates.katsuctl;
+          workspaceRoot = ./.;
+        };
+
         menu = makeMenu {
           title = "Katsuobushi";
           graphicFile = ./hero.ansi;
@@ -199,7 +223,9 @@
           # Each library configuration contributes its own namespaced group
           # (e.g. a `design` branch with format/lint subcommands, a `markdown`
           # branch, a `sandbox` branch); there is no global aggregate command.
-          commands = markdown.menuCommands // (pkgs.lib.optionalAttrs isLinux sandbox.menuCommands);
+          commands =
+            markdown.menuCommands
+            // (pkgs.lib.optionalAttrs isLinux (sandbox.menuCommands // project.menuCommands));
         };
       in
       {
@@ -235,7 +261,8 @@
           sandbox = sandbox.checks.sandbox;
         }
         // rust.cargoChecks
-        // markdown.checks;
+        // markdown.checks
+        // project.checks;
       }
     );
 }
