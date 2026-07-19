@@ -8,6 +8,17 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.3.2
+
+**Docs only — no action required.** No spec or instance-state change
+(`specVersion 4` / `instanceVersion 2` unchanged). Agent-facing guidance for the
+project board now points at the `project` menu command instead of the underlying
+`katsuctl project` binary; `project` was always the intended interface (it
+forwards `--json` through untouched), so behavior is unchanged. Boards
+scaffolded before this release are unaffected — their `project/kanban/README.md`
+still mentions `katsuctl` cosmetically; edit that one line if you want the
+updated wording (`project init` won't overwrite it).
+
 ## 0.3.1
 
 **Mostly additive.** No spec or instance-state change (`specVersion 4` /
