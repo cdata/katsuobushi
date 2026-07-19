@@ -116,6 +116,27 @@ together: widen the sandbox (its `allowedOrigins` / `packages` / `graphics`),
 adjust the project, or agree to work a given card on the host. Keep the tradeoff
 an explicit, shared decision rather than one you make unilaterally.
 
+**When the sandbox isn't available at all (non-Linux).** The sandbox is
+Linux-only, so on macOS — or any host where the `sandbox` commands and
+`sandbox dispatch` don't exist — you can't delegate to a VM. Don't collapse to
+doing everything inline; fall back to your own **subagent** faculties (the Agent
+tool) to fill the same roles. Spawn a subagent to implement a card, and —
+keeping **implementor ≠ reviewer** — a _separate_ subagent to review it. You
+lose the sandbox's isolation and network bounding (a subagent runs with your own
+privileges in the same tree), but the orchestration shape is unchanged: claim
+the card, delegate the implementation, land the result, delegate an
+_independent_ review, then take it to `ready`. The reason to prefer a subagent
+over inline work is the same one that motivates the sandbox — keep the reviewer
+independent of the implementor.
+
+**Concurrency here is strictly 1 — never fan subagents out in parallel.** Unlike
+sandbox VMs, which are isolated instances each with their own branch, subagents
+all act on the **same** working tree, so two implementing at once would clobber
+each other's edits. This is the opposite of the sandbox swarm's parallel fan-out
+(bounded by cores): serialize completely — one card implemented, landed, and
+reviewed before the next one starts. The host-core concurrency budget under
+"Swarming" applies only to sandbox VMs, not to this fallback.
+
 ## Delegating implementation with `sandbox dispatch`
 
 `sandbox dispatch <card-id>` is the implementor-in-a-VM path. It:
