@@ -8,6 +8,19 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.3.0
+
+**Additive — no action required for existing consumers.** No spec or
+instance-state change (`specVersion 4` / `instanceVersion 2` unchanged); the
+`sandbox`, `menu`, `rust`, and `markdown` libraries are unchanged, and
+`sandbox dispatch` is a new subcommand rather than a change to an existing one.
+
+New this release: a **project board** (`lib.project` + the `project` menu
+command) and orchestration on top of it. To adopt it, wire `lib.project` into
+your flake and run `project init` to scaffold `project/kanban/`; the `project`
+and `project-orchestration` skills document the workflow. Nothing changes if you
+do not opt in.
+
 ## 0.2.9
 
 **Action required: rebuild your dev shell** (`nix develop`) to pick up the fixed

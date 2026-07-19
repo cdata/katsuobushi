@@ -5,6 +5,43 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.3.0] — 2026-07-18
+
+Adds a file-backed **project board** and agent **orchestration** built on it:
+queue work as Obsidian-Kanban cards (`katsuctl project` / the `project` menu
+command / `lib.project`), dispatch cards to sandbox VMs for implementation, and
+peer-review in sandboxes. Ships two new skills. Additive for existing consumers
+— no spec or instance-state bump (`specVersion 4` / `instanceVersion 2`
+unchanged). See [`MIGRATING.md`](MIGRATING.md#030).
+
+### Added
+
+- **`project` board + `lib.project`.** A lightweight backlog rendered as an
+  Obsidian Kanban board:
+  `project init / new / status / status set / prioritize / lint`. Six-state
+  lifecycle (to-do → in-progress → needs-review → ready → accepted, plus
+  cancelled), 6-hex card ids, and `blocked_by` dependencies that clear their
+  dependents at `ready`.
+- **`project status`** — the unified view+mutate surface: bare lists the board,
+  `<id>` shows one card, `--available` / `--lane` filter, `--json` is
+  machine-readable. A card entering **Ready** auto-slots into suggested
+  acceptance order (dependencies first, then oldest `created`) without
+  disturbing a manual order.
+- **`project status set --accept-all`** bulk-accepts every Ready card. Terminal
+  transitions stamp a `disposition_at` timestamp; the human `project status`
+  list shows only cards archived in the last 24h (`--json` returns all).
+- **`sandbox dispatch <card>`** launches an agent VM to implement a board card,
+  and **`sandbox fetch`** now reports whether committed work actually landed
+  (branch tip vs. launch seed).
+- **Two skills** — `project` (board mechanics) and `project-orchestration` (the
+  implementor / peer-reviewer / product-owner / orchestrator roles, sandbox
+  dispatch, the report bridge, and a host-core concurrency budget).
+
+### Changed
+
+- The Katsuobushi repo's own sandbox `allowedOrigins` now include the crates.io
+  origins so in-guest `cargo` builds fetch dependencies normally.
+
 ## [0.2.9] — 2026-07-09
 
 Fixes a regression from the 0.2.6 command-tree rename: prompting a paused, named
