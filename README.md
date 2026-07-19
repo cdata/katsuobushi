@@ -24,6 +24,7 @@ Katsuobushi libraries are broken out by domain and can be used a la carte:
 | [`rust`](lib/rust/README.md)         | Convenience wrapper over [Crane] to reduce boilerplate in Rust project derivations |
 | [`markdown`](lib/markdown/README.md) | Formatting and lint for Markdown documentation (via [Prettier])                    |
 | [`sandbox`](lib/sandbox/README.md)   | Ephemeral, project-specific, VM-sandboxed workspaces (Linux-only, via [`qemu`])    |
+| [`project`](lib/project/README.md)   | File-backed project backlog board (Obsidian Kanban) with sandboxed agent dispatch  |
 
 ### Templates
 
@@ -40,9 +41,11 @@ Several Nix Flake templates are available for quick project scaffolding:
 Skills help agents to use Katsuobushi libraries with minimal additional
 instructions:
 
-| Skill     | Description                                          |
-| --------- | ---------------------------------------------------- |
-| `sandbox` | Configuration and usage of the `sandbox` Nix library |
+| Skill                   | Description                                                                |
+| ----------------------- | -------------------------------------------------------------------------- |
+| `sandbox`               | Configuration and usage of the `sandbox` Nix library                       |
+| `project`               | Managing a backlog on the `project` board — cards, lifecycle, and priority |
+| `project-orchestration` | Driving a `project` board with sandboxed agents (dispatch + peer review)   |
 
 Track the [plugin marketplace][plugins] with your agent harness and install the
 `katsuobushi` plugin to get started e.g.,
