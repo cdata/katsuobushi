@@ -12,7 +12,6 @@ pub mod gfx;
 pub mod host;
 pub mod instance;
 pub mod liveness;
-pub mod output;
 mod prompt;
 pub mod qmp;
 pub mod resolve;

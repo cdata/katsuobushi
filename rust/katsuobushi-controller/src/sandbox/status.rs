@@ -22,11 +22,11 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::output::{render_table, CellStyle, Renderer, TableCell};
 use crate::sandbox::gfx::{self, Resolution};
 use crate::sandbox::host::{Host, HostImpl};
 use crate::sandbox::instance::{self, Mode};
 use crate::sandbox::liveness::{self, Liveness, TurnState};
-use crate::sandbox::output::{render_table, CellStyle, Renderer, TableCell};
 use crate::sandbox::resolve::{list_instances, resolve_instance};
 use crate::sandbox::spec::{
     load_spec, resolve_roots, GpuRole, ResolvedRoots, SecretSource, SecretSpec, Spec,

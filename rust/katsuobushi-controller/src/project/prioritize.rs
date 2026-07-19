@@ -3,7 +3,7 @@
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
-use crate::sandbox::output::Renderer;
+use crate::output::Renderer;
 
 use super::board::{Anchor, Board};
 use super::fs::Fs;

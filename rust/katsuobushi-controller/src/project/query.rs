@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::sandbox::output::{render_table, Renderer, TableCell};
+use crate::output::{render_table, Renderer, TableCell};
 
 use super::board::Board;
 use super::clock::{parse_rfc3339, Clock};

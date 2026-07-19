@@ -4,6 +4,7 @@
 //! (agent VMs) and `project` (an Obsidian-Kanban-native backlog). The
 //! [`Domain`] enum leaves room for more, each backed by a module under `src/`.
 
+mod output;
 mod project;
 mod sandbox;
 
@@ -302,7 +303,7 @@ fn main() -> anyhow::Result<()> {
     // A `Reported` failure was already rendered by the subcommand (e.g. the
     // prompt stream's `Lost` note): exit nonzero without anyhow re-printing.
     if let Err(e) = &result {
-        if e.is::<sandbox::output::Reported>() {
+        if e.is::<output::Reported>() {
             std::process::exit(1);
         }
     }

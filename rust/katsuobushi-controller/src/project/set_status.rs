@@ -4,7 +4,7 @@
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
-use crate::sandbox::output::Renderer;
+use crate::output::Renderer;
 
 use super::board::{Board, Location};
 use super::clock::{format_rfc3339, Clock};

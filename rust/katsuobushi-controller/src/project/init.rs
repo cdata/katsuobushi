@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::sandbox::output::Renderer;
+use crate::output::Renderer;
 
 use super::fs::Fs;
 use super::layout::{self, Paths};

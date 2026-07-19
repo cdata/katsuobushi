@@ -37,10 +37,10 @@ use tokio::runtime::Builder;
 use tokio::time::{sleep_until, Instant};
 use tokio_vsock::{VsockAddr, VsockStream};
 
+use crate::output::{Renderer, ReportKind, Reported};
 use crate::sandbox::host::{Host, HostImpl};
 use crate::sandbox::instance::{self, Instance};
 use crate::sandbox::liveness::{alloc_turn_id, now_rfc3339, Liveness};
-use crate::sandbox::output::{Renderer, ReportKind, Reported};
 use crate::sandbox::resolve::resolve_instance;
 use crate::sandbox::spec::{load_spec, resolve_roots, ResolvedRoots, Spec};
 use crate::Global;
