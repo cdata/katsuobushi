@@ -35,7 +35,7 @@ use anyhow::Result;
 use comfy_table::{ContentArrangement, Table};
 use owo_colors::OwoColorize;
 use serde::Serialize;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 
 /// Resolve whether human output may be colored, given the `--color` choice, the
 /// `--json` flag, and the two environment probes. Pure over its
@@ -98,7 +98,14 @@ pub enum ReportKind {
 #[derive(Clone, Copy, Debug)]
 pub struct Renderer {
     json: bool,
+    /// Whether stdout output ([`emit`](Self::emit)) may be colored — keyed on
+    /// stdout's TTY-ness.
     color: bool,
+    /// Whether stderr output ([`emit_progress`](Self::emit_progress), the
+    /// streamed reports) may be colored — keyed on **stderr**'s TTY-ness, since
+    /// that is the stream those lines actually go to. Usually equals `color`
+    /// (same terminal); they only differ under a mixed redirect (card 86419c).
+    stderr_color: bool,
 }
 
 impl Renderer {
@@ -106,7 +113,11 @@ impl Renderer {
     /// tests (which inject `color` rather than relying on the real terminal);
     /// production goes through [`Self::resolve`].
     pub fn new(json: bool, color: bool) -> Self {
-        Self { json, color }
+        Self {
+            json,
+            color,
+            stderr_color: color,
+        }
     }
 
     /// Resolve the renderer from the global flags against the live process
@@ -115,13 +126,25 @@ impl Renderer {
     /// pure [`color_enabled`].
     pub fn resolve(global: Global) -> Self {
         let json = global.json;
+        let no_color = std::env::var_os("NO_COLOR").is_some();
         let color = color_enabled(
             global.color,
             json,
             std::io::stdout().is_terminal(),
-            std::env::var_os("NO_COLOR").is_some(),
+            no_color,
         );
-        Self { json, color }
+        // Streamed reports go to stderr, so gate their color on stderr's TTY-ness.
+        let stderr_color = color_enabled(
+            global.color,
+            json,
+            std::io::stderr().is_terminal(),
+            no_color,
+        );
+        Self {
+            json,
+            color,
+            stderr_color,
+        }
     }
 
     /// Whether `--json` mode is active.
@@ -149,6 +172,59 @@ impl Renderer {
             let text = human(self);
             if !text.is_empty() {
                 println!("{text}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Like [`emit`](Self::emit), but for **streamed progress** — the live
+    /// `Report`/note lines from a driven agent turn (`sandbox prompt`/`dispatch`).
+    /// The human rendering goes to **stderr**, not stdout, and is flushed
+    /// immediately. This is deliberate: the `emitExec` menu wrappers capture
+    /// katsuctl's stdout (to exec the recipe path it prints) and route all
+    /// narration to stderr, so a report written to stdout is entangled with that
+    /// capture and lost/raced on teardown in a non-TTY chain (card 55cfca) —
+    /// whereas stderr is the reliable human channel every other progress line
+    /// already uses. `--json` streaming stays on **stdout** for machine parsing.
+    pub fn emit_progress<T, F>(&self, value: &T, human: F) -> Result<()>
+    where
+        T: Serialize,
+        F: FnOnce(&Self) -> String,
+    {
+        let mut out = std::io::stdout().lock();
+        let mut err = std::io::stderr().lock();
+        self.write_progress(value, human, &mut out, &mut err)
+    }
+
+    /// The stream-agnostic core of [`emit_progress`](Self::emit_progress),
+    /// injectable so a test can assert the human line lands on `err` and never
+    /// touches `out` (and the reverse for `--json`).
+    fn write_progress<T, F>(
+        &self,
+        value: &T,
+        human: F,
+        out: &mut dyn Write,
+        err: &mut dyn Write,
+    ) -> Result<()>
+    where
+        T: Serialize,
+        F: FnOnce(&Self) -> String,
+    {
+        if self.json {
+            writeln!(out, "{}", serde_json::to_string(value)?)?;
+            out.flush()?;
+        } else {
+            // This line is written to stderr, so paint it with the stderr color
+            // policy (which usually equals `color`, but not under a mixed
+            // redirect — card 86419c).
+            let painter = Self {
+                color: self.stderr_color,
+                ..*self
+            };
+            let text = human(&painter);
+            if !text.is_empty() {
+                writeln!(err, "{text}")?;
+                err.flush()?;
             }
         }
         Ok(())
@@ -319,6 +395,83 @@ mod tests {
     /// True iff the string carries an ANSI escape (SGR) sequence.
     fn has_ansi(s: &str) -> bool {
         s.contains('\u{1b}')
+    }
+
+    // ---- streamed-progress routing (card 55cfca) ----
+
+    #[test]
+    fn progress_human_line_goes_to_stderr_never_stdout() {
+        let r = Renderer::new(false, false);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        r.write_progress(
+            &"unused",
+            |_| "✓ done building".to_string(),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(
+            out.is_empty(),
+            "a streamed human report must not touch stdout"
+        );
+        assert_eq!(String::from_utf8(err).unwrap(), "✓ done building\n");
+    }
+
+    #[test]
+    fn progress_json_line_goes_to_stdout_never_stderr() {
+        let r = Renderer::new(true, false);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        r.write_progress(
+            &serde_json::json!({"status": "done"}),
+            |_| "human".to_string(),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(err.is_empty(), "a --json report must not touch stderr");
+        assert_eq!(String::from_utf8(out).unwrap(), "{\"status\":\"done\"}\n");
+    }
+
+    #[test]
+    fn progress_skips_an_empty_human_render() {
+        let r = Renderer::new(false, false);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        r.write_progress(&"unused", |_| String::new(), &mut out, &mut err)
+            .unwrap();
+        assert!(out.is_empty() && err.is_empty());
+    }
+
+    #[test]
+    fn progress_color_follows_stderr_tty_not_stdout() {
+        // Mixed redirect — stdout not a TTY (`color` false) but stderr is
+        // (`stderr_color` true). The streamed report goes to stderr, so it must
+        // be COLORED per stderr, even though the stdout-based `color` is off.
+        let r = Renderer {
+            json: false,
+            color: false,
+            stderr_color: true,
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        r.write_progress(&"x", |rr| rr.green("hi"), &mut out, &mut err)
+            .unwrap();
+        assert!(
+            has_ansi(&String::from_utf8(err).unwrap()),
+            "a report to a TTY stderr must be colored even when stdout is not a TTY"
+        );
+
+        // Reverse — stdout a TTY (`color` true), stderr not: the report is PLAIN.
+        let r2 = Renderer {
+            json: false,
+            color: true,
+            stderr_color: false,
+        };
+        let (mut out2, mut err2) = (Vec::new(), Vec::new());
+        r2.write_progress(&"x", |rr| rr.green("hi"), &mut out2, &mut err2)
+            .unwrap();
+        assert!(
+            !has_ansi(&String::from_utf8(err2).unwrap()),
+            "a report to a non-TTY stderr must be plain even when stdout is a TTY"
+        );
     }
 
     // ---- color gating matrix (the acceptance core) ----

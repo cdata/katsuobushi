@@ -333,7 +333,7 @@ fn render_note(renderer: &Renderer, kind: ReportKind, text: &str) -> Result<()> 
         ReportKind::Lost => "lost",
         _ => "note",
     };
-    renderer.emit(&Note { event, text }, |r| r.report(kind, text))
+    renderer.emit_progress(&Note { event, text }, |r| r.report(kind, text))
 }
 
 /// Connect to the guest control server over vsock, retrying with capped
@@ -678,7 +678,7 @@ fn render_report(renderer: &Renderer, report: &Report) -> Result<()> {
         Status::Blocked => ReportKind::Blocked,
         Status::Info => ReportKind::Info,
     };
-    renderer.emit(report, |r| r.report(kind, &report.text))
+    renderer.emit_progress(report, |r| r.report(kind, &report.text))
 }
 
 /// The `katsuctl … start` argv that resumes a paused named instance: run the
