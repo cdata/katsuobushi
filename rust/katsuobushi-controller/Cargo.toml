@@ -10,23 +10,33 @@ description = "Host-side Katsuobushi sandbox controller (the `katsuctl <domain> 
 name = "katsuctl"
 path = "src/main.rs"
 
+# Cross-platform deps: the `project` domain and the shared `output` renderer
+# build everywhere (macOS included). The `sandbox` domain is Linux-only and its
+# deps are gated below.
 [dependencies]
-# Shared wire types (Prompt/Report/GuestMessage/Status) for the vsock control
-# channel — the `prompt` subcommand streams these, so host and guest cannot
-# drift (design/katsuctl.md §3). Path dep on the in-workspace protocol crate.
-katsuobushi-sandbox-protocol = { path = "../katsuobushi-sandbox-protocol" }
 clap.workspace = true
 anyhow.workspace = true
-# Inherited now for the upcoming subcommands (design/katsuctl.md §12): tokio for
-# the async vsock/QMP paths (prompt/status/stop), serde for spec/instance
-# (de)serialization. The dispatch stubs in this scaffold do not use them yet.
-tokio.workspace = true
-tokio-vsock.workspace = true
+# serde for card/spec (de)serialization; serde_json backs the renderer's `--json`
+# output and the project board model, so both are cross-platform.
 serde.workspace = true
 serde_json.workspace = true
 # Output/UX foundation (design/katsuctl.md §13, issue #007): status tables + color.
 comfy-table.workspace = true
 owo-colors.workspace = true
+
+# Linux-only deps: the `sandbox` domain (vsock control channel + async QMP) is
+# gated to Linux via `#[cfg(target_os = "linux")]`, so its deps — tokio-vsock
+# (Linux-only sockets), the protocol crate that rides them, and tokio itself
+# (used only by the sandbox async paths) — are pinned to the same target so
+# `katsuctl` still builds on macOS with `sandbox` compiled out.
+[target.'cfg(target_os = "linux")'.dependencies]
+# Shared wire types (Prompt/Report/GuestMessage/Status) for the vsock control
+# channel — the `prompt` subcommand streams these, so host and guest cannot
+# drift (design/katsuctl.md §3). Path dep on the in-workspace protocol crate.
+katsuobushi-sandbox-protocol = { path = "../katsuobushi-sandbox-protocol" }
+# tokio drives the async vsock/QMP paths (prompt/status/stop).
+tokio.workspace = true
+tokio-vsock.workspace = true
 
 [dev-dependencies]
 # Golden snapshot tests for emitted start/attach scripts (design §7.2, issue #013).
