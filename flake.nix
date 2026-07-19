@@ -138,9 +138,11 @@
           workspaceRoot = ./.;
           include = [
             "README.md"
+            "CHANGELOG.md"
             "MIGRATING.md"
             "lib/*/README.md"
             "plugins/**/*.md"
+            "project/kanban/README.md"
           ];
         };
 
