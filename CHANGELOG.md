@@ -5,6 +5,37 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.3.1] — 2026-07-19
+
+Makes `katsuctl` build on non-Linux (macOS): the `project` domain is
+cross-platform, and the Linux-only `sandbox` domain is now conditionally
+compiled out. Also fixes streamed agent reports being lost from a captured,
+non-TTY stream. No spec or instance-state bump (`specVersion 4` /
+`instanceVersion 2` unchanged). See [`MIGRATING.md`](MIGRATING.md#031).
+
+### Added
+
+- **`katsuctl` builds on non-Linux.** The `sandbox` domain (and its Linux-only
+  `tokio-vsock` dependency) is gated behind `#[cfg(target_os = "linux")]`, so on
+  macOS `katsuctl` compiles with the `project` board commands and omits the
+  sandbox subcommands. `lib.project` and `packages.<system>.katsuctl` are now
+  available on every system; the sandbox library stays Linux-only.
+
+### Fixed
+
+- **Streamed agent reports are no longer lost in captured output.**
+  `sandbox prompt` / `sandbox dispatch` rendered live reports to stdout, which
+  the `emitExec` menu wrappers capture and which races teardown in a
+  non-TTY/backgrounded stream — so a terminal `report done` could vanish.
+  Reports now stream to **stderr** (the reliable channel the other progress
+  lines already use), and gate their color on stderr's TTY-ness; `--json`
+  streaming stays on stdout.
+
+### Changed
+
+- The shared output/rendering module moved from `sandbox::output` to a top-level
+  `output` module — an internal refactor enabling the cross-platform split.
+
 ## [0.3.0] — 2026-07-18
 
 Adds a file-backed **project board** and agent **orchestration** built on it:

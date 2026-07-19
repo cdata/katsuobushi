@@ -8,6 +8,19 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.3.1
+
+**Mostly additive.** No spec or instance-state change (`specVersion 4` /
+`instanceVersion 2` unchanged). `katsuctl` now builds on non-Linux (macOS) with
+the `project` board commands; the `sandbox` domain is Linux-only and absent
+there — nothing changes if you were already on Linux.
+
+**One behavioral change to note:** the live human reports streamed by
+`sandbox prompt` / `sandbox dispatch` now go to **stderr** instead of stdout, so
+they are reliably captured in a backgrounded / non-TTY context. If you scraped a
+driven turn's _human_ report text from **stdout**, read **stderr** instead.
+Machine consumers are unaffected — `--json` streaming stays on stdout.
+
 ## 0.3.0
 
 **Additive — no action required for existing consumers.** No spec or
