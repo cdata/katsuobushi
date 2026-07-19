@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::sandbox::output::{Renderer, Reported};
+use crate::output::{Renderer, Reported};
 
 use super::board::{Board, Location};
 use super::fs::Fs;

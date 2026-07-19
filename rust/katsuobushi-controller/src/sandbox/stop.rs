@@ -18,9 +18,9 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
+use crate::output::Renderer;
 use crate::sandbox::host::{Host, HostImpl};
 use crate::sandbox::instance;
-use crate::sandbox::output::Renderer;
 use crate::sandbox::qmp;
 use crate::sandbox::resolve::resolve_instance;
 use crate::sandbox::spec::{load_spec, resolve_roots};

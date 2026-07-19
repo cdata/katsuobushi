@@ -23,7 +23,7 @@ pub mod set_status;
 
 use anyhow::Result;
 
-use crate::sandbox::output::{Renderer, Reported};
+use crate::output::{Renderer, Reported};
 use crate::{Global, ProjectArgs, ProjectCommand, StatusArgs, StatusCommand};
 
 use clock::SystemClock;
