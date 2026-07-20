@@ -356,8 +356,14 @@ impl Board {
     /// they stay stable provided the on-disk board was formatted once.
     pub fn to_text(&self) -> String {
         let mut out = String::new();
-        out.push_str(self.preamble.trim_end());
-        out.push_str("\n\n");
+        // A frontmatter-less board has an empty preamble; emitting the `\n\n`
+        // separator anyway would open the file with blank lines a formatter
+        // strips (card bf452e). Only emit the preamble block when it has content.
+        let preamble = self.preamble.trim_end();
+        if !preamble.is_empty() {
+            out.push_str(preamble);
+            out.push_str("\n\n");
+        }
         for lane in &self.lanes {
             match lane.max_items {
                 Some(n) => out.push_str(&format!("## {} ({n})\n", lane.title)),
@@ -768,6 +774,18 @@ mod tests {
         let b = Board::parse(POPULATED_ARCHIVE);
         assert_eq!(b.archived().len(), 1);
         assert!(b.trailer.as_deref().unwrap().starts_with("%% kanban:settings"));
+    }
+
+    #[test]
+    fn frontmatter_less_board_emits_no_leading_blank_lines() {
+        // With an empty preamble, `to_text` must start at the first lane, not
+        // with the `\n\n` a formatter would strip (card bf452e).
+        let b = Board::parse("## To-do\n\n- [ ] [[a3f7b2]]\n");
+        let out = b.to_text();
+        assert!(!out.starts_with('\n'), "leading blank line:\n{out:?}");
+        assert!(out.starts_with("## To-do"));
+        // Still idempotent for this shape.
+        assert_eq!(Board::parse(&out).to_text(), out);
     }
 
     #[test]
