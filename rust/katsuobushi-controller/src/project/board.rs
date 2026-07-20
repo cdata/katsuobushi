@@ -98,8 +98,10 @@ pub struct Board {
     archive: Vec<Card>,
     /// Whether an archive section existed / should be emitted.
     archive_present: bool,
-    /// The `%% kanban:settings … %%` block, verbatim (`None` if absent).
-    settings: Option<String>,
+    /// Everything after the lanes/archive, verbatim (`None` if nothing follows).
+    /// The `%% kanban:settings … %%` block in the common case, but also any
+    /// foreign trailing content a human left, so a rewrite never drops it.
+    trailer: Option<String>,
 }
 
 impl Board {
@@ -181,22 +183,34 @@ impl Board {
                 i = next;
                 continue;
             }
-            i += 1; // blanks / stray lines, incl. the `***`/`---` archive separator
+            if l.trim().is_empty() || is_thematic_break(l) {
+                i += 1; // a blank line or the `***`/`---` archive separator: decoration
+            } else if lines[i + 1..].iter().any(|x| lane_heading(x).is_some()) {
+                // A stray line with a lane/archive heading still ahead is
+                // mid-board, not trailing: skip it (as the parser always has)
+                // so the structure after it still parses. Swallowing it into the
+                // trailer would hide every later lane and the archive — a worse
+                // loss than dropping one stray line (and it would strand the
+                // archive, reviving the card 5b4df3 duplicate-append bug).
+                i += 1;
+            } else {
+                break; // genuinely trailing foreign content — kept by the trailer
+            }
         }
 
-        // Settings: verbatim to EOF.
-        let settings = if i < lines.len() && lines[i].starts_with(SETTINGS_MARKER) {
-            Some(lines[i..].join("\n"))
-        } else {
-            None
-        };
+        // Trailer: everything from here to EOF, verbatim. The `%% kanban:settings`
+        // block in the common case, but also any foreign content a human left
+        // *trailing* the lanes/archive, so a CLI rewrite never silently drops it
+        // (card 0e6516). The loop above stops here only when no lane/archive
+        // heading follows — mid-board strays are skipped, not captured.
+        let trailer = (i < lines.len()).then(|| lines[i..].join("\n"));
 
         Board {
             preamble,
             lanes,
             archive,
             archive_present,
-            settings,
+            trailer,
         }
     }
 
@@ -357,8 +371,8 @@ impl Board {
             push_cards(&mut out, &self.archive);
             out.push('\n');
         }
-        if let Some(settings) = &self.settings {
-            out.push_str(settings);
+        if let Some(trailer) = &self.trailer {
+            out.push_str(trailer);
             if !out.ends_with('\n') {
                 out.push('\n');
             }
@@ -393,6 +407,21 @@ fn push_cards(out: &mut String, cards: &[Card]) {
 }
 
 // ---- line classifiers -------------------------------------------------------
+
+/// A markdown thematic break: a line of three or more matching `-`, `*`, or `_`
+/// markers (spaces allowed between them), and nothing else. This is the archive
+/// separator (`***`/`---`) plus any human-written rule; parse treats it as
+/// skippable decoration in the lane region, so it never counts as the foreign
+/// content that stops lane parsing.
+fn is_thematic_break(l: &str) -> bool {
+    let t = l.trim();
+    let marker = match t.chars().next() {
+        Some(c @ ('-' | '*' | '_')) => c,
+        _ => return false,
+    };
+    t.chars().filter(|c| !c.is_whitespace()).count() >= 3
+        && t.chars().all(|c| c == marker || c == ' ' || c == '\t')
+}
 
 fn is_lane_heading(l: &str) -> bool {
     lane_title(l).is_some()
@@ -472,7 +501,7 @@ mod tests {
         assert_eq!(b.cards_in(st("in-progress")).len(), 1);
         assert_eq!(b.cards_in(st("needs-review")).len(), 0);
         assert_eq!(b.cards_in(st("todo"))[0].id(), Some(id("a3f7b2")));
-        assert!(b.settings.as_deref().unwrap().contains("kanban:settings"));
+        assert!(b.trailer.as_deref().unwrap().contains("kanban:settings"));
         assert!(b.preamble.contains("kanban-plugin: basic"));
     }
 
@@ -686,6 +715,59 @@ mod tests {
             );
         }
         assert!(!crate::project::layout::initial_board().contains("\n\n\n"));
+    }
+
+    #[test]
+    fn trailing_human_content_survives_a_rewrite() {
+        // Prose after the last lane on a board with NO settings block used to be
+        // consumed as stray lines and dropped on rewrite (card 0e6516).
+        let text = "---\nkanban-plugin: basic\n---\n\n## To-do\n\n- [ ] [[a3f7b2]]\n\n## In Progress\n\n## Needs Review\n\n## Ready\n\nSome human note the tool didn't write.\n";
+        let b = Board::parse(text);
+        let out = b.to_text();
+        assert!(
+            out.contains("Some human note the tool didn't write."),
+            "trailing content dropped:\n{out}"
+        );
+        // ...and it round-trips loss-free (idempotent thereafter).
+        assert_eq!(Board::parse(&out).to_text(), out);
+    }
+
+    #[test]
+    fn a_mid_board_stray_line_does_not_swallow_later_lanes() {
+        // A stray line BETWEEN lanes must not turn every following lane into
+        // opaque trailer text — the later lane and its cards stay modelled.
+        let text = "---\nkanban-plugin: basic\n---\n\n## To-do\n\n- [ ] [[a3f7b2]]\n\nstray note\n\n## In Progress\n\n- [ ] [[ff09ab]]\n\n## Needs Review\n\n## Ready\n\n%% kanban:settings\n\n```\n{}\n```\n\n%%\n";
+        let b = Board::parse(text);
+        // The lane after the stray line is still parsed and its card reachable.
+        assert_eq!(b.status_of(&id("ff09ab")), Some(st("in-progress")));
+        assert_eq!(b.lanes().len(), 4);
+        // The trailer is the settings block, not the whole tail from the stray.
+        assert!(b.trailer.as_deref().unwrap().starts_with("%% kanban:settings"));
+    }
+
+    #[test]
+    fn a_stray_line_before_the_archive_does_not_strand_it() {
+        // Prose before `## Archive` must not fold the archive into the trailer
+        // (which would revive the card 5b4df3 duplicate-append bug).
+        let text = "---\nkanban-plugin: basic\n---\n\n## To-do\n\n## In Progress\n\n## Needs Review\n\n## Ready\n\nleftover prose\n\n---\n\n## Archive\n\n- [x] [[dddddd]]\n\n%% kanban:settings\n\n```\n{}\n```\n\n%%\n";
+        let b = Board::parse(text);
+        assert_eq!(b.archived().len(), 1);
+        assert_eq!(b.archived()[0].id(), Some(id("dddddd")));
+        assert!(b.trailer.as_deref().unwrap().starts_with("%% kanban:settings"));
+    }
+
+    #[test]
+    fn foreign_content_does_not_swallow_the_archive_separator() {
+        // The `---`/`***` separator is decoration, not "foreign content": it must
+        // still be skipped so the `## Archive` after it parses as the archive.
+        assert!(is_thematic_break("---"));
+        assert!(is_thematic_break("***"));
+        assert!(is_thematic_break("* * *"));
+        assert!(!is_thematic_break("-- x"));
+        assert!(!is_thematic_break("A note."));
+        let b = Board::parse(POPULATED_ARCHIVE);
+        assert_eq!(b.archived().len(), 1);
+        assert!(b.trailer.as_deref().unwrap().starts_with("%% kanban:settings"));
     }
 
     #[test]
