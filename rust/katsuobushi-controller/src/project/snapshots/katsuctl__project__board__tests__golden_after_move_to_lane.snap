@@ -3,9 +3,7 @@ source: rust/katsuobushi-controller/src/project/board.rs
 expression: b.to_text()
 ---
 ---
-
 kanban-plugin: basic
-
 ---
 
 ## To-do
@@ -19,12 +17,12 @@ kanban-plugin: basic
 
 ## Needs Review
 
-
 ## Ready
 
-
 %% kanban:settings
+
 ```
 {"kanban-plugin":"basic"}
 ```
+
 %%

@@ -140,8 +140,11 @@ pub fn resolve_id(input: &str, known: &[CardId]) -> Result<CardId> {
 /// The initial BOARD.md: four empty active lanes + a settings block wiring the
 /// `metadata keys` (so the plugin surfaces note frontmatter on the card face).
 pub fn initial_board() -> String {
+    // Prettier-canonical from birth (card 3e9510): single-blank frontmatter and
+    // one blank line between lanes, so the first `markdown format` run over a
+    // freshly-`init`ed board is a no-op instead of a drift chore.
     format!(
-        "---\n\nkanban-plugin: {KANBAN_PLUGIN_VALUE}\n\n---\n\n## To-do\n\n## In Progress\n\n## Needs Review\n\n## Ready\n\n\n{}\n",
+        "---\nkanban-plugin: {KANBAN_PLUGIN_VALUE}\n---\n\n## To-do\n\n## In Progress\n\n## Needs Review\n\n## Ready\n\n{}\n",
         settings_block()
     )
 }
@@ -162,7 +165,9 @@ fn settings_block() -> String {
             {"metadataKey": "labels", "label": "labels", "shouldHideLabel": false, "containsMarkdown": false}
         ]
     });
-    format!("%% kanban:settings\n```\n{settings}\n```\n%%")
+    // Blank lines around the fenced block match what a prettier-style formatter
+    // emits, so this verbatim-preserved region stays byte-stable under the gate.
+    format!("%% kanban:settings\n\n```\n{settings}\n```\n\n%%")
 }
 
 /// The body skeleton `new` writes when no body is piped, and the Obsidian Note

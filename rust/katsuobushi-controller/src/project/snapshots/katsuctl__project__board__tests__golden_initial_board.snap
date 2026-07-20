@@ -3,9 +3,7 @@ source: rust/katsuobushi-controller/src/project/board.rs
 expression: "crate::project::layout::initial_board()"
 ---
 ---
-
 kanban-plugin: basic
-
 ---
 
 ## To-do
@@ -16,9 +14,10 @@ kanban-plugin: basic
 
 ## Ready
 
-
 %% kanban:settings
+
 ```
 {"kanban-plugin":"basic","metadata-keys":[{"containsMarkdown":false,"label":"","metadataKey":"title","shouldHideLabel":true},{"containsMarkdown":false,"label":"type","metadataKey":"type","shouldHideLabel":false},{"containsMarkdown":false,"label":"design","metadataKey":"design","shouldHideLabel":false},{"containsMarkdown":false,"label":"blocked by","metadataKey":"blocked_by","shouldHideLabel":false},{"containsMarkdown":false,"label":"labels","metadataKey":"labels","shouldHideLabel":false}]}
 ```
+
 %%
