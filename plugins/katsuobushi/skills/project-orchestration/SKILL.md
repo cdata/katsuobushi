@@ -4,9 +4,9 @@ description:
   Orchestrate multi-agent work against a Katsuobushi `project` board — the
   implementor / peer-reviewer / human-owner roles, and how to delegate cards to
   sandbox VMs and review completed work in sandboxes. Use this skill when the
-  user wants to drive a board forward with agents: dispatch a card to a sandbox,
-  run a swarm across the backlog, peer-review a card in an isolated VM, move
-  work through needs-review/ready/accepted, or wire up the dispatch report
+  user wants to drive a board forward with agents — dispatch a card to a
+  sandbox, run a swarm across the backlog, peer-review a card in an isolated VM,
+  move work through needs-review/ready/accepted, or wire up the dispatch report
   bridge. Complements the `project` skill (board mechanics) and the `sandbox`
   skill (driving VMs).
 ---
@@ -182,7 +182,20 @@ collect- and-integrate flow:
 
 How you _watch_ for the report is your choice: run `dispatch` in the foreground
 and act when it returns, background it and act on the completion notification,
-or fan several out and poll `sandbox status`.
+or fan several out and poll `sandbox status`. Prefer the event-driven paths
+(foreground or backgrounded) over polling — `dispatch`/`prompt` block until the
+guest posts a terminal report, so a backgrounded run re-invokes you exactly when
+`done`/`blocked` lands, with no timers.
+
+Add **`--until-report`** (`sandbox dispatch <id> --until-report`, or
+`sandbox prompt <name> "…" --until-report`) when you want that guarantee to
+survive an agent that ends its turn without reporting: instead of returning with
+a "stopped without reporting" warning, the command stays armed and keeps waiting
+for a real `done`/`blocked`. It pairs with the guest's **auto-nudge** — a
+sandbox that ends a turn silently is automatically re-prompted a few times to
+report — so a backgrounded build that finishes long after the turn ended is
+still caught live. Don't substitute arbitrary `sleep`s for a completion event;
+use these instead.
 
 ## Swarming the backlog
 
@@ -230,10 +243,12 @@ to the hardware, not to the number of Available cards:
 - **Trust the branch, not "the VM ran."** A dispatched agent can end its turn
   **unreported** (`sandbox status` shows `ended-unreported`) having done the
   work in-VM but never committing/pushing — `sandbox fetch` then shows only the
-  `git stash` seed commits (`WIP on …` / `index on …`), i.e. nothing landed.
-  Always fetch and inspect the branch for a **real** commit before advancing the
-  card. To recover, `sandbox prompt` the instance to commit → push → report; if
-  it stalls again, it's stuck — remove it, note the attempt in the card's
-  `## Dispatch log`, reset the card to `todo`, and either re-dispatch a
-  **fresh** instance or do the work directly. A dispatch launching cleanly does
-  **not** guarantee a delivered branch.
+  `git stash` seed commits (`WIP on …` / `index on …`), i.e. nothing landed. The
+  guest auto-nudges an unreported stop a few times first, so `ended-unreported`
+  means the agent ignored those re-prompts too — a strong signal of a real
+  stall, not just a missed report. Always fetch and inspect the branch for a
+  **real** commit before advancing the card. To recover, `sandbox prompt` the
+  instance to commit → push → report; if it stalls again, it's stuck — remove
+  it, note the attempt in the card's `## Dispatch log`, reset the card to
+  `todo`, and either re-dispatch a **fresh** instance or do the work directly. A
+  dispatch launching cleanly does **not** guarantee a delivered branch.

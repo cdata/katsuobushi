@@ -205,6 +205,11 @@ enum SandboxCommand {
         /// Agent mode: send this prompt once the instance is ready.
         #[arg(long)]
         prompt: Option<String>,
+        /// Stay armed across an unreported turn-end: keep waiting for a terminal
+        /// `report done`/`blocked` instead of returning when the agent stops
+        /// silently. Pairs with the guest's auto-nudges.
+        #[arg(long)]
+        until_report: bool,
     },
     /// Launch an agent VM to work a project-board card (guards Available-only,
     /// claims it to in-progress, seeds the agent with the card as its directive).
@@ -217,6 +222,11 @@ enum SandboxCommand {
         /// Dispatch even if the card isn't Available (not To-do, or blocked).
         #[arg(long)]
         force: bool,
+        /// Stay armed across an unreported turn-end: keep waiting for a terminal
+        /// `report done`/`blocked` instead of returning when the agent stops
+        /// silently. Pairs with the guest's auto-nudges.
+        #[arg(long)]
+        until_report: bool,
     },
     /// Push a prompt to a running instance and stream its reports.
     Prompt {
@@ -224,6 +234,11 @@ enum SandboxCommand {
         instance: String,
         /// Prompt text; remaining args are joined with spaces.
         text: Vec<String>,
+        /// Stay armed across an unreported turn-end: keep waiting for a terminal
+        /// `report done`/`blocked` instead of returning when the agent stops
+        /// silently. Pairs with the guest's auto-nudges.
+        #[arg(long)]
+        until_report: bool,
     },
     /// Show one instance, or a table of all instances when omitted.
     Status {
@@ -397,11 +412,17 @@ mod tests {
         ]);
         match cli.domain {
             Domain::Sandbox(SandboxArgs {
-                command: SandboxCommand::Prompt { instance, text },
+                command:
+                    SandboxCommand::Prompt {
+                        instance,
+                        text,
+                        until_report,
+                    },
                 ..
             }) => {
                 assert_eq!(instance, "my-inst");
                 assert_eq!(text, vec!["hello", "world"]);
+                assert!(!until_report, "--until-report defaults off");
             }
             _ => panic!("expected sandbox prompt"),
         }
@@ -447,12 +468,14 @@ mod tests {
                         agent,
                         name,
                         prompt,
+                        until_report,
                     },
                 config,
             }) => {
                 assert!(agent);
                 assert_eq!(name.as_deref(), Some("foo"));
                 assert_eq!(prompt.as_deref(), Some("do the thing"));
+                assert!(!until_report, "--until-report defaults off");
                 assert_eq!(config, PathBuf::from("/x"));
             }
             _ => panic!("expected sandbox start"),

@@ -103,8 +103,12 @@ enum DriveEvent<'a> {
     /// The one-shot progress-stall notice: "no progress for T".
     Stalled(&'a str),
     /// The `reported:false` verdict for this `turn_id` — the agent stopped
-    /// without a terminal report.
+    /// without a terminal report. Terminal (the drive loop breaks).
     Stopped(u64),
+    /// `--until-report`: the agent's turn ended unreported, but the drive loop
+    /// stays armed and keeps waiting for a real terminal report rather than
+    /// breaking. Emitted once per unreported turn-end in that mode.
+    ReArmed(u64),
 }
 
 /// Which branch [`prompt_core`] took — returned so seam tests can assert the
@@ -122,7 +126,13 @@ enum Action {
 /// Production entry point: load the spec, stand up the host seam, then run the
 /// branch logic with the real `instance.json` read, the real `start`-subcommand
 /// resume (boot only), and the real vsock streaming delivery.
-pub fn run(config: &Path, instance: &str, text: Vec<String>, global: Global) -> Result<()> {
+pub fn run(
+    config: &Path,
+    instance: &str,
+    text: Vec<String>,
+    until_report: bool,
+    global: Global,
+) -> Result<()> {
     let spec = load_spec(config)?;
     let roots = resolve_roots(&spec.roots)?;
     let host = HostImpl::new().context("initializing the host IO seam")?;
@@ -155,6 +165,7 @@ pub fn run(config: &Path, instance: &str, text: Vec<String>, global: Global) -> 
                 turn_id,
                 &text,
                 watchdog,
+                until_report,
                 &liveness_path,
                 &renderer,
             )
@@ -240,6 +251,7 @@ fn deliver_over_vsock(
     turn_id: u64,
     text: &str,
     watchdog: Watchdog,
+    until_report: bool,
     liveness_path: &Path,
     renderer: &Renderer,
 ) -> Result<()> {
@@ -257,6 +269,7 @@ fn deliver_over_vsock(
             DriveEvent::Stopped(turn_id) => {
                 render_note(renderer, ReportKind::Stopped, &stopped_message(turn_id))
             }
+            DriveEvent::ReArmed(turn_id) => render_rearmed(renderer, turn_id),
         }
     };
     // The heartbeat touch: load-modify-store the liveness record with a fresh
@@ -280,6 +293,7 @@ fn deliver_over_vsock(
         turn_id,
         text.to_string(),
         watchdog,
+        until_report,
         sink,
         touch,
     ));
@@ -315,6 +329,35 @@ fn stopped_message(turn_id: u64) -> String {
     format!(
         "agent stopped without reporting (turn {turn_id}) — possible silent \
          completion or unreported hang; inspect with `sandbox attach` / `sandbox fetch`"
+    )
+}
+
+/// The message for `--until-report`: the turn ended unreported but the drive
+/// loop stays armed for a real terminal report (e.g. after the guest's
+/// auto-nudges, or once a backgrounded build finishes and the agent reports).
+fn rearmed_message(turn_id: u64) -> String {
+    format!(
+        "turn {turn_id} ended without a terminal report — staying armed \
+         (--until-report); still waiting for `report done`/`blocked`"
+    )
+}
+
+/// Render the `--until-report` re-armed note: a tagged `{"event":"rearmed",…}`
+/// line in `--json`, a dim ⚠ line otherwise (reusing the `Stalled` glyph — this
+/// is a "still waiting" notice, not a failure).
+fn render_rearmed(renderer: &Renderer, turn_id: u64) -> Result<()> {
+    #[derive(Serialize)]
+    struct Note<'a> {
+        event: &'a str,
+        text: &'a str,
+    }
+    let text = rearmed_message(turn_id);
+    renderer.emit_progress(
+        &Note {
+            event: "rearmed",
+            text: &text,
+        },
+        |r| r.report(ReportKind::Stalled, &text),
     )
 }
 
@@ -393,6 +436,7 @@ enum LineFlow {
 fn handle_phase1_line<Sink, Touch>(
     line: &str,
     turn_id: u64,
+    until_report: bool,
     sink: &mut Sink,
     touch: &mut Touch,
     last_hb: &mut Instant,
@@ -453,7 +497,14 @@ where
             reported,
         }) if id == turn_id => {
             if !reported {
-                // Stopped without a terminal report — warn.
+                // Stopped without a terminal report. `--until-report` keeps the
+                // stream armed for a real report (the guest's auto-nudges, or a
+                // late `report done` once a backgrounded build finishes) rather
+                // than breaking; the default surfaces the warning and breaks.
+                if until_report {
+                    sink(DriveEvent::ReArmed(turn_id))?;
+                    return Ok(LineFlow::Continue);
+                }
                 sink(DriveEvent::Stopped(turn_id))?;
             }
             return Ok(LineFlow::Break);
@@ -499,6 +550,7 @@ async fn drive<S, Sink, Touch>(
     turn_id: u64,
     text: String,
     watchdog: Watchdog,
+    until_report: bool,
     mut sink: Sink,
     mut touch: Touch,
 ) -> Result<()>
@@ -592,6 +644,7 @@ where
         if let LineFlow::Break = handle_phase1_line(
             &line,
             turn_id,
+            until_report,
             &mut sink,
             &mut touch,
             &mut last_hb,
@@ -619,6 +672,7 @@ where
                         if let LineFlow::Break = handle_phase1_line(
                             line,
                             turn_id,
+                            until_report,
                             &mut sink,
                             &mut touch,
                             &mut last_hb,
@@ -965,6 +1019,7 @@ mod tests {
         Report(Status),
         Stalled,
         Stopped(u64),
+        ReArmed(u64),
     }
 
     /// Deadlines so wide the watchdog timers never fire during a canned feed; the
@@ -1010,11 +1065,13 @@ mod tests {
                 turn_id,
                 prompt.to_string(),
                 relaxed_watchdog(),
+                false,
                 |event: DriveEvent| -> Result<()> {
                     events.borrow_mut().push(match event {
                         DriveEvent::Report(r) => Ev::Report(r.status),
                         DriveEvent::Stalled(_) => Ev::Stalled,
                         DriveEvent::Stopped(id) => Ev::Stopped(id),
+                        DriveEvent::ReArmed(id) => Ev::ReArmed(id),
                     });
                     Ok(())
                 },
@@ -1170,6 +1227,62 @@ mod tests {
     }
 
     #[test]
+    fn it_stays_armed_across_an_unreported_stop_with_until_report() {
+        // `--until-report`: an unreported turn-end emits a `ReArmed` note and
+        // keeps streaming instead of breaking; a later terminal report (e.g. the
+        // guest's auto-nudge landing, or a backgrounded build finishing) then
+        // breaks cleanly. Uses a direct `drive` call so `until_report` is set.
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let events: RefCell<Vec<Ev>> = RefCell::new(Vec::new());
+        let result = runtime.block_on(async {
+            let (client, mut server) = tokio::io::duplex(4096);
+            let driver = drive(
+                client,
+                1,
+                "go".into(),
+                relaxed_watchdog(),
+                true, // --until-report
+                |event: DriveEvent| -> Result<()> {
+                    events.borrow_mut().push(match event {
+                        DriveEvent::Report(r) => Ev::Report(r.status),
+                        DriveEvent::Stalled(_) => Ev::Stalled,
+                        DriveEvent::Stopped(id) => Ev::Stopped(id),
+                        DriveEvent::ReArmed(id) => Ev::ReArmed(id),
+                    });
+                    Ok(())
+                },
+                || {},
+            );
+            let ctrl = async {
+                let _ = read_chunk(&mut server).await;
+                // Unreported turn-end: re-arms rather than breaking.
+                server
+                    .write_all(br#"{"type":"turncompleted","turn_id":1,"reported":false}"#)
+                    .await
+                    .unwrap();
+                server.write_all(b"\n").await.unwrap();
+                server.flush().await.unwrap();
+                // A late terminal report finally lands → clean break.
+                server
+                    .write_all(br#"{"type":"report","status":"done","text":"finally"}"#)
+                    .await
+                    .unwrap();
+                server.write_all(b"\n").await.unwrap();
+                server.flush().await.unwrap();
+                server
+            };
+            let (result, _server) = tokio::join!(driver, ctrl);
+            result
+        });
+        result.expect("a re-armed turn that later reports is clean");
+        assert_eq!(
+            events.into_inner(),
+            vec![Ev::ReArmed(1), Ev::Report(Status::Done)],
+            "the unreported stop re-arms, then the late done breaks cleanly"
+        );
+    }
+
+    #[test]
     fn it_treats_turn_completed_reported_as_clean_success() {
         // `TurnCompleted{reported:true}` breaks cleanly with no extra event.
         let (result, events, _, _) = drive_over_canned(
@@ -1196,6 +1309,7 @@ mod tests {
                 1,
                 "go".into(),
                 relaxed_watchdog(),
+                false,
                 |_ev: DriveEvent| -> Result<()> { Ok(()) },
                 || {},
             );
@@ -1249,6 +1363,7 @@ mod tests {
                 1,
                 "go".into(),
                 wd_ms(60, LONG_MS, LONG_MS, 3),
+                false,
                 |_ev: DriveEvent| -> Result<()> { Ok(()) },
                 || {},
             );
@@ -1282,11 +1397,13 @@ mod tests {
                 1,
                 "go".into(),
                 wd_ms(LONG_MS, 60, LONG_MS, 3),
+                false,
                 |event: DriveEvent| -> Result<()> {
                     events.borrow_mut().push(match event {
                         DriveEvent::Report(r) => Ev::Report(r.status),
                         DriveEvent::Stalled(_) => Ev::Stalled,
                         DriveEvent::Stopped(id) => Ev::Stopped(id),
+                        DriveEvent::ReArmed(id) => Ev::ReArmed(id),
                     });
                     Ok(())
                 },
@@ -1333,6 +1450,7 @@ mod tests {
                 7,
                 "go".into(),
                 wd_ms(LONG_MS, LONG_MS, 80, 3),
+                false,
                 |_ev: DriveEvent| -> Result<()> { Ok(()) },
                 || {},
             );
@@ -1378,6 +1496,7 @@ mod tests {
                 9,
                 "go".into(),
                 wd_ms(LONG_MS, LONG_MS, 50, 2),
+                false,
                 |_ev: DriveEvent| -> Result<()> { Ok(()) },
                 || {},
             );
@@ -1427,11 +1546,13 @@ mod tests {
                 turn_id,
                 prompt.to_string(),
                 watchdog,
+                false,
                 |event: DriveEvent| -> Result<()> {
                     events.borrow_mut().push(match event {
                         DriveEvent::Report(r) => Ev::Report(r.status),
                         DriveEvent::Stalled(_) => Ev::Stalled,
                         DriveEvent::Stopped(id) => Ev::Stopped(id),
+                        DriveEvent::ReArmed(id) => Ev::ReArmed(id),
                     });
                     Ok(())
                 },
@@ -1564,6 +1685,7 @@ mod tests {
                 1,
                 "go".into(),
                 watchdog,
+                false,
                 |_ev: DriveEvent| -> Result<()> { Ok(()) },
                 || {},
             );

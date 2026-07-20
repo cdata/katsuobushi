@@ -146,6 +146,20 @@ pub const HEARTBEAT_SECS_DEFAULT: u64 = 10;
 /// is unset. Authoritative knob is Nix-driven.
 pub const STOP_GRACE_MS_DEFAULT: u64 = 1500;
 
+/// Fallback cap on how many times the guest auto-nudges (re-prompts) an agent
+/// that ended a turn without a terminal report before resolving it as
+/// `ended-unreported`, when `KATSU_MAX_NUDGES` is unset. Authoritative knob is
+/// Nix-driven. Zero disables nudging (resolve immediately, the pre-nudge
+/// behavior).
+pub const MAX_NUDGES_DEFAULT: u32 = 3;
+
+/// Fallback spacing (milliseconds) between auto-nudges, when
+/// `KATSU_NUDGE_INTERVAL_MS` is unset. Deliberately long relative to
+/// [`STOP_GRACE_MS_DEFAULT`] so an agent genuinely waiting on a background
+/// command is not re-nudged before it can finish. Authoritative knob is
+/// Nix-driven.
+pub const NUDGE_INTERVAL_MS_DEFAULT: u64 = 30_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;

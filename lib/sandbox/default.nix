@@ -217,6 +217,13 @@ let
   deliveryRetries = 3; # max resends, then fail (K)
   readyGateSecs = 60; # wait for SessionReady, then send anyway (G)
   stopGraceMs = 1500; # absorb a late terminal report after Stop
+  # A turn that ends without a terminal report is re-prompted ("auto-nudged")
+  # up to maxNudges times, nudgeIntervalMs apart, before it resolves as
+  # ended-unreported — recovering a forgot-to-report or backgrounded-work stop
+  # without operator intervention. The interval is long (vs. stopGraceMs) so an
+  # agent genuinely waiting on a background build is not re-nudged prematurely.
+  maxNudges = 3; # re-prompt an unreported idle agent this many times
+  nudgeIntervalMs = 30000; # spacing between auto-nudges
 
   secretNames = builtins.attrNames secrets;
 
@@ -496,6 +503,22 @@ let
     - `report blocked "<what you need>"` — you cannot proceed; then wait for the
       next directive.
     - `report info "<note>"` — anything else worth surfacing to the operator.
+
+    **Turn discipline — never end a turn without reporting.** The operator waits
+    on your `report done`/`report blocked`; a turn that ends silently strands it.
+    So, every turn:
+
+    - Run builds, tests, and other long commands in the **foreground**. A
+      foreground command holds your turn open until it returns, which is exactly
+      what you want — the operator sees the turn as live the whole time.
+    - Do **not** background long work (`&`, `run_in_background`) as a way to
+      "wait" for it. If you must background something, you are not done: end the
+      turn with `report working "waiting on <what>"`, and run `report done` only
+      once it has actually finished and you have verified it.
+    - Before you stop, always run exactly one terminal report — `report done` if
+      the work is complete and pushed, or `report blocked` if you cannot proceed.
+      If the operator re-prompts you because you stopped without one, treat that
+      as a reminder to report your real state now.
 
     Do not wait for, or ask for, interactive confirmation — there is no human at
     this terminal. When the operator tells you that you are finished (or to shut
@@ -1041,6 +1064,8 @@ let
         # from the same let-bindings as the spec so the two sides can't drift.
         KATSU_HEARTBEAT_SECS = toString heartbeatSecs;
         KATSU_STOP_GRACE_MS = toString stopGraceMs;
+        KATSU_MAX_NUDGES = toString maxNudges;
+        KATSU_NUDGE_INTERVAL_MS = toString nudgeIntervalMs;
         KATSU_SHARE = shareMount;
       };
 
