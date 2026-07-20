@@ -3,8 +3,9 @@
 //!
 //! On-disk contract (verified against the plugin's `src/parsers/common.ts`):
 //! frontmatter carries `kanban-plugin`; lanes are `## Heading`; cards are
-//! `- [ ] …` list items; the archive is the `***` separator + `## Archive` +
-//! items; settings are a trailing `%% kanban:settings` code-fence block.
+//! `- [ ] …` list items; the archive is the `## Archive` lane (optionally
+//! preceded by a `***`/`---` thematic break, which we treat as decoration —
+//! see `parse`); settings are a trailing `%% kanban:settings` code-fence block.
 //!
 //! Two regions are preserved **verbatim** so nothing a human/Obsidian writes is
 //! lost: the `preamble` (everything up to the first lane — frontmatter and all)
@@ -16,7 +17,12 @@ use super::model::{CardId, Status};
 /// version (current writes `board` but still reads `basic`); we emit the
 /// widest-compatible spelling.
 pub const KANBAN_PLUGIN_VALUE: &str = "basic";
-const ARCHIVE_SEP: &str = "***";
+/// The thematic-break separator emitted before `## Archive`. We write `---`
+/// because that is what a prettier-style formatter normalizes `***` to, so a
+/// CLI rewrite is byte-stable under the repo's `markdown format` gate. Parsing
+/// no longer keys on it (see `parse`) — the `## Archive` heading is the anchor —
+/// so any spelling (`***`, `---`) or its absence is tolerated on read.
+const ARCHIVE_SEP: &str = "---";
 const ARCHIVE_HEADING: &str = "Archive";
 const SETTINGS_MARKER: &str = "%% kanban:settings";
 
@@ -103,11 +109,14 @@ impl Board {
         let lines: Vec<&str> = text.lines().collect();
         let mut i = 0;
 
-        // Preamble: up to the first lane heading, archive separator, or settings.
+        // Preamble: up to the first lane heading or settings. We do NOT break on
+        // a thematic break here — the separator we emit (`---`) is also the
+        // frontmatter delimiter, so keying the preamble on it would truncate at
+        // the frontmatter's opening line.
         let mut preamble = String::new();
         while i < lines.len() {
             let l = lines[i];
-            if is_lane_heading(l) || l.trim_end() == ARCHIVE_SEP || l.starts_with(SETTINGS_MARKER) {
+            if is_lane_heading(l) || l.starts_with(SETTINGS_MARKER) {
                 break;
             }
             preamble.push_str(l);
@@ -115,14 +124,47 @@ impl Board {
             i += 1;
         }
 
-        // Lanes.
+        // Lanes, then the archive. The archive is anchored on the `## Archive`
+        // heading itself — NOT on a preceding `***`/`---` separator, which a
+        // formatter may have rewritten or the board may lack. The separator is
+        // decoration we skip as a stray line. From `## Archive` onward we consume
+        // archived items, skipping duplicate `## Archive` headings (the old
+        // separator-loss append bug, card 5b4df3) so they merge into one archive
+        // on the next write. A following *active-status* lane heading, however,
+        // means the board is out of canonical "archive last" order; we yield back
+        // to lane parsing rather than swallow its live cards into the archive.
         let mut lanes: Vec<Lane> = Vec::new();
+        let mut archive: Vec<Card> = Vec::new();
+        let mut archive_present = false;
         while i < lines.len() {
             let l = lines[i];
-            if l.trim_end() == ARCHIVE_SEP || l.starts_with(SETTINGS_MARKER) {
+            if l.starts_with(SETTINGS_MARKER) {
                 break;
             }
             if let Some((title, max_items)) = lane_heading(l) {
+                if title == ARCHIVE_HEADING {
+                    archive_present = true;
+                    i += 1;
+                    while i < lines.len() && !lines[i].starts_with(SETTINGS_MARKER) {
+                        if let Some((t, _)) = lane_heading(lines[i]) {
+                            // A real active lane after the archive: stop archiving
+                            // and let the outer loop parse it as a lane. Any other
+                            // heading (a duplicate `## Archive`, an unknown lane) is
+                            // archive noise we skip and keep merging.
+                            if t != ARCHIVE_HEADING && Status::from_lane_title(t).is_some() {
+                                break;
+                            }
+                            i += 1;
+                        } else if is_list_item(lines[i]) {
+                            let (card, next) = take_card(&lines, i);
+                            archive.push(card);
+                            i = next;
+                        } else {
+                            i += 1; // blanks, separators
+                        }
+                    }
+                    continue; // resume: settings, EOF, or an active lane we yielded to
+                }
                 lanes.push(Lane {
                     title: title.to_string(),
                     cards: Vec::new(),
@@ -139,25 +181,7 @@ impl Board {
                 i = next;
                 continue;
             }
-            i += 1; // blanks / stray lines between cards
-        }
-
-        // Archive (after `***`, under `## Archive`).
-        let mut archive: Vec<Card> = Vec::new();
-        let mut archive_present = false;
-        if i < lines.len() && lines[i].trim_end() == ARCHIVE_SEP {
-            archive_present = true;
-            i += 1;
-            while i < lines.len() && !lines[i].starts_with(SETTINGS_MARKER) {
-                let l = lines[i];
-                if is_list_item(l) {
-                    let (card, next) = take_card(&lines, i);
-                    archive.push(card);
-                    i = next;
-                    continue;
-                }
-                i += 1; // the `## Archive` heading, blanks
-            }
+            i += 1; // blanks / stray lines, incl. the `***`/`---` archive separator
         }
 
         // Settings: verbatim to EOF.
@@ -308,27 +332,29 @@ impl Board {
     }
 
     /// Serialize back to BOARD.md.
+    ///
+    /// The output is formatter-stable: a board round-tripped through this writer
+    /// and then a prettier-style markdown formatter is byte-identical (card
+    /// 3e9510). The two things that used to drift are handled here — an empty
+    /// lane emits a single blank line (not the `\n\n\n` a formatter collapses),
+    /// and the archive separator is `---` (what prettier normalizes `***` to).
+    /// Verbatim regions (preamble/frontmatter, settings) round-trip unchanged, so
+    /// they stay stable provided the on-disk board was formatted once.
     pub fn to_text(&self) -> String {
         let mut out = String::new();
         out.push_str(self.preamble.trim_end());
         out.push_str("\n\n");
         for lane in &self.lanes {
             match lane.max_items {
-                Some(n) => out.push_str(&format!("## {} ({n})\n\n", lane.title)),
-                None => out.push_str(&format!("## {}\n\n", lane.title)),
+                Some(n) => out.push_str(&format!("## {} ({n})\n", lane.title)),
+                None => out.push_str(&format!("## {}\n", lane.title)),
             }
-            for card in &lane.cards {
-                out.push_str(&card.raw);
-                out.push('\n');
-            }
+            push_cards(&mut out, &lane.cards);
             out.push('\n');
         }
         if self.archive_present || !self.archive.is_empty() {
-            out.push_str(&format!("{ARCHIVE_SEP}\n\n## {ARCHIVE_HEADING}\n\n"));
-            for card in &self.archive {
-                out.push_str(&card.raw);
-                out.push('\n');
-            }
+            out.push_str(&format!("{ARCHIVE_SEP}\n\n## {ARCHIVE_HEADING}\n"));
+            push_cards(&mut out, &self.archive);
             out.push('\n');
         }
         if let Some(settings) = &self.settings {
@@ -348,6 +374,22 @@ pub enum Anchor {
     Bottom,
     Before(CardId),
     After(CardId),
+}
+
+// ---- serialization helpers --------------------------------------------------
+
+/// Emit a lane/archive's cards under an already-written `## Heading\n`: a single
+/// blank line between the heading and the first card, then one card per line.
+/// An empty lane emits nothing, so the heading is followed only by the caller's
+/// trailing blank line — never the double blank a formatter would collapse.
+fn push_cards(out: &mut String, cards: &[Card]) {
+    for (idx, card) in cards.iter().enumerate() {
+        if idx == 0 {
+            out.push('\n');
+        }
+        out.push_str(&card.raw);
+        out.push('\n');
+    }
 }
 
 // ---- line classifiers -------------------------------------------------------
@@ -418,7 +460,10 @@ mod tests {
         CardId::parse(s).unwrap()
     }
 
-    const BOARD: &str = "---\n\nkanban-plugin: basic\n\n---\n\n## To-do\n\n- [ ] [[a3f7b2]]\n- [ ] [[1a2b3c]]\n\n## In Progress\n\n- [ ] [[ff09ab]]\n\n## Needs Review\n\n## Ready\n\n\n%% kanban:settings\n```\n{\"kanban-plugin\":\"basic\"}\n```\n%%\n";
+    // Prettier-canonical: single-blank frontmatter, single blank lines between
+    // lanes, blanks around the settings code-fence. Kept byte-exact so the
+    // golden snapshots below double as a formatter-stability guard.
+    const BOARD: &str = "---\nkanban-plugin: basic\n---\n\n## To-do\n\n- [ ] [[a3f7b2]]\n- [ ] [[1a2b3c]]\n\n## In Progress\n\n- [ ] [[ff09ab]]\n\n## Needs Review\n\n## Ready\n\n%% kanban:settings\n\n```\n{\"kanban-plugin\":\"basic\"}\n```\n\n%%\n";
 
     #[test]
     fn parses_lanes_cards_and_settings() {
@@ -475,9 +520,9 @@ mod tests {
         assert_eq!(b.status_of(&id("ff09ab")), None);
         assert_eq!(b.archived().len(), 1);
         assert!(b.archived()[0].raw.contains("- [x]"));
-        // The archive section now serializes.
-        assert!(b.to_text().contains("***"));
-        assert!(b.to_text().contains("## Archive"));
+        // The archive section now serializes, under a `---` separator (the
+        // formatter-stable spelling) immediately before the `## Archive` heading.
+        assert!(b.to_text().contains("\n---\n\n## Archive\n"));
     }
 
     #[test]
@@ -542,7 +587,9 @@ mod tests {
     }
 
     /// A board that already has a populated archive plus a card in a lane.
-    const POPULATED_ARCHIVE: &str = "---\n\nkanban-plugin: basic\n\n---\n\n## To-do\n\n## In Progress\n\n- [ ] [[ff09ab]]\n\n## Needs Review\n\n## Ready\n\n***\n\n## Archive\n\n- [x] [[dddddd]]\n\n%% kanban:settings\n```\n{\"kanban-plugin\":\"basic\"}\n```\n%%\n";
+    /// Prettier-canonical, including the `---` archive separator prettier
+    /// normalizes `***` to.
+    const POPULATED_ARCHIVE: &str = "---\nkanban-plugin: basic\n---\n\n## To-do\n\n## In Progress\n\n- [ ] [[ff09ab]]\n\n## Needs Review\n\n## Ready\n\n---\n\n## Archive\n\n- [x] [[dddddd]]\n\n%% kanban:settings\n\n```\n{\"kanban-plugin\":\"basic\"}\n```\n\n%%\n";
 
     #[test]
     fn existing_archive_content_survives_a_mutation() {
@@ -561,6 +608,96 @@ mod tests {
         );
         // And the settings block round-trips.
         assert!(b.to_text().contains("%% kanban:settings"));
+    }
+
+    // ---- archive-separator tolerance (cards 5b4df3 / 3e9510) -------------------
+
+    /// A board whose `## Archive` heading has NO thematic-break separator before
+    /// it — exactly what a formatter leaves when it strips/rewrites the `***`.
+    const ARCHIVE_NO_SEP: &str = "---\nkanban-plugin: basic\n---\n\n## To-do\n\n- [ ] [[ff09ab]]\n\n## In Progress\n\n## Needs Review\n\n## Ready\n\n## Archive\n\n- [x] [[dddddd]]\n\n%% kanban:settings\n\n```\n{}\n```\n\n%%\n";
+
+    #[test]
+    fn archive_is_recognized_without_a_separator() {
+        let b = Board::parse(ARCHIVE_NO_SEP);
+        // The `## Archive` heading anchors the archive even with no `***`/`---`.
+        assert_eq!(b.archived().len(), 1);
+        assert_eq!(b.archived()[0].id(), Some(id("dddddd")));
+        // ...and it is NOT mistaken for an active lane.
+        assert!(!b.lanes().iter().any(|l| l.title == "Archive"));
+    }
+
+    #[test]
+    fn accepting_into_a_separatorless_archive_does_not_duplicate_it() {
+        let mut b = Board::parse(ARCHIVE_NO_SEP);
+        assert!(b.move_card(&id("ff09ab"), st("accepted")));
+        let out = b.to_text();
+        // Exactly one Archive section, holding both the old and new card, and the
+        // separator is restored to the formatter-stable `---`.
+        assert_eq!(out.matches("## Archive").count(), 1);
+        assert!(out.contains("\n---\n\n## Archive\n"));
+        let archived: Vec<_> = Board::parse(&out).archived().iter().filter_map(|c| c.id()).collect();
+        assert!(archived.contains(&id("dddddd")) && archived.contains(&id("ff09ab")));
+    }
+
+    #[test]
+    fn duplicate_archive_sections_merge_on_rewrite() {
+        // A board corrupted by the old append bug: two `## Archive` sections.
+        let corrupt = "---\nkanban-plugin: basic\n---\n\n## To-do\n\n## In Progress\n\n## Needs Review\n\n## Ready\n\n---\n\n## Archive\n\n- [x] [[aaaaaa]]\n\n---\n\n## Archive\n\n- [x] [[bbbbbb]]\n\n%% kanban:settings\n\n```\n{}\n```\n\n%%\n";
+        let b = Board::parse(corrupt);
+        // Both stranded cards are recovered into the single archive.
+        let archived: Vec<_> = b.archived().iter().filter_map(|c| c.id()).collect();
+        assert!(archived.contains(&id("aaaaaa")) && archived.contains(&id("bbbbbb")));
+        // ...and re-emit collapses to exactly one Archive section.
+        assert_eq!(b.to_text().matches("## Archive").count(), 1);
+    }
+
+    #[test]
+    fn an_active_lane_after_archive_is_not_swallowed() {
+        // Out-of-canonical-order board: a live `## Ready` card sits below the
+        // `## Archive`. Anchoring on the heading must not archive the live card.
+        let out_of_order = "---\nkanban-plugin: basic\n---\n\n## To-do\n\n## In Progress\n\n## Needs Review\n\n---\n\n## Archive\n\n- [x] [[dddddd]]\n\n## Ready\n\n- [ ] [[eeeeee]]\n\n%% kanban:settings\n\n```\n{}\n```\n\n%%\n";
+        let b = Board::parse(out_of_order);
+        // The live card stays in its active lane, not the archive.
+        assert_eq!(b.status_of(&id("eeeeee")), Some(st("ready")));
+        assert_eq!(b.archived().iter().filter_map(|c| c.id()).collect::<Vec<_>>(), vec![id("dddddd")]);
+    }
+
+    #[test]
+    fn old_star_separator_is_read_and_rewritten_stable() {
+        // A pre-existing board still using `***`; we read it and emit `---`.
+        let starred = POPULATED_ARCHIVE.replace("\n---\n\n## Archive", "\n***\n\n## Archive");
+        let b = Board::parse(&starred);
+        assert_eq!(b.archived().len(), 1);
+        assert!(!b.to_text().contains("***"));
+        assert!(b.to_text().contains("\n---\n\n## Archive\n"));
+    }
+
+    // ---- formatter stability (card 3e9510) -------------------------------------
+
+    #[test]
+    fn no_lane_ever_emits_a_double_blank_line() {
+        // Empty lanes are the classic drift source; a triple newline is the
+        // signature of a blank line a prettier-style formatter would collapse.
+        for src in [BOARD, POPULATED_ARCHIVE, ARCHIVE_NO_SEP] {
+            let out = Board::parse(src).to_text();
+            assert!(
+                !out.contains("\n\n\n"),
+                "emitted board has a collapsible double blank line:\n{out}"
+            );
+        }
+        assert!(!crate::project::layout::initial_board().contains("\n\n\n"));
+    }
+
+    #[test]
+    fn emit_is_idempotent_for_canonical_boards() {
+        // A canonical board round-tripped through the writer is byte-identical —
+        // the property the prettier gate needs (drift-free CLI rewrites).
+        for src in [BOARD, POPULATED_ARCHIVE] {
+            let once = Board::parse(src).to_text();
+            let twice = Board::parse(&once).to_text();
+            assert_eq!(once, twice, "writer is not idempotent for:\n{src}");
+            assert_eq!(once, src, "canonical input is not preserved byte-for-byte");
+        }
     }
 
     // ---- golden byte-exact snapshots of BOARD.md mutations ---------------------

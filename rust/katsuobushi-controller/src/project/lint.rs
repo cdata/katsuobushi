@@ -94,6 +94,38 @@ pub fn run(fs: &dyn Fs, paths: &Paths, renderer: &Renderer, fix: bool) -> Result
         }
     }
 
+    // 1b. Structural lane corruption (card 5b4df3). A duplicate heading is
+    // unambiguous corruption — `cards_in` reads only the first, so cards in the
+    // rest are dropped on the next CLI rewrite — so it is an error. A lane the
+    // tool doesn't recognize is only a *warning*: its cards are unreachable by
+    // `status set` and hidden from `status`, but a deliberate extra lane (an
+    // "Icebox") is a legitimate Obsidian arrangement the parser preserves, so it
+    // must not hard-fail the `lint` gate.
+    let mut lane_counts: HashMap<&str, u32> = HashMap::new();
+    for lane in board.lanes() {
+        *lane_counts.entry(lane.title.as_str()).or_default() += 1;
+    }
+    for (title, n) in &lane_counts {
+        if *n > 1 {
+            issues.push(error(
+                "duplicate-lane",
+                format!("board has {n} '{title}' lane headings; consolidate them into one (drag in Obsidian)"),
+            ));
+        }
+    }
+    for lane in board.lanes() {
+        if !lane.cards.is_empty() && Status::from_lane_title(&lane.title).is_none() {
+            issues.push(warn(
+                "unrecognized-lane",
+                format!(
+                    "lane '{}' is not a known status; its {} card(s) are unreachable by `status set` and hidden from `status`",
+                    lane.title,
+                    lane.cards.len()
+                ),
+            ));
+        }
+    }
+
     // 2. Settings block.
     if !board_text.contains("%% kanban:settings") {
         issues.push(warn(
@@ -262,6 +294,30 @@ mod tests {
         run(&fs, &paths, &r, true).unwrap();
         let board = Board::parse(&fs.get("/b/BOARD.md").unwrap());
         assert!(board.cards_in(Status::Todo).is_empty());
+    }
+
+    #[test]
+    fn duplicate_lane_heading_is_an_error() {
+        // Two `## To-do` lanes — the shape the old separator-loss bug produced.
+        let board = "---\nkanban-plugin: basic\n---\n\n## To-do\n\n## To-do\n\n## In Progress\n\n## Needs Review\n\n## Ready\n\n%% kanban:settings\n\n```\n{}\n```\n\n%%\n";
+        let fs = FakeFs::new().with_file("/b/BOARD.md", board);
+        let paths = Paths::new("/b");
+        assert!(run(&fs, &paths, &Renderer::new(true, false), false).is_err());
+    }
+
+    #[test]
+    fn card_in_an_unrecognized_lane_is_a_warning_not_an_error() {
+        // A card in a lane the tool doesn't know (a deliberate "Icebox", or a
+        // mangled lane) is surfaced but must not hard-fail the gate, since an
+        // extra Obsidian lane is a legitimate, parser-preserved arrangement.
+        let board = "---\nkanban-plugin: basic\n---\n\n## To-do\n\n## In Progress\n\n## Needs Review\n\n## Ready\n\n## Icebox\n\n- [ ] [[a3f7b2]]\n\n%% kanban:settings\n\n```\n{}\n```\n\n%%\n";
+        let fs = FakeFs::new().with_file("/b/BOARD.md", board).with_file(
+            "/b/issues/a3f7b2.md",
+            "---\nid: a3f7b2\ntitle: X\ntype: feature\nblocked_by: []\n---\n",
+        );
+        let paths = Paths::new("/b");
+        // Warning only -> exit 0.
+        assert!(run(&fs, &paths, &Renderer::new(true, false), false).is_ok());
     }
 
     #[test]
