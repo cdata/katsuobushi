@@ -222,6 +222,13 @@ returns when the agent reports a terminal status:
 - `blocked` — it needs something; address it and send the next prompt.
 - `info` — anything else worth surfacing.
 
+If the agent ends its turn **without** a terminal report, the command returns
+with a "stopped without reporting" warning. Add **`--until-report`**
+(`sandbox prompt <name> "…" --until-report`) to stay armed instead: it keeps
+waiting for a real `done`/`blocked` — useful when a turn kicks off a long
+background command. The guest also auto-nudges an unreported idle agent a few
+times on its own, so most silent stops recover without you re-prompting.
+
 **Prompting a paused instance auto-starts it.** `sandbox stop <name>` on a named
 instance _pauses_ it: the VM powers off but its state dir (and branch) are kept.
 If you `sandbox prompt` a paused instance, the command restarts it for you —

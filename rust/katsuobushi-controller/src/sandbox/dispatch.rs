@@ -29,7 +29,14 @@ use crate::Global;
 /// Optional per-project prelude, prepended to every dispatched directive.
 const INSTRUCTIONS_FILE: &str = ".dispatch-instructions.md";
 
-pub fn run(config: &Path, card: &str, board_dir: &Path, force: bool, global: Global) -> Result<()> {
+pub fn run(
+    config: &Path,
+    card: &str,
+    board_dir: &Path,
+    force: bool,
+    until_report: bool,
+    global: Global,
+) -> Result<()> {
     let fs = RealFs;
     let paths = Paths::new(board_dir.to_path_buf());
 
@@ -39,7 +46,14 @@ pub fn run(config: &Path, card: &str, board_dir: &Path, force: bool, global: Glo
 
     let name = format!("card-{id}");
     eprintln!("dispatching {id} -> agent sandbox '{name}'");
-    super::start::run(config, true, Some(name), Some(directive), global)
+    super::start::run(
+        config,
+        true,
+        Some(name),
+        Some(directive),
+        until_report,
+        global,
+    )
 }
 
 /// Guard → compose → claim, returning `(resolved id, directive)`. Compose runs

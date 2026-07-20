@@ -28,9 +28,21 @@
 //! hook lines). The decision core ([`Session::step`]) is a pure transition
 //! function over an ordered event stream — no timers, no sockets — so every
 //! interleaving (including the grace window that disambiguates a `Stop` with vs.
-//! without a terminal report, /) is unit-testable. Every transition is
+//! without a terminal report, and the auto-nudge loop that re-prompts an agent
+//! which stopped unreported) is unit-testable. Every transition is
 //! persisted to `${KATSU_SHARE}/turn-state.json`, the durable record
 //! `sandbox status` reads out-of-band, closing the unattended gap.
+//!
+//! ## Auto-nudge
+//!
+//! A turn that ends without a terminal report is not resolved immediately.
+//! After a short grace (a late report may still land), the server re-prompts the
+//! agent — "you stopped without reporting; report your real state" — up to
+//! `max_nudges` times, `nudge_interval` apart, before finally resolving it as
+//! `ended-unreported`. This recovers the two common ways a turn ends silently:
+//! the agent forgot to report, or it backgrounded work and yielded the turn.
+//! The nudge decision lives in the pure core; only the injection + timer are
+//! async ([`spawn_grace`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -40,7 +52,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Context as _;
 use katsuobushi_sandbox_protocol::{
     GuestLocalLine, GuestMessage, HookEvent, HostMessage, Report, Status, HEARTBEAT_SECS_DEFAULT,
-    STOP_GRACE_MS_DEFAULT, VMADDR_CID_HOST, VSOCK_PORT,
+    MAX_NUDGES_DEFAULT, NUDGE_INTERVAL_MS_DEFAULT, STOP_GRACE_MS_DEFAULT, VMADDR_CID_HOST,
+    VSOCK_PORT,
 };
 use rmcp::model::{
     CustomNotification, Implementation, ServerCapabilities, ServerInfo, ServerNotification,
@@ -119,6 +132,10 @@ struct Turn {
     accepted: bool,
     terminal_reported: bool,
     ended: bool,
+    /// How many auto-nudges have been sent for this turn since it first ended
+    /// without a terminal report. Bounded by [`Session::max_nudges`]; once it is
+    /// reached the turn resolves as `ended-unreported`.
+    nudges: u32,
 }
 
 /// Shared turn-state, behind one mutex, read/written by both the control task
@@ -132,6 +149,11 @@ struct Session {
     turn: Option<Turn>,
     ready_latched: bool,
     state: TurnState,
+    /// Cap on auto-nudges for a turn that ends without a terminal report.
+    /// `0` (the `Default`) disables nudging — a grace expiry resolves the turn
+    /// immediately, the pre-nudge behavior — which keeps the many tests that
+    /// build `Session::default()` on the old single-grace path.
+    max_nudges: u32,
 }
 
 /// An ordered event the state machine consumes. The grace window is modeled as
@@ -163,6 +185,21 @@ enum PersistMode {
     Throttled,
 }
 
+/// Which delay the async layer should wait before the [`Event::GraceExpired`]
+/// check it is asked to schedule. The state machine stays clock-free by naming
+/// the *kind* of wait, not a duration:
+///
+/// - [`Initial`](GraceKind::Initial): the short post-`Stop` window that absorbs
+///   a late terminal report (the original grace, `stop_grace`).
+/// - [`Nudge`](GraceKind::Nudge): the longer spacing between auto-nudges
+///   (`nudge_interval`), so an agent working a background command is not
+///   re-nudged before it can finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraceKind {
+    Initial,
+    Nudge,
+}
+
 /// The side effects [`Session::step`] asks the async layer to perform. Keeping
 /// them data (not IO) is what makes the transition core pure.
 #[derive(Debug, Default)]
@@ -171,8 +208,12 @@ struct Outcome {
     inject: bool,
     /// `GuestMessage`s to forward to the host (no-ops when none is attached).
     messages: Vec<GuestMessage>,
-    /// Spawn the grace-window delayed check for this turn id.
-    schedule_grace: Option<u64>,
+    /// Spawn a delayed [`Event::GraceExpired`] check for this turn id, after a
+    /// wait of the given [`GraceKind`].
+    schedule_grace: Option<(u64, GraceKind)>,
+    /// Inject an auto-nudge (a re-prompt) for `(turn_id, nudge_number)` into the
+    /// live session before the next grace elapses.
+    inject_nudge: Option<(u64, u32)>,
     /// Persist the snapshot below, if set.
     persist: Option<PersistMode>,
     /// The `TurnState` to write (cloned when `persist` is set).
@@ -211,6 +252,7 @@ impl Session {
                     accepted: false,
                     terminal_reported: false,
                     ended: false,
+                    nudges: 0,
                 });
                 self.state = TurnState {
                     turn_state_version: 1,
@@ -334,13 +376,17 @@ impl Session {
                             reported: true,
                         });
                         clear_turn = true;
-                    } else {
-                        // Stop with no terminal report yet → arm the grace window
-                        //; phase stays in-flight until it resolves.
+                    } else if !t.ended {
+                        // First Stop with no terminal report → arm the grace
+                        // window; phase stays in-flight until it resolves.
                         t.ended = true;
                         self.state.ended_at = Some(now.to_string());
-                        out.schedule_grace = Some(id);
+                        out.schedule_grace = Some((id, GraceKind::Initial));
                     }
+                    // else: a later Stop while already ended (the agent replied to
+                    // a nudge and stopped again without reporting). The nudge loop
+                    // already owns resolution via its own timer — do NOT arm a
+                    // second grace, which would double-count nudges.
                     out.persist = Some(PersistMode::Force);
                 }
                 if clear_turn {
@@ -348,24 +394,40 @@ impl Session {
                 }
             }
             Event::GraceExpired { turn_id } => {
-                // Re-check under the lock: only resolve if the *same* turn
-                // is still ended and still unreported — otherwise a late terminal
-                // report already cleared it, or a new turn superseded it.
-                let resolve = self
+                // Re-check under the lock: only act if the *same* turn is still
+                // ended and still unreported — otherwise a late terminal report
+                // already cleared it, or a new turn superseded it.
+                let still_unreported = self
                     .turn
                     .as_ref()
                     .is_some_and(|t| t.id == turn_id && t.ended && !t.terminal_reported);
-                if resolve {
-                    self.state.phase = Phase::EndedUnreported;
-                    if self.state.ended_at.is_none() {
-                        self.state.ended_at = Some(now.to_string());
+                if still_unreported {
+                    let max_nudges = self.max_nudges;
+                    let t = self.turn.as_mut().expect("checked is_some_and above");
+                    if t.nudges < max_nudges {
+                        // Budget remains: nudge the agent and re-arm a longer
+                        // grace so it has time to report (or finish background
+                        // work). Phase stays in-flight — the turn is not resolved.
+                        t.nudges += 1;
+                        let n = t.nudges;
+                        self.state.last_activity_at = now.to_string();
+                        out.inject_nudge = Some((turn_id, n));
+                        out.schedule_grace = Some((turn_id, GraceKind::Nudge));
+                        out.persist = Some(PersistMode::Force);
+                    } else {
+                        // Nudges exhausted: resolve as ended-unreported, the same
+                        // verdict the single-grace path produced before nudging.
+                        self.state.phase = Phase::EndedUnreported;
+                        if self.state.ended_at.is_none() {
+                            self.state.ended_at = Some(now.to_string());
+                        }
+                        out.messages.push(GuestMessage::TurnCompleted {
+                            turn_id,
+                            reported: false,
+                        });
+                        self.turn = None;
+                        out.persist = Some(PersistMode::Force);
                     }
-                    out.messages.push(GuestMessage::TurnCompleted {
-                        turn_id,
-                        reported: false,
-                    });
-                    self.turn = None;
-                    out.persist = Some(PersistMode::Force);
                 }
             }
         }
@@ -384,6 +446,15 @@ struct Control {
     session: Mutex<Session>,
     share: PathBuf,
     stop_grace: Duration,
+    /// Spacing between auto-nudges (the `Nudge` grace kind). `None` in unit
+    /// tests, where the pure state machine is driven directly without timers.
+    nudge_interval: Duration,
+    /// Cap on auto-nudges; also stamped onto each nudge's "n/N" reminder text.
+    max_nudges: u32,
+    /// The rmcp peer used to inject auto-nudge turns from the grace-timer task.
+    /// `None` in unit tests (no live Claude session), where nudging is exercised
+    /// through the pure state machine, not real injection.
+    peer: Option<Peer<RoleServer>>,
     last_persist: Mutex<Option<Instant>>,
 }
 
@@ -407,20 +478,65 @@ async fn send_and_persist(ctl: &Arc<Control>, outcome: &Outcome) {
     }
 }
 
-/// Apply an [`Outcome`], spawning the grace-window delayed check if asked.
-/// `GraceExpired` never schedules another grace, so the spawned task uses the
-/// non-recursive [`send_and_persist`] directly.
+/// Apply an [`Outcome`]: forward + persist, inject any auto-nudge, and — if the
+/// machine asked to schedule a grace check — spawn the grace-timer loop.
 async fn execute_outcome(ctl: &Arc<Control>, outcome: Outcome) {
     send_and_persist(ctl, &outcome).await;
-    if let Some(turn_id) = outcome.schedule_grace {
-        let ctl = ctl.clone();
-        let grace = ctl.stop_grace;
-        tokio::spawn(async move {
-            tokio::time::sleep(grace).await;
+    inject_nudge_if_any(ctl, &outcome).await;
+    if let Some((turn_id, kind)) = outcome.schedule_grace {
+        spawn_grace(ctl.clone(), turn_id, kind);
+    }
+}
+
+/// The grace-timer loop for one turn. Sleeps the delay for `kind`, drives the
+/// [`Event::GraceExpired`] check, and applies the result. A nudge re-arms the
+/// loop *inline* (the machine returns another `schedule_grace`), so the whole
+/// bounded nudge sequence — up to `max_nudges` re-prompts, then the
+/// `ended-unreported` resolution — runs in this one task without recursion.
+/// A terminal report arriving mid-loop clears the turn, so the next
+/// `GraceExpired` is a no-op and the loop exits.
+fn spawn_grace(ctl: Arc<Control>, turn_id: u64, mut kind: GraceKind) {
+    tokio::spawn(async move {
+        loop {
+            let delay = match kind {
+                GraceKind::Initial => ctl.stop_grace,
+                GraceKind::Nudge => ctl.nudge_interval,
+            };
+            tokio::time::sleep(delay).await;
             let out = drive_event(&ctl, Event::GraceExpired { turn_id }).await;
             send_and_persist(&ctl, &out).await;
-        });
+            inject_nudge_if_any(&ctl, &out).await;
+            match out.schedule_grace {
+                Some((_, next)) => kind = next, // re-arm inline for the next nudge
+                None => break,
+            }
+        }
+    });
+}
+
+/// Inject an auto-nudge turn into the live session if the outcome asked for one.
+/// Best-effort: a missing peer (unit tests) or a send failure is logged, never
+/// fatal — the grace loop's own timer still bounds the turn.
+async fn inject_nudge_if_any(ctl: &Arc<Control>, outcome: &Outcome) {
+    if let (Some((turn_id, n)), Some(peer)) = (outcome.inject_nudge, ctl.peer.as_ref()) {
+        let text = nudge_text(turn_id, n, ctl.max_nudges);
+        if let Err(e) = inject_prompt(peer, turn_id, &text).await {
+            eprintln!("katsuobushi-control: auto-nudge inject failed: {e:#}");
+        }
     }
+}
+
+/// The re-prompt text for the `n`-th auto-nudge of an agent that stopped without
+/// a terminal report. Mirrors the always-on agent contract's turn-discipline
+/// rules so the agent knows exactly which report to run.
+fn nudge_text(turn_id: u64, n: u32, max: u32) -> String {
+    format!(
+        "You ended turn {turn_id} without a terminal report (auto-nudge {n}/{max}). \
+         Report your real state now: if the work is complete and pushed, run \
+         `report done \"<summary>\"`; if you are waiting on a background command, \
+         wait for it to finish and verify it, then `report done`; if you cannot \
+         proceed, run `report blocked \"<what you need>\"`."
+    )
 }
 
 /// Atomically write `turn-state.json` to the share (temp + rename; 9p2000.L
@@ -809,15 +925,26 @@ async fn main() -> anyhow::Result<()> {
     let host: HostWriter = Arc::new(Mutex::new(None));
     let heartbeat_secs = env_u64("KATSU_HEARTBEAT_SECS", HEARTBEAT_SECS_DEFAULT).max(1);
     let stop_grace = Duration::from_millis(env_u64("KATSU_STOP_GRACE_MS", STOP_GRACE_MS_DEFAULT));
+    let max_nudges = env_u64("KATSU_MAX_NUDGES", u64::from(MAX_NUDGES_DEFAULT)) as u32;
+    let nudge_interval = Duration::from_millis(env_u64(
+        "KATSU_NUDGE_INTERVAL_MS",
+        NUDGE_INTERVAL_MS_DEFAULT,
+    ));
     let share = PathBuf::from(
         std::env::var("KATSU_SHARE").unwrap_or_else(|_| "/mnt/katsuobushi".to_string()),
     );
 
     let ctl = Arc::new(Control {
         host: host.clone(),
-        session: Mutex::new(Session::default()),
+        session: Mutex::new(Session {
+            max_nudges,
+            ..Default::default()
+        }),
         share,
         stop_grace,
+        nudge_interval,
+        max_nudges,
+        peer: Some(peer.clone()),
         last_persist: Mutex::new(None),
     });
 
@@ -1151,7 +1278,7 @@ mod tests {
         step(&mut s, Event::Prompt { turn_id: 9 });
         let out = step(&mut s, Event::Hook(HookEvent::TurnEnded));
         // Stop with no terminal report: grace armed, no verdict yet.
-        assert_eq!(out.schedule_grace, Some(9));
+        assert_eq!(out.schedule_grace, Some((9, GraceKind::Initial)));
         assert!(s.turn.as_ref().unwrap().ended);
         // Phase stays in-flight until the grace window resolves.
         assert_eq!(s.state.phase, Phase::InFlight);
@@ -1163,6 +1290,8 @@ mod tests {
 
     #[test]
     fn it_resolves_ended_unreported_when_the_grace_window_closes() {
+        // Default session ⇒ max_nudges 0 ⇒ nudging disabled: a grace expiry
+        // resolves immediately, the pre-nudge behavior.
         let mut s = Session::default();
         step(&mut s, Event::Prompt { turn_id: 9 });
         step(&mut s, Event::Hook(HookEvent::TurnEnded));
@@ -1176,6 +1305,96 @@ mod tests {
         ));
         assert_eq!(s.state.phase, Phase::EndedUnreported);
         assert!(s.turn.is_none());
+    }
+
+    /// A session that auto-nudges up to `max` times before resolving.
+    fn nudging_session(max: u32) -> Session {
+        Session {
+            max_nudges: max,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn it_nudges_up_to_the_cap_then_resolves_ended_unreported() {
+        let mut s = nudging_session(2);
+        step(&mut s, Event::Prompt { turn_id: 9 });
+        // First Stop arms the initial grace; no nudge yet.
+        let armed = step(&mut s, Event::Hook(HookEvent::TurnEnded));
+        assert_eq!(armed.schedule_grace, Some((9, GraceKind::Initial)));
+        assert!(armed.inject_nudge.is_none());
+
+        // Grace #1 → nudge 1/2, re-arm as a Nudge grace, no verdict yet.
+        let n1 = step(&mut s, Event::GraceExpired { turn_id: 9 });
+        assert_eq!(n1.inject_nudge, Some((9, 1)));
+        assert_eq!(n1.schedule_grace, Some((9, GraceKind::Nudge)));
+        assert!(!n1
+            .messages
+            .iter()
+            .any(|m| matches!(m, GuestMessage::TurnCompleted { .. })));
+        assert_eq!(s.state.phase, Phase::InFlight);
+
+        // Grace #2 → nudge 2/2.
+        let n2 = step(&mut s, Event::GraceExpired { turn_id: 9 });
+        assert_eq!(n2.inject_nudge, Some((9, 2)));
+        assert_eq!(n2.schedule_grace, Some((9, GraceKind::Nudge)));
+
+        // Grace #3 → cap reached: resolve ended-unreported, no further nudge.
+        let done = step(&mut s, Event::GraceExpired { turn_id: 9 });
+        assert!(done.inject_nudge.is_none());
+        assert!(done.schedule_grace.is_none());
+        assert!(matches!(
+            done.messages.first(),
+            Some(GuestMessage::TurnCompleted {
+                turn_id: 9,
+                reported: false
+            })
+        ));
+        assert_eq!(s.state.phase, Phase::EndedUnreported);
+        assert!(s.turn.is_none());
+    }
+
+    #[test]
+    fn it_stops_nudging_when_a_late_terminal_report_arrives() {
+        let mut s = nudging_session(3);
+        step(&mut s, Event::Prompt { turn_id: 9 });
+        step(&mut s, Event::Hook(HookEvent::TurnEnded));
+        let n1 = step(&mut s, Event::GraceExpired { turn_id: 9 });
+        assert_eq!(n1.inject_nudge, Some((9, 1)));
+
+        // The agent finally reports done (e.g. its background build finished).
+        let out = step(&mut s, done());
+        assert!(out.messages.iter().any(|m| matches!(
+            m,
+            GuestMessage::TurnCompleted {
+                turn_id: 9,
+                reported: true
+            }
+        )));
+        assert_eq!(s.state.phase, Phase::EndedOk);
+        assert!(s.turn.is_none());
+
+        // The pending grace timer fires once more but the turn is gone — no-op.
+        let stale = step(&mut s, Event::GraceExpired { turn_id: 9 });
+        assert!(stale.inject_nudge.is_none());
+        assert!(stale.schedule_grace.is_none());
+        assert!(stale.messages.is_empty());
+    }
+
+    #[test]
+    fn it_does_not_double_arm_grace_on_a_second_stop_during_the_nudge_loop() {
+        let mut s = nudging_session(3);
+        step(&mut s, Event::Prompt { turn_id: 9 });
+        step(&mut s, Event::Hook(HookEvent::TurnEnded)); // initial grace
+        step(&mut s, Event::GraceExpired { turn_id: 9 }); // nudge 1, re-arm
+
+        // The agent replies to the nudge and stops again without reporting. The
+        // nudge loop's own timer owns resolution, so this second Stop must NOT
+        // arm a competing grace (which would double-count nudges).
+        let out = step(&mut s, Event::Hook(HookEvent::TurnEnded));
+        assert!(out.schedule_grace.is_none());
+        assert_eq!(s.turn.as_ref().unwrap().nudges, 1, "nudge count unchanged");
+        assert_eq!(s.state.phase, Phase::InFlight);
     }
 
     #[test]
@@ -1269,11 +1488,17 @@ mod tests {
     }
 
     fn test_control(share: PathBuf, stop_grace: Duration) -> Arc<Control> {
+        // Nudging disabled (max_nudges 0, no peer): these async tests exercise
+        // the single-grace persistence path. The nudge *decision* logic is
+        // covered by the pure-machine tests, which need no peer or timers.
         Arc::new(Control {
             host: Arc::new(Mutex::new(None)),
             session: Mutex::new(Session::default()),
             share,
             stop_grace,
+            nudge_interval: Duration::from_millis(10),
+            max_nudges: 0,
+            peer: None,
             last_persist: Mutex::new(None),
         })
     }

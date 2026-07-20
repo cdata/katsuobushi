@@ -78,6 +78,9 @@ struct Plan {
     seed: Seed,
     /// The agent-mode initial prompt to tail-call `prompt` with.
     prompt: Option<String>,
+    /// Pass `--until-report` to the `prompt` tail-call so the first turn stays
+    /// armed across an unreported turn-end. Only meaningful with `prompt`.
+    until_report: bool,
     /// The resolved GPU ladder verdict when graphics is enabled, else `None`.
     /// Decided here (the one graphics probe) so both the recipe and the persisted
     /// `instance.json` read the *same* resolution; never holds `Unavailable` (that
@@ -106,6 +109,7 @@ pub fn run(
     agent: bool,
     name: Option<String>,
     prompt: Option<String>,
+    until_report: bool,
     global: Global,
 ) -> Result<()> {
     let spec = load_spec(config)?;
@@ -130,6 +134,7 @@ pub fn run(
         agent,
         name.as_deref(),
         prompt.as_deref(),
+        until_report,
         &clock,
         pid,
     )?;
@@ -177,6 +182,7 @@ fn decide(
     agent: bool,
     name: Option<&str>,
     prompt: Option<&str>,
+    until_report: bool,
     clock: &str,
     pid: u32,
 ) -> Result<Plan> {
@@ -254,6 +260,7 @@ fn decide(
         clone_mirror: !mirror_exists,
         seed,
         prompt: prompt.map(str::to_string),
+        until_report,
         gpu,
     })
 }
@@ -861,8 +868,16 @@ fn agent_tail(
             // in a child shell that need not have the controller on its PATH. A
             // store path has no shell-special characters, so it is emitted
             // unquoted — keeping the bare-name test fixture's snapshot stable.
+            // `--until-report` (when set) rides through to the tail-called
+            // `prompt` so a dispatched turn keeps the same armed-until-report
+            // semantics as a direct `sandbox prompt --until-report`.
+            let until = if plan.until_report {
+                " --until-report"
+            } else {
+                ""
+            };
             r.line(format!(
-                "exec {} sandbox --config {} prompt \"{}\" {}",
+                "exec {} sandbox --config {} prompt \"{}\"{until} {}",
                 spec.tools.katsuctl.display(),
                 qp(config),
                 plan.name,
@@ -1080,6 +1095,7 @@ mod tests {
             clone_mirror: true,
             seed: Seed::Fresh("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0".into()),
             prompt: None,
+            until_report: false,
             gpu: None,
         }
     }
@@ -1183,6 +1199,7 @@ mod tests {
             true,
             Some("evil\";id"),
             None,
+            false,
             "20260627-120000",
             7,
         )
@@ -1232,6 +1249,7 @@ mod tests {
             false,
             None,
             None,
+            false,
             "20260627-120000",
             7,
         )
@@ -1265,6 +1283,7 @@ mod tests {
             true,
             None,
             None,
+            false,
             "20260627-120000",
             7,
         )
@@ -1315,6 +1334,7 @@ mod tests {
             false,
             None,
             None,
+            false,
             "20260627-120000",
             7,
         )
@@ -1465,6 +1485,28 @@ mod tests {
     }
 
     #[test]
+    fn it_threads_until_report_into_the_prompt_tail_call() {
+        // `--until-report` rides through to the tail-called `prompt` so a
+        // dispatched turn keeps the armed-until-report semantics. Absent by
+        // default (so the snapshots above stay byte-stable).
+        let spec = spec_with(vec![env_secret()], vec![], false);
+        let mut p = plan("card-abc123", false, Mode::Agent);
+        p.prompt = Some("do the work".into());
+
+        assert!(
+            !render(&spec, &p).contains("--until-report"),
+            "the flag must be absent unless set"
+        );
+
+        p.until_report = true;
+        let recipe = render(&spec, &p);
+        assert!(
+            recipe.contains("prompt \"card-abc123\" --until-report "),
+            "the tail-called prompt must carry --until-report: {recipe}"
+        );
+    }
+
+    #[test]
     fn snapshot_named_agent_with_prompt() {
         let spec = spec_with(vec![env_secret()], vec![], false);
         let mut p = plan("myfeature-0badf00d", true, Mode::Agent);
@@ -1563,6 +1605,7 @@ mod tests {
             false,
             None,
             None,
+            false,
             "20260627-120000",
             7,
         )
