@@ -1,22 +1,20 @@
 ---
-
 kanban-plugin: basic
-
 ---
 
 ## To-do
 
-
 ## In Progress
 
+- [ ] [[0e6516]]
+- [ ] [[bf452e]]
+- [ ] [[e6f6b7]]
 
 ## Needs Review
 
-
 ## Ready
 
-
-***
+---
 
 ## Archive
 
@@ -35,9 +33,14 @@ kanban-plugin: basic
 - [x] [[94bc4f]]
 - [x] [[55cfca]]
 - [x] [[86419c]]
+- [x] [[680d06]]
+- [x] [[5b4df3]]
+- [x] [[3e9510]]
 
 %% kanban:settings
+
 ```
 {"kanban-plugin":"basic","metadata-keys":[{"containsMarkdown":false,"label":"","metadataKey":"title","shouldHideLabel":true},{"containsMarkdown":false,"label":"type","metadataKey":"type","shouldHideLabel":false},{"containsMarkdown":false,"label":"design","metadataKey":"design","shouldHideLabel":false},{"containsMarkdown":false,"label":"blocked by","metadataKey":"blocked_by","shouldHideLabel":false},{"containsMarkdown":false,"label":"labels","metadataKey":"labels","shouldHideLabel":false}]}
 ```
+
 %%
