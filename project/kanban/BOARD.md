@@ -4,17 +4,15 @@ kanban-plugin: basic
 
 ## To-do
 
+
 ## In Progress
 
-- [ ] [[0e6516]]
-- [ ] [[bf452e]]
-- [ ] [[e6f6b7]]
 
 ## Needs Review
 
+
 ## Ready
 
----
 
 ## Archive
 
@@ -36,6 +34,14 @@ kanban-plugin: basic
 - [x] [[680d06]]
 - [x] [[5b4df3]]
 - [x] [[3e9510]]
+
+***
+
+## Archive
+
+- [x] [[0e6516]]
+- [x] [[bf452e]]
+- [x] [[e6f6b7]]
 
 %% kanban:settings
 
