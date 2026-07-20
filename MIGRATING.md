@@ -8,6 +8,28 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.3.3
+
+**Mostly additive — no action required for existing consumers.** No spec or
+instance-state change (`specVersion 4` / `instanceVersion 2` unchanged); the new
+knobs are guest-only agent env vars and the new flag is host-only CLI, so a
+consumer who overrides neither behaves as before.
+
+**Behavioral change to note (agent mode):** a sandbox agent that ends a turn
+without a terminal `report done`/`blocked` is no longer resolved immediately.
+The guest now **auto-nudges** it — re-prompting "report your real state" up to
+`maxNudges` times (default 3), `nudgeIntervalMs` apart (default 30s) — before
+resolving the turn as `ended-unreported`. So a silent stop takes up to
+~`maxNudges × nudgeIntervalMs` longer to reach that terminal state than before,
+and the agent may receive extra channel turns. `maxNudges`/`nudgeIntervalMs` are
+internal `lib.sandbox` liveness tunables (alongside `stopGraceMs`);
+`maxNudges = 0` disables nudging entirely (the prior single-grace behavior).
+
+**New, opt-in:** `sandbox prompt`/`dispatch`/`start` accept `--until-report`,
+which keeps the host stream armed across an unreported turn-end (waiting for a
+real terminal report) instead of returning with the "stopped without reporting"
+warning. Off by default — existing invocations are unchanged.
+
 ## 0.3.2
 
 **Docs only — no action required.** No spec or instance-state change
