@@ -99,7 +99,12 @@ defaults:
   # competing for the guest's RAM. Provision generously: the images are sparse
   # and trimmed (discard), so host usage tracks real content, not these caps.
   storeVolumeSize ? 16384, # writable /nix/store overlay (in-guest `nix build`)
-  scratchVolumeSize ? 32768, # workspace clone + cargo/rustup/XDG caches
+  # workspace clone + cargo/rustup/XDG caches + the nix-daemon build dir. That
+  # last one matters for sizing: transient `nix build` trees (a `cargo test
+  # --no-run` on a Bevy-scale workspace is tens of GB) land here now, on top of
+  # the caches, so raise this when in-guest builds are large. Images are sparse
+  # and discard-trimmed, so a generous cap is cheap (card 680d06).
+  scratchVolumeSize ? 32768,
   dbVolumeSize ? 4096, # guest Nix database (importHostStoreDb)
 
   # Packages to put on the guest's PATH. This is where the agent harness goes —
@@ -188,6 +193,13 @@ let
   cargoHome = "${scratchMount}/cargo";
   rustupHome = "${scratchMount}/rustup";
   xdgCacheHome = "${scratchMount}/cache";
+  # The nix-daemon's own build directory. Without this it defaults to the
+  # daemon's TMPDIR, i.e. the RAM-backed root tmpfs (sized ~mem/2), so any
+  # derivation whose build tree exceeds mem/2 ENOSPCs regardless of how large the
+  # store/scratch volumes are — and the failed tree is cleaned up, so a
+  # post-mortem `df` looks empty (card 680d06). Point it at the disk-backed
+  # scratch volume so transient build trees spill to disk like everything else.
+  nixBuildDir = "${scratchMount}/nix-build";
   # Volume-backed mount points + their by-label device names.
   rwStoreMount = "/nix/.rw-store";
   nixDbMount = "/nix/var/nix/db";
@@ -1143,6 +1155,13 @@ let
       systemd.services.nix-daemon.environment = {
         https_proxy = "http://127.0.0.1:${toString proxyPort}";
         http_proxy = "http://127.0.0.1:${toString proxyPort}";
+        # Belt-and-suspenders for card 680d06: `build-dir` below governs the
+        # per-build tree on Nix ≥ 2.22, but the daemon also stages other
+        # temporaries under TMPDIR, which otherwise defaults to the RAM root
+        # tmpfs. Point both at the disk-backed scratch volume so neither can
+        # ENOSPC — and so the fix still holds on an older Nix that predates
+        # `build-dir` (there TMPDIR alone relocates the build tree).
+        TMPDIR = nixBuildDir;
       };
       nix.settings = {
         experimental-features = [
@@ -1151,6 +1170,10 @@ let
         ];
         substituters = [ "https://cache.nixos.org" ];
         trusted-users = [ agentUser ];
+        # Keep transient build trees off the RAM root tmpfs (card 680d06); the
+        # dir itself is created by the tmpfiles rule below, and the nix-daemon's
+        # TMPDIR (above) is pinned to the same volume as the pre-2.22 fallback.
+        build-dir = nixBuildDir;
       };
 
       # SSH: key-only, agent only, reachable only via the loopback hostfwd
@@ -1290,6 +1313,9 @@ let
         "d ${cargoHome} 0755 ${agentUser} users - -"
         "d ${rustupHome} 0755 ${agentUser} users - -"
         "d ${xdgCacheHome} 0755 ${agentUser} users - -"
+        # nix-daemon build dir (root-owned; the daemon chowns per-build subdirs
+        # to the build users). On the scratch volume so it isn't RAM-backed.
+        "d ${nixBuildDir} 0755 root root - -"
         "d /run/katsuobushi 0755 root root - -"
         # Agent-owned: the controller server (spawned by claude as the agent) binds the
         # report socket here, and the `report` command connects to it.
