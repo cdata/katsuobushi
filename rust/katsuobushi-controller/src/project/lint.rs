@@ -149,6 +149,17 @@ pub fn run(fs: &dyn Fs, paths: &Paths, renderer: &Renderer, fix: bool) -> Result
                 &mut seen,
                 &mut orphan_ids,
             );
+            // A ticked box in an active lane is never written by the tool: it
+            // signals a card that looks done but was not archived — e.g. cards
+            // re-laned from an archive whose `## Archive` heading was lost (card
+            // e6f6b7). Surface it so it isn't silently treated as live work.
+            if card.is_checked() {
+                let id = card.id().map_or_else(|| "?".to_string(), |i| i.to_string());
+                issues.push(warn(
+                    "checked-in-lane",
+                    format!("card {id} in {where_} is checked (`- [x]`) but not archived"),
+                ));
+            }
         }
     }
     for card in board.archived() {
@@ -317,6 +328,20 @@ mod tests {
         );
         let paths = Paths::new("/b");
         // Warning only -> exit 0.
+        assert!(run(&fs, &paths, &Renderer::new(true, false), false).is_ok());
+    }
+
+    #[test]
+    fn checked_card_in_an_active_lane_is_a_warning() {
+        // A `- [x]` card left in To-do — e.g. re-laned from an archive whose
+        // heading was lost — is surfaced but doesn't hard-fail the gate.
+        let board = "---\nkanban-plugin: basic\n---\n\n## To-do\n\n- [x] [[a3f7b2]]\n\n## In Progress\n\n## Needs Review\n\n## Ready\n\n%% kanban:settings\n\n```\n{}\n```\n\n%%\n";
+        let fs = FakeFs::new().with_file("/b/BOARD.md", board).with_file(
+            "/b/issues/a3f7b2.md",
+            "---\nid: a3f7b2\ntitle: X\ntype: feature\nblocked_by: []\n---\n",
+        );
+        let paths = Paths::new("/b");
+        // Warning only -> exit 0, but the finding is present.
         assert!(run(&fs, &paths, &Renderer::new(true, false), false).is_ok());
     }
 

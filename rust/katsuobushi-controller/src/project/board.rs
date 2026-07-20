@@ -58,6 +58,15 @@ impl Card {
         CardId::parse(&rest[..end])
     }
 
+    /// Whether the checkbox is ticked (`- [x]`). The tool only ticks a card when
+    /// it moves to the archive, so a ticked card in an *active* lane is a
+    /// malformation lint surfaces (card e6f6b7). Matches `x`/`X`, ignoring
+    /// leading indentation.
+    pub fn is_checked(&self) -> bool {
+        let t = self.raw.trim_start();
+        t.starts_with("- [x]") || t.starts_with("- [X]")
+    }
+
     /// Set the checkbox char (`x` when archiving a terminal card).
     fn set_check(&mut self, checked: bool) {
         let mark = if checked { 'x' } else { ' ' };
@@ -509,6 +518,14 @@ mod tests {
         assert_eq!(b.cards_in(st("todo"))[0].id(), Some(id("a3f7b2")));
         assert!(b.trailer.as_deref().unwrap().contains("kanban:settings"));
         assert!(b.preamble.contains("kanban-plugin: basic"));
+    }
+
+    #[test]
+    fn is_checked_detects_a_ticked_box_only() {
+        assert!(!Card::new_link(&id("a3f7b2")).is_checked());
+        assert!(Card { raw: "- [x] [[a3f7b2]]".into() }.is_checked());
+        assert!(Card { raw: "  - [X] [[a3f7b2]]".into() }.is_checked()); // indented, uppercase
+        assert!(!Card { raw: "- [ ] [[a3f7b2]]".into() }.is_checked());
     }
 
     #[test]
