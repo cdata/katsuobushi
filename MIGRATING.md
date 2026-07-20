@@ -8,6 +8,37 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.3.4
+
+**Board reformat on first write — no action required, but expect a one-time
+diff.** No spec or instance-state change (`specVersion 4` / `instanceVersion 2`
+unchanged). The `project` board writer now emits prettier-stable markdown: the
+archive separator is `---` (was `***`), empty lanes lose a redundant blank line,
+and the settings block gains blank lines around its code fence. The first CLI
+mutation (or `project init`) rewrites an existing `BOARD.md` into this form
+once; thereafter a CLI rewrite and `markdown format` agree byte-for-byte, ending
+the format-drift churn. Archive parsing is now anchored on the `## Archive`
+heading, so a board whose separator a formatter rewrote — and any duplicate
+`## Archive` sections a prior version appended — heal automatically on the next
+write.
+
+**New `project lint` findings.** Duplicate lane headings are now a hard error
+(`duplicate-lane`). A card in an unrecognized lane (`unrecognized-lane`) or a
+checked `- [x]` card left in an active lane (`checked-in-lane`) are warnings, so
+they surface without failing the `lint` gate — a board that deliberately keeps
+an extra lane (an "Icebox") still lints clean of errors.
+
+**Sandbox in-guest builds: size `scratchVolumeSize` for build trees.** The
+nix-daemon's build directory now lives on the disk-backed scratch volume
+(`/scratch/nix-build`) instead of the RAM-backed root tmpfs, so a derivation
+whose build tree exceeds ~`mem/2` no longer fails with `ENOSPC` while every
+provisioned volume reads nearly empty. If you run large in-guest `nix build`s
+(e.g. a Bevy-scale `cargo test --no-run`), raise `scratchVolumeSize` to cover
+the transient tree on top of the cargo/rustup/XDG caches — the images are sparse
+and discard-trimmed, so a generous cap costs only real usage. On a Nix older
+than 2.22 (before `build-dir`), the daemon's `TMPDIR` is pinned to the same
+volume as the fallback.
+
 ## 0.3.3
 
 **Mostly additive — no action required for existing consumers.** No spec or

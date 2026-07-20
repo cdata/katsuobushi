@@ -5,6 +5,53 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.3.4] — 2026-07-19
+
+Fixes the `project` board writer's formatter-instability churn and the archive
+corruption it caused, plus a sandbox build that exhausted the guest's RAM-backed
+scratch. The board writer now emits prettier-stable markdown and anchors the
+archive on its `## Archive` heading, so a CLI rewrite followed by
+`markdown format` is byte-identical and duplicate `## Archive` sections can no
+longer accrete. No spec or instance-state change (`specVersion 4` /
+`instanceVersion 2` unchanged). See [`MIGRATING.md`](MIGRATING.md#034).
+
+### Added
+
+- **`project lint` structural-lane checks.** Errors on duplicate lane headings
+  (`duplicate-lane` — `cards_in` reads only the first, so cards in the rest are
+  dropped on the next rewrite), and warns on a card in an unrecognized lane
+  (`unrecognized-lane`) or a checked `- [x]` card stranded in an active lane
+  (`checked-in-lane`, the fingerprint of a card un-archived by separator loss).
+
+### Changed
+
+- **The board writer emits formatter-stable markdown.** Empty lanes get a single
+  blank line (not the `\n\n\n` a formatter collapses), and the archive separator
+  is `---` (what Prettier normalizes `***` to). A freshly `init`ed board and the
+  settings block are prettier-canonical from birth, so the first
+  `markdown format` over a board is a no-op instead of a drift chore.
+- **The nix-daemon build directory lives on the disk-backed scratch volume.**
+  `lib.sandbox` guests point `build-dir` (and the daemon's `TMPDIR`) at
+  `/scratch/nix-build` so a large in-guest build spills to disk instead of the
+  RAM-backed root tmpfs. `scratchVolumeSize` must now also cover transient build
+  trees; the images are sparse, so a generous cap stays cheap.
+
+### Fixed
+
+- **Board format-drift churn and duplicate `## Archive` sections.** The writer's
+  formatter-unstable output left the board dirty under the `markdown format`
+  gate after every CLI mutation; once a formatter rewrote the `***` separator
+  the parser stopped recognizing the archive and appended a fresh `## Archive`,
+  stranding cards in an unreachable lane. Archive parsing now anchors on the
+  `## Archive` heading (tolerating any or no separator) and merges duplicate
+  sections back into one on the next write.
+- **Trailing human content dropped on rewrite.** Foreign content left after the
+  last lane on a settings-less board was consumed as stray lines and lost; it is
+  now preserved verbatim, while mid-board strays are still skipped so the
+  structure after them survives.
+- **Leading blank lines on a frontmatter-less board.** `to_text` no longer opens
+  a board that has no frontmatter with the `\n\n` a formatter would strip.
+
 ## [0.3.3] — 2026-07-19
 
 Makes host↔guest turn completion event-driven again when a sandbox agent ends a
