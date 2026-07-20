@@ -5,6 +5,48 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.3.3] — 2026-07-19
+
+Makes host↔guest turn completion event-driven again when a sandbox agent ends a
+turn without reporting — the failure mode that turned dispatch/prompt
+orchestration into wall-clock guessing. Three layers: the agent contract now
+mandates foreground work and a report before every turn-end; the guest
+auto-nudges an unreported idle agent before giving up; and the host can stay
+armed across an unreported turn-end. No spec or instance-state bump
+(`specVersion 4` / `instanceVersion 2` unchanged) — the new knobs are guest-only
+env vars and the flag is host-only CLI. See [`MIGRATING.md`](MIGRATING.md#033).
+
+### Added
+
+- **Guest auto-nudge for an unreported turn-end.** When a sandbox agent stops
+  without a terminal `report done`/`blocked`, the guest server now re-prompts it
+  ("report your real state now") up to `KATSU_MAX_NUDGES` times (default 3),
+  `KATSU_NUDGE_INTERVAL_MS` apart (default 30s), before resolving the turn as
+  `ended-unreported`. This recovers the two common silent-stop cases — the agent
+  forgot to report, or it backgrounded work and yielded — without operator
+  intervention. `maxNudges`/`nudgeIntervalMs` are the Nix-side knobs; `0`
+  disables nudging (the prior single-grace behavior).
+- **`sandbox prompt`/`dispatch`/`start --until-report`.** Keeps the host stream
+  armed across an unreported turn-end (emitting a `rearmed` note and continuing
+  to wait for a real terminal report) instead of returning with the "stopped
+  without reporting" warning. Pairs with the guest auto-nudges so a backgrounded
+  build that finishes and reports long after the turn ended is still caught
+  live.
+
+### Changed
+
+- **Agent-mode turn discipline.** The always-on agent contract now mandates
+  running builds/tests in the foreground, never yielding a turn with unfinished
+  work, and always running a terminal `report` before stopping — baking in the
+  rule dispatched agents previously had to be told ad hoc.
+
+### Fixed
+
+- **The `project-orchestration` skill loads again.** A `: ` (colon-space) inside
+  its YAML `description` broke frontmatter parsing, so the skill was silently
+  dropped from the registry and could only be found by crawling the filesystem.
+  The description is now a colon-free plain scalar.
+
 ## [0.3.2] — 2026-07-19
 
 Corrects the project-board guidance so agents are pointed at the `project` menu
