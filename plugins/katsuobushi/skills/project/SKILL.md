@@ -76,7 +76,7 @@ they move to the Kanban archive and record `disposition` on the note, plus a
 state. (A forced reopen out of terminal clears both.) A regression in accepted
 work becomes a **new card**, not a reopen.
 
-Freshly archived cards stay on the `project status` list for **24h** (by
+Freshly archived cards stay on the `project status` list for **1h** (by
 `disposition_at`), then drop off to keep the view focused on live work; `--json`
 still returns every archived card, so tooling is unaffected.
 
