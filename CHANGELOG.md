@@ -5,6 +5,37 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.3.5] — 2026-07-23
+
+Teaches `lib.rust` to build under an arbitrary Cargo profile, refreshes the
+default `wasm-bindgen-cli` to the latest release, and tightens the
+`project status` archive window so finished work clears the human view within
+the hour. No spec or instance-state change (`specVersion 4` /
+`instanceVersion 2` unchanged). See [`MIGRATING.md`](MIGRATING.md#035).
+
+### Added
+
+- **Per-helper Cargo build profiles in `lib.rust`.** Every exported build helper
+  (`buildCrate`, `buildWasmCrate`, `buildTrunkCrate`, `buildTestArchive`) now
+  takes an optional `profile` (default `"release"`); pass `profile = "dev"` for
+  an unoptimized build. The shared workspace-deps bundle is keyed by
+  `(target, profile)`, so a crate and the dependency closure it reuses are
+  always built under the same profile, and `buildTestArchive` threads the
+  profile into `cargo nextest archive` (`--cargo-profile`) so its archived test
+  binaries no longer diverge from that bundle. Release builds are byte-identical
+  to before.
+
+### Changed
+
+- **Default `wasm-bindgen-cli` bumped `0.2.108` → `0.2.126`.** The hashes
+  shipped in `defaultWasmBindgenHashes` now track the latest `wasm-bindgen`
+  release; a workspace whose `Cargo.lock` resolves a different version still
+  overrides via the `wasmBindgenHashes` argument.
+- **`project status` clears archived cards after 1h (was 24h).** The non-JSON
+  list drops accepted _and_ cancelled cards once their `disposition_at` is over
+  an hour old, keeping the human view on live work. `--json` is unaffected —
+  tooling still sees every archived card.
+
 ## [0.3.4] — 2026-07-19
 
 Fixes the `project` board writer's formatter-instability churn and the archive
