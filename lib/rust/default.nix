@@ -99,9 +99,9 @@ let
   # as the default; consumers extend or override it via the `wasmBindgenHashes`
   # argument when their Cargo.lock pins a different `wasm-bindgen`.
   defaultWasmBindgenHashes = {
-    "0.2.108" = {
-      hash = "sha256-UsuxILm1G6PkmVw0I/JF12CRltAfCJQFOaT4hFwvR8E=";
-      cargoHash = "sha256-iqQiWbsKlLBiJFeqIYiXo3cqxGLSjNM8SOWXGM9u43E=";
+    "0.2.126" = {
+      hash = "sha256-H6Is3fiZVxZCfOMWK5dWMSrtn50VGv0sfdnsT+cTtyk=";
+      cargoHash = "sha256-VucqkXbCi4qtQzY/HrXiDnbSURsagPsdNVMn1Tw3UiY=";
     };
   };
   wasmBindgenHashesResolved = defaultWasmBindgenHashes // wasmBindgenHashes;
