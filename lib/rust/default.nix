@@ -198,29 +198,62 @@ let
     doCheck = false;
   };
 
-  # Crane attribute overlay for a given Cargo target triple. `null` selects the
-  # host target. Targets are named by their full triple so that members of a
-  # family that don't share a toolchain stay distinct — e.g.
+  # The Cargo build profile the helpers fall back to when a `profile` argument
+  # is omitted. Crane drives the profile through a `CARGO_PROFILE` convention
+  # (see crane's `configureCargoCommonVars` / `cargoWithProfile`): its default
+  # build commands emit `--release` when `CARGO_PROFILE` is `release` and
+  # `--profile <name>` otherwise. Release is left byte-identical to the
+  # pre-profile behavior — we leave `CARGO_PROFILE` unset for it and rely on
+  # crane's own `CARGO_PROFILE-release` default — so existing consumers see no
+  # gratuitous rebuild.
+  defaultProfile = "release";
+
+  # The `CARGO_PROFILE` env attribute for a profile (empty for release, per the
+  # note above) and the matching derivation-name suffix. The suffix keeps a
+  # non-default profile's deps bundle from colliding with the release bundle in
+  # the store.
+  profileAttrs = profile: if profile == defaultProfile then { } else { CARGO_PROFILE = profile; };
+  profileSuffix = profile: if profile == defaultProfile then "" else "-${profile}";
+
+  # Crane attribute overlay for a given Cargo target triple and build profile.
+  # `target == null` selects the host target; `profile` defaults to
+  # `defaultProfile`. Targets are named by their full triple so that members of
+  # a family that don't share a toolchain stay distinct — e.g.
   # `wasm32-unknown-unknown` (browser, driven by wasm-bindgen) versus
   # `wasm32-wasip3` (WASI).
-  attributesForTarget =
-    target: commonAttributes // (if target == null then { } else { CARGO_BUILD_TARGET = target; });
+  attributesFor =
+    {
+      target ? null,
+      profile ? defaultProfile,
+    }:
+    commonAttributes
+    // (if target == null then { } else { CARGO_BUILD_TARGET = target; })
+    // profileAttrs profile;
 
-  # Deps-only artifacts for a target triple. Each triple has its own dependency
-  # closure (distinct `std`, distinct `*-sys` builds), so they are never shared
-  # across targets. Equal `target` values evaluate to the same derivation, so
-  # crane builds each target's deps exactly once even across many crates.
-  depsForTarget =
-    target:
+  # Deps-only artifacts for a (target triple, profile) pair. Each pair has its
+  # own dependency closure — distinct `std`, distinct `*-sys` builds, distinct
+  # optimization — so bundles are never shared across targets or profiles. Equal
+  # `{ target, profile }` values evaluate to the same derivation, so crane
+  # builds each pair's deps exactly once even across many crates. Building the
+  # top-level crate and this bundle under the same profile is what lets cargo
+  # reuse the bundle instead of recompiling the closure.
+  depsFor =
+    {
+      target ? null,
+      profile ? defaultProfile,
+    }:
     craneLib.buildDepsOnly (
-      attributesForTarget target
+      attributesFor { inherit target profile; }
       // {
-        pname = "${projectName}-workspace-deps" + (if target == null then "" else "-${target}");
+        pname =
+          "${projectName}-workspace-deps"
+          + (if target == null then "" else "-${target}")
+          + profileSuffix profile;
       }
     );
 
-  # Host-target deps, also consumed by the cargo checks below.
-  nativeArtifacts = depsForTarget null;
+  # Host-target, default-profile deps, also consumed by the cargo checks below.
+  nativeArtifacts = depsFor { };
 
   # The browser wasm target. The wasm-bindgen / wasm-opt / esbuild toolchain in
   # `buildWasmCrate` and `buildTrunkCrate` is specific to this triple; other
@@ -229,26 +262,35 @@ let
   browserWasmTarget = "wasm32-unknown-unknown";
 
   # Build a crate for any Cargo target. `target` is a triple string (e.g.
-  # "wasm32-wasip3") or `null`/omitted for the host; all other attributes pass
-  # through to crane.
+  # "wasm32-wasip3") or `null`/omitted for the host; `profile` is the Cargo
+  # build profile (default `release`, e.g. `dev` for an unoptimized build). Both
+  # are consumed here — the rest of the attributes pass through to crane.
   buildCrate =
-    { target ? null, ... }@attributes:
+    {
+      target ? null,
+      profile ? defaultProfile,
+      ...
+    }@attributes:
     craneLib.buildPackage (
-      attributesForTarget target
+      attributesFor { inherit target profile; }
       // {
-        cargoArtifacts = depsForTarget target;
+        cargoArtifacts = depsFor { inherit target profile; };
       }
-      // removeAttrs attributes [ "target" ]
+      // removeAttrs attributes [ "target" "profile" ]
     );
 
   # Build a browser-targeted wasm crate (wasm32-unknown-unknown), surfacing the
-  # pinned wasm-bindgen / wasm-opt / esbuild tools.
+  # pinned wasm-bindgen / wasm-opt / esbuild tools. `profile` is the Cargo build
+  # profile (default `release`, e.g. `dev` for an unoptimized build).
   buildWasmCrate =
-    attributes:
+    {
+      profile ? defaultProfile,
+      ...
+    }@attributes:
     craneLib.buildPackage (
-      attributesForTarget browserWasmTarget
+      attributesFor { target = browserWasmTarget; inherit profile; }
       // {
-        cargoArtifacts = depsForTarget browserWasmTarget;
+        cargoArtifacts = depsFor { target = browserWasmTarget; inherit profile; };
 
         # These *_BIN envvars are conventional and consumed by build scripts
         # such as `worker-build`; they are also a convenient way to surface
@@ -257,40 +299,57 @@ let
         WASM_BINDGEN_BIN = "${wasm-bindgen-cli}/bin/wasm-bindgen";
         ESBUILD_BIN = "${pkgs.esbuild}/bin/esbuild";
       }
-      // attributes
+      // removeAttrs attributes [ "profile" ]
     );
 
+  # Build a Trunk-bundled browser wasm app. `profile` is the Cargo build profile
+  # (default `release`, e.g. `dev` for an unoptimized build). NOTE: crane's Trunk
+  # builder only distinguishes release from non-release for Trunk's own
+  # `trunk build` step, so `release` and `dev` thread through cleanly, but a
+  # custom-named profile reaches the shared deps bundle without being passed to
+  # `trunk build` itself.
   buildTrunkCrate =
-    attributes:
+    {
+      profile ? defaultProfile,
+      ...
+    }@attributes:
     let
       crateRoot = builtins.dirOf attributes.trunkConfig;
     in
     craneLib.buildTrunkPackage (
-      attributesForTarget browserWasmTarget
+      attributesFor { target = browserWasmTarget; inherit profile; }
       // {
-        cargoArtifacts = depsForTarget browserWasmTarget;
+        cargoArtifacts = depsFor { target = browserWasmTarget; inherit profile; };
         preBuild = ''
           cd ${crateRoot}
         '';
         inherit wasm-bindgen-cli;
       }
-      // attributes
+      // removeAttrs attributes [ "profile" ]
     );
 
+  # Archive a workspace's tests for later execution. `profile` is the Cargo
+  # build profile (default `release`, e.g. `dev` for an unoptimized build).
   buildTestArchive =
     {
       name,
       args ? "",
       target ? null,
+      profile ? defaultProfile,
     }:
     craneLib.mkCargoDerivation (
-      attributesForTarget target
+      attributesFor { inherit target profile; }
       // {
         pname = "tests-${name}";
-        cargoArtifacts = depsForTarget target;
+        cargoArtifacts = depsFor { inherit target profile; };
 
+        # `cargo nextest archive` doesn't consult crane's `CARGO_PROFILE`, so we
+        # pass the profile explicitly. This keeps the archived test binaries in
+        # the same profile as the shared deps bundle above — otherwise nextest's
+        # default test profile would diverge from it and recompile the closure.
         buildPhaseCargoCommand = ''
           cargo nextest archive \
+            --cargo-profile ${profile} \
             ${args} \
             --archive-file ./tests-${name}.tar.zst
         '';
@@ -301,7 +360,9 @@ let
         '';
 
         doInstallCargoArtifacts = false;
-        nativeBuildInputs = (attributesForTarget target).nativeBuildInputs ++ [ pkgs.cargo-nextest ];
+        nativeBuildInputs = (attributesFor { inherit target profile; }).nativeBuildInputs ++ [
+          pkgs.cargo-nextest
+        ];
       }
     );
 
