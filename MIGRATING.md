@@ -8,6 +8,30 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.3.5
+
+**`lib.rust` gains per-helper build profiles — additive, no action required.**
+Every build helper now takes an optional `profile` (default `"release"`), so
+existing calls behave exactly as before — the release build derivations are
+byte-identical. Pass `profile = "dev"` to build a crate and its dependency
+bundle unoptimized (Cargo's unoptimized profile is spelled `"dev"`; `"debug"` is
+a reserved name). The shared workspace-deps bundle is now keyed by
+`(target, profile)`, so distinct profiles get distinct bundles rather than
+colliding.
+
+**Default `wasm-bindgen-cli` is now `0.2.126` (was `0.2.108`).** If your
+`Cargo.lock` resolves `wasm-bindgen` to `0.2.108` and you relied on the bundled
+hashes, either bump your workspace to `0.2.126` or add your own entry —
+`wasmBindgenHashes."0.2.108" = { hash = …; cargoHash = …; }`. Consumers that
+already pass their own `wasmBindgenHashes`, or whose lock resolves `0.2.126`,
+need no change.
+
+**`project status` hides archived cards after 1h (was 24h).** The human
+(non-JSON) board list now drops accepted and cancelled cards an hour after their
+`disposition_at`, rather than a day. If you rely on `project status` to review
+recently completed work, scan it more often or use `--json`, which still returns
+every archived card regardless of age.
+
 ## 0.3.4
 
 **Board reformat on first write — no action required, but expect a one-time
