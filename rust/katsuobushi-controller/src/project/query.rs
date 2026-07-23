@@ -15,8 +15,8 @@ use super::model::{CardId, Status};
 use super::select::resolve_status;
 
 /// Archived cards drop off the human list once their `disposition_at` is older
-/// than this window (24h). `--json` is unaffected — tooling still sees them all.
-const ARCHIVE_WINDOW_SECS: i64 = 24 * 60 * 60;
+/// than this window (1h). `--json` is unaffected — tooling still sees them all.
+const ARCHIVE_WINDOW_SECS: i64 = 60 * 60;
 
 /// A card's board+note projection for the list and detail views.
 #[derive(Serialize, Clone)]
@@ -77,7 +77,7 @@ fn list_all(
 ) -> Result<()> {
     let now = clock.now_unix();
     let mut views = Vec::new();
-    // Ids of archived cards hidden from the human list by the 24h window. The
+    // Ids of archived cards hidden from the human list by the 1h window. The
     // JSON path serializes every view regardless; only the table filters.
     let mut stale_archived = std::collections::HashSet::new();
     for status in Status::ACTIVE {
@@ -115,7 +115,7 @@ fn list_all(
 }
 
 /// Whether an archived card should drop off the human list: its `disposition_at`
-/// is older than the 24h window, or is missing/unparseable (treated as old). All
+/// is older than the 1h window, or is missing/unparseable (treated as old). All
 /// archived cards — accepted and cancelled alike — are subject to this.
 fn is_stale_archive(notes: &[NoteEntry], id: &CardId, now: i64) -> bool {
     let at = notes
@@ -329,10 +329,10 @@ mod tests {
     fn archive_window_hides_only_stale_cards() {
         let clock = FixedClock(NOW);
         let now = clock.now_unix();
-        // Recent (1h ago), accepted and cancelled alike, stay visible.
+        // Recent (10m ago), accepted and cancelled alike, stay visible.
         let notes = archived_notes(&[
-            ("aaaaaa", "accepted", &format_rfc3339(now - 3600)),
-            ("bbbbbb", "cancelled", &format_rfc3339(now - 3600)),
+            ("aaaaaa", "accepted", &format_rfc3339(now - 600)),
+            ("bbbbbb", "cancelled", &format_rfc3339(now - 600)),
         ]);
         assert!(!is_stale_archive(
             &notes,
@@ -345,7 +345,7 @@ mod tests {
             now
         ));
 
-        // Older than 24h (48h ago) — both hidden, regardless of disposition.
+        // Older than 1h (48h ago) — both hidden, regardless of disposition.
         let notes = archived_notes(&[
             ("cccccc", "accepted", &format_rfc3339(now - 48 * 3600)),
             ("dddddd", "cancelled", &format_rfc3339(now - 48 * 3600)),
@@ -375,9 +375,9 @@ mod tests {
     }
 
     #[test]
-    fn archive_window_boundary_is_inclusive_at_24h() {
+    fn archive_window_boundary_is_inclusive_at_1h() {
         let now = FixedClock(NOW).now_unix();
-        // Exactly 24h old is not yet "older than" the window -> still visible.
+        // Exactly 1h old is not yet "older than" the window -> still visible.
         let notes = archived_notes(&[(
             "aaaaaa",
             "accepted",
