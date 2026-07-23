@@ -94,6 +94,11 @@
         # my-crate = buildCrate {
         #   pname = "my-crate";
         #   cargoExtraArgs = "--package my-crate";
+        #   # Cargo build profile; defaults to "release". Use "dev" for an
+        #   # unoptimized debug build — "debug" is a reserved name in Cargo, so
+        #   # its built-in unoptimized profile is spelled "dev" (it still emits
+        #   # to target/debug). The shared dependency bundle is rebuilt to match.
+        #   # profile = "dev";
         # };
 
         menu = makeMenu {
