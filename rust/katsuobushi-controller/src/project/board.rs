@@ -523,9 +523,18 @@ mod tests {
     #[test]
     fn is_checked_detects_a_ticked_box_only() {
         assert!(!Card::new_link(&id("a3f7b2")).is_checked());
-        assert!(Card { raw: "- [x] [[a3f7b2]]".into() }.is_checked());
-        assert!(Card { raw: "  - [X] [[a3f7b2]]".into() }.is_checked()); // indented, uppercase
-        assert!(!Card { raw: "- [ ] [[a3f7b2]]".into() }.is_checked());
+        assert!(Card {
+            raw: "- [x] [[a3f7b2]]".into()
+        }
+        .is_checked());
+        assert!(Card {
+            raw: "  - [X] [[a3f7b2]]".into()
+        }
+        .is_checked()); // indented, uppercase
+        assert!(!Card {
+            raw: "- [ ] [[a3f7b2]]".into()
+        }
+        .is_checked());
     }
 
     #[test]
@@ -687,7 +696,11 @@ mod tests {
         // separator is restored to the formatter-stable `---`.
         assert_eq!(out.matches("## Archive").count(), 1);
         assert!(out.contains("\n---\n\n## Archive\n"));
-        let archived: Vec<_> = Board::parse(&out).archived().iter().filter_map(|c| c.id()).collect();
+        let archived: Vec<_> = Board::parse(&out)
+            .archived()
+            .iter()
+            .filter_map(|c| c.id())
+            .collect();
         assert!(archived.contains(&id("dddddd")) && archived.contains(&id("ff09ab")));
     }
 
@@ -711,7 +724,13 @@ mod tests {
         let b = Board::parse(out_of_order);
         // The live card stays in its active lane, not the archive.
         assert_eq!(b.status_of(&id("eeeeee")), Some(st("ready")));
-        assert_eq!(b.archived().iter().filter_map(|c| c.id()).collect::<Vec<_>>(), vec![id("dddddd")]);
+        assert_eq!(
+            b.archived()
+                .iter()
+                .filter_map(|c| c.id())
+                .collect::<Vec<_>>(),
+            vec![id("dddddd")]
+        );
     }
 
     #[test]
@@ -765,7 +784,11 @@ mod tests {
         assert_eq!(b.status_of(&id("ff09ab")), Some(st("in-progress")));
         assert_eq!(b.lanes().len(), 4);
         // The trailer is the settings block, not the whole tail from the stray.
-        assert!(b.trailer.as_deref().unwrap().starts_with("%% kanban:settings"));
+        assert!(b
+            .trailer
+            .as_deref()
+            .unwrap()
+            .starts_with("%% kanban:settings"));
     }
 
     #[test]
@@ -776,7 +799,11 @@ mod tests {
         let b = Board::parse(text);
         assert_eq!(b.archived().len(), 1);
         assert_eq!(b.archived()[0].id(), Some(id("dddddd")));
-        assert!(b.trailer.as_deref().unwrap().starts_with("%% kanban:settings"));
+        assert!(b
+            .trailer
+            .as_deref()
+            .unwrap()
+            .starts_with("%% kanban:settings"));
     }
 
     #[test]
@@ -790,7 +817,11 @@ mod tests {
         assert!(!is_thematic_break("A note."));
         let b = Board::parse(POPULATED_ARCHIVE);
         assert_eq!(b.archived().len(), 1);
-        assert!(b.trailer.as_deref().unwrap().starts_with("%% kanban:settings"));
+        assert!(b
+            .trailer
+            .as_deref()
+            .unwrap()
+            .starts_with("%% kanban:settings"));
     }
 
     #[test]
