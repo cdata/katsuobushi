@@ -7,16 +7,47 @@ description:
   user wants to drive a board forward with agents — dispatch a card to a
   sandbox, run a swarm across the backlog, peer-review a card in an isolated VM,
   move work through needs-review/ready/accepted, or wire up the dispatch report
-  bridge. Complements the `project` skill (board mechanics) and the `sandbox`
-  skill (driving VMs).
+  bridge. Complements the `project` skill (board mechanics); load the `sandbox`
+  skill first — this skill does not cover VM driving, launch diagnostics, or
+  recovery.
 ---
 
 # Orchestrating a project board with agents
 
+> **Before you dispatch or drive any sandbox, load the `sandbox` skill.** This
+> skill covers the **choreography** only — who does what, and how work routes
+> between them. Launch diagnostics, liveness semantics, and recovery live in the
+> `sandbox` skill, and dispatching without them has caused real incidents: an
+> operator who skipped it read a benign progress notice as a hang, killed a live
+> provisioning step, and orphaned the VM it was building.
+
 The `project` skill covers card/board mechanics. This skill is the
 **choreography**: who does what, and how to use sandboxes to delegate
-implementation and review. It leans on the `sandbox` skill for the actual VM
-driving.
+implementation and review. Every step below that touches a VM assumes you have
+loaded the `sandbox` skill as instructed above.
+
+### If you loaded only this skill
+
+Defense in depth for the case where you are mid-incident without the `sandbox`
+skill. These are the three facts whose absence has actually cost sessions — they
+are **not** a substitute for loading it:
+
+- **The state dir holds two logs, and which one you want depends on the phase.**
+  Before the VM boots, `sandbox status` reads `provisioning (<step>)` and the
+  live diagnostic is `provision.log`; once booted it reads `running` and the
+  diagnostic is `console.log` (the teed serial console). `sandbox attach <name>`
+  watches the agent live.
+- **`⚠ no reports for …` is usually benign.** Only reports reset that clock, and
+  an agent inside one long foreground call (a cold build is routinely 20
+  minutes) emits none. The first notice says as much; a stronger one follows
+  only if the silence reaches three times the window. Inspect with
+  `sandbox attach` before concluding anything is wrong — never kill a
+  provisioning step because it looks slow. If it fires on every launch, the
+  project should raise `progressStallSecs`.
+- **Stop is not remove.** `sandbox stop <name>` pauses a named instance and
+  keeps its scratch volume, so it can be restarted;
+  `sandbox stop --remove <name>` discards the instance and its state dir. Reach
+  for `--remove` only once the work is landed or abandoned.
 
 ## The four roles
 
@@ -70,6 +101,9 @@ The cleanest way to get an implementor≠reviewer split is to run the reviewer a
 its own sandbox VM — a fresh agent, its own context, that can build and test the
 work itself. This is a **read-only** delegation (it changes nothing), so the
 deliverable is the agent's `report`, not a branch.
+
+The launch, liveness, and recovery mechanics below come from the `sandbox` skill
+— load it before running any of these commands.
 
 ```sh
 sandbox start --agent --name review-<slug> --prompt "<review directive>"
@@ -139,7 +173,10 @@ reviewed before the next one starts. The host-core concurrency budget under
 
 ## Delegating implementation with `sandbox dispatch`
 
-`sandbox dispatch <card-id>` is the implementor-in-a-VM path. It:
+`sandbox dispatch <card-id>` is the implementor-in-a-VM path. It launches and
+drives a real VM, so the `sandbox` skill is a **prerequisite** here, not a
+reference — diagnosing a dispatch that looks stuck needs its `console.log`,
+progress-notice, and stop-vs-remove semantics. It:
 
 1. **Guards** — refuses a card that isn't Available (To-do with blockers
    cleared) unless `--force`.
@@ -153,6 +190,15 @@ reviewed before the next one starts. The host-core concurrency budget under
 sandbox dispatch a3f7b2                 # dispatch an Available card
 sandbox dispatch a3f7b2 --force         # dispatch a blocked / non-todo card anyway
 ```
+
+**If a dispatch dies after the VM comes up, don't recompose the directive.**
+`dispatch` claims the card, composes the directive, and boots the VM detached
+before delivering it — so a killed dispatch can leave a card marked
+`in-progress` beside an idle VM that never got its instructions. The composed
+text is persisted to `directive.md` in the instance's state dir; resend it with
+`sandbox prompt card-<id> --redeliver` rather than rebuilding it from the card
+plus the instructions file. (If the VM never came up at all, reset the card to
+`todo` and re-dispatch instead.)
 
 Write a **`.dispatch-instructions.md`** in the board dir with the project's
 conventions (how to build/test in the sandbox, the acceptance gate, one-command-
@@ -187,15 +233,23 @@ or fan several out and poll `sandbox status`. Prefer the event-driven paths
 guest posts a terminal report, so a backgrounded run re-invokes you exactly when
 `done`/`blocked` lands, with no timers.
 
-Add **`--until-report`** (`sandbox dispatch <id> --until-report`, or
-`sandbox prompt <name> "…" --until-report`) when you want that guarantee to
-survive an agent that ends its turn without reporting: instead of returning with
-a "stopped without reporting" warning, the command stays armed and keeps waiting
-for a real `done`/`blocked`. It pairs with the guest's **auto-nudge** — a
-sandbox that ends a turn silently is automatically re-prompted a few times to
-report — so a backgrounded build that finishes long after the turn ended is
-still caught live. Don't substitute arbitrary `sleep`s for a completion event;
-use these instead.
+**`dispatch` stays armed by default — there is no flag to remember.** An agent
+that ends its turn without reporting does _not_ end the drive: the command keeps
+waiting for a real `done`/`blocked`, pairing with the guest's **auto-nudge** (a
+sandbox that stops silently is automatically re-prompted a few times to report),
+so a backgrounded build finishing long after the turn ended is still caught
+live. That is what lets you read "the dispatch returned" as "the work
+concluded". The same default applies to `sandbox start --agent --prompt …`,
+which is dispatch-shaped rather than interactive.
+
+Pass `--no-until-report` only when you deliberately want the drive to return on
+the agent's first yield. (`--until-report` is still accepted and is now a
+no-op.)
+
+Interactive `sandbox prompt` is the exception — it still returns on an
+unreported yield, because you are watching and can re-prompt. Its warning tells
+you how to wait instead. Don't substitute arbitrary `sleep`s for a completion
+event; use the armed drive.
 
 ## Swarming the backlog
 
