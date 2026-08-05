@@ -141,6 +141,12 @@ sandbox = katsuobushi.lib.sandbox {
   scratchVolumeSize = 32768;           # workspace clone + cargo/rustup/XDG caches
   dbVolumeSize = 4096;                 # guest Nix database
 
+  # How long a turn may go without a *report* before the host prints its
+  # first "no reports" notice (default 300; a stronger one follows at 3x that).
+  # Only reports reset this clock,
+  # so set it past the project's cold-build time or it fires every launch.
+  progressStallSecs = 1500;
+
   # Escape hatch: extra NixOS modules merged into the guest
   guestModules = [ ./guest-extra.nix ];
 };
@@ -222,12 +228,66 @@ returns when the agent reports a terminal status:
 - `blocked` — it needs something; address it and send the next prompt.
 - `info` — anything else worth surfacing.
 
-If the agent ends its turn **without** a terminal report, the command returns
-with a "stopped without reporting" warning. Add **`--until-report`**
-(`sandbox prompt <name> "…" --until-report`) to stay armed instead: it keeps
-waiting for a real `done`/`blocked` — useful when a turn kicks off a long
-background command. The guest also auto-nudges an unreported idle agent a few
-times on its own, so most silent stops recover without you re-prompting.
+**When an agent ends its turn without a terminal report**, what happens depends
+on which command is driving — and the defaults differ deliberately:
+
+| Command                            | Default on an unreported yield                              |
+| ---------------------------------- | ----------------------------------------------------------- |
+| `sandbox dispatch`                 | **stays armed**, keeps waiting for `done`/`blocked`         |
+| `sandbox start --agent --prompt …` | **stays armed** (a first-turn directive is dispatch-shaped) |
+| `sandbox prompt` (interactive)     | returns with a "stopped without reporting" warning          |
+
+The orchestration flows stay armed because for them "the command returned" is
+read as "the work concluded"; returning early on a yield would say the work is
+finished when it is not. Pass **`--no-until-report`** to opt out.
+(`--until-report` is still accepted on those two and is now a no-op.)
+
+Interactive `sandbox prompt` keeps returning, because you are watching and can
+re-prompt — and its warning names both recoveries: re-run with `--until-report`
+to wait, or look for a later `ended-ok` in the instance's `turn-state.json` /
+`sandbox status`. That matters because the guest **auto-nudges** an unreported
+idle agent a few times on its own, so a report may still land after the command
+exits — most silent stops recover without you doing anything.
+
+**Reports are journaled — a lost terminal doesn't lose the verdict.** Every
+relayed report, plus the stopped/re-armed lifecycle notices, is appended to
+`reports.ndjson` in the instance's state dir as it streams. So if the driving
+process's output is gone (terminal closed, tmux pane died, scrollback lost) you
+do **not** need to re-prompt the agent to restate itself:
+
+```sh
+sandbox status <name>            # `last report:` shows the latest conclusion
+```
+
+The detail view shows the first line; the full text (multi-line verdicts
+included) is in `reports.ndjson`, one JSON object per line with `turnId`,
+`status`, `text`, and a host timestamp. Journaling is best-effort and additive —
+the `--json` stream is unchanged.
+
+**Limit:** the journal is written by the _live_ drive, so it captures what that
+drive saw. If you kill the driving process itself, anything the agent reports
+afterwards — including a report the guest's auto-nudges land later — is not
+journaled. Losing the **output** is fully covered; losing the **process** is
+not.
+
+**Recovering a launch that lost its directive.** A prompted launch
+(`sandbox start --agent --prompt …`, and every `sandbox dispatch`) writes its
+composed directive to `directive.md` in the instance's state dir, then boots the
+VM **detached** before delivering it. So if the launching process dies in
+between — killed, terminal closed, orchestrator gone — you are left with a
+healthy, idle VM that never received its instructions. Don't recompose it by
+hand:
+
+```sh
+sandbox prompt <name> --redeliver     # re-send the persisted directive as a fresh turn
+```
+
+It takes no text (passing both is an error) and delivers verbatim, with normal
+turn-id and delivery-ack semantics. If there is no directive — the instance was
+launched without a `--prompt` — the command says so and tells you to send the
+text explicitly. The file's lifetime follows the state dir: an ephemeral
+instance's goes when its state is reaped, a named instance's survives
+stop/start.
 
 **Prompting a paused instance auto-starts it.** `sandbox stop <name>` on a named
 instance _pauses_ it: the VM powers off but its state dir (and branch) are kept.
@@ -349,9 +409,29 @@ re-check `sandbox status` before trusting a number across a change.
 To watch the agent work live, run `sandbox attach <name|#>` — it SSHes in, pins
 `TERM=xterm-256color` (so terminals like ghostty don't trip up the guest's
 `tmux`), and attaches the running `katsuobushi` tmux session.
-`sandbox status <name>` still prints the raw ssh command if you need it. The
-serial console is teed to `console.log` in the instance's state dir — read it to
-diagnose a stuck boot.
+`sandbox status <name>` still prints the raw ssh command if you need it.
+
+**Which log, and when.** A launch has two phases with two different logs, and
+reaching for the wrong one is how a healthy launch gets mistaken for a hang:
+
+| Phase                                                         | State reported          | Log                                 |
+| ------------------------------------------------------------- | ----------------------- | ----------------------------------- |
+| **Pre-boot** — mirror clone, nix DB snapshot, context/secrets | `provisioning (<step>)` | `provision.log` in the state dir    |
+| **Booted** — the VM itself                                    | `running`               | `console.log` (teed serial console) |
+
+`console.log` does not exist until QEMU starts, so during provisioning it is
+`provision.log` you want — it carries a `::: <step>` / `::: done (Ns)` marker
+pair for every step, written the moment it happens. `sandbox status <inst>`
+names the step in flight and points at the file. **A launch that sits in one
+provisioning step for minutes is usually working, not stuck** — a cold nix DB
+snapshot or mirror clone is genuinely slow. Read the log before intervening, and
+never kill a provisioning step.
+
+`sandbox status <inst>` also reports a `store db:` line once the guest has
+booted. `system-only` there means the guest did **not** get the host's Nix
+database — every host-built path on the shared store is invalid inside the VM,
+so the agent will fail to run gates. Relaunch rather than burning a session on
+it.
 
 Unnamed instances are ephemeral (removed on stop). `--name` makes an instance
 persistent: it keeps its branch. A provided `--name` is suffixed with random
@@ -372,5 +452,6 @@ signed off — the instance is spent: remove it with
 - One serial session per VM: reports answer prompts in order. `done`/`blocked`
   are the signals to act on; the pushed branch is the deliverable.
 - Agent mode relies on Claude Code's experimental "channels" feature; if a
-  launch never arms the channel, check `console.log` and `sandbox status`.
+  launch never arms the channel, check `console.log` and `sandbox status`
+  (before boot, `provision.log` — see "Which log, and when" above).
 - Treat the OAuth token as a live credential; it stays on subscription billing.
