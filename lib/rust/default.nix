@@ -79,11 +79,54 @@ let
   # wanted; we use it specifically for `rust-bin` below.
   pkgsWithRust = pkgs.extend (import rust-overlay);
 
+  # Does `sourceInclude` carry the project's `.cargo/` into the Nix builds? An
+  # entry covers it if it *is* `.cargo`, is nested under it, or is a whole-tree
+  # include (`"."` / `""`). Cheap and conservative: an exotic filter spec we
+  # don't recognise is treated as covering, so this can only under-warn.
+  cargoDirIncluded = builtins.any (
+    entry:
+    let
+      path = if builtins.isString entry then entry else (entry.path or null);
+    in
+    path == null
+    || path == "."
+    || path == ""
+    || path == ".cargo"
+    || pkgs.lib.hasPrefix ".cargo/" path
+  ) sourceInclude;
+
+  # `.cargo/config.toml` holds the flags cargo builds under — a linker choice,
+  # a target-cpu, a rustflags block. When it exists but is filtered out of the
+  # Nix source, every Nix-built artifact is compiled under *different* flags than
+  # the dev shell uses, and cargo silently discards those artifacts rather than
+  # reporting a mismatch: the operator sees only a long rebuild. The default
+  # `sourceInclude` carries `.cargo`; this catches the project that overrode it
+  # for an unrelated reason and dropped `.cargo` without noticing.
+  #
+  # NB: under flakes `workspaceRoot` is the store copy of the *tracked* tree, so
+  # this sees a committed (or at least staged) config — an untracked one is
+  # invisible here exactly as it is invisible to the build it would have
+  # affected.
+  cargoConfigPresent = builtins.pathExists (workspaceRoot + "/.cargo/config.toml");
+
+  # An explicit line list rather than a `''` block, so the paragraph breaks are
+  # unambiguous at the call site. (Nix hang-indents the continuation lines under
+  # its own "evaluation warning: " prefix when it renders this.)
+  cargoConfigWarning = builtins.concatStringsSep "\n" [
+    "katsuobushi.lib.rust: this project has a .cargo/config.toml, but `sourceInclude` does not carry `.cargo` into the Nix builds."
+    ""
+    "The flags in that file (rustflags, linker, target-cpu, …) apply to your dev shell but NOT to anything Nix builds. Cargo folds those flags into every unit hash, so a Nix-built artifact is silently discarded by an interactive cargo — you get a full rebuild and no error explaining why."
+    ""
+    "Add \".cargo\" to `sourceInclude` (it is in the default set), or drop the config file if it is no longer wanted."
+  ];
+
   # Filter source to only Rust-relevant files.
-  rustSource = filter {
-    root = workspaceRoot;
-    include = sourceInclude;
-  };
+  rustSource =
+    pkgs.lib.warnIf (cargoConfigPresent && !cargoDirIncluded) cargoConfigWarning
+      (filter {
+        root = workspaceRoot;
+        include = sourceInclude;
+      });
 
   rustToolchain = pkgsWithRust.rust-bin.fromRustupToolchainFile (workspaceRoot + "/rust-toolchain.toml");
   craneLib = (crane.mkLib pkgs).overrideToolchain (_: rustToolchain);
