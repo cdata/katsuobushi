@@ -5,6 +5,68 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.3.8] — 2026-08-05
+
+Makes Nix-built Rust artifacts _diagnosable_ — the groundwork for having agents
+start warm instead of cold-compiling a dependency closure before their first
+useful action. Two additions to `lib.rust` (an alignment manifest beside every
+deps bundle, and a checker that says whether cargo will actually reuse it), plus
+agent-facing guidance that steers dispatched agents at the project's own menu
+rather than at habitual `cargo` invocations. No spec or instance-state change
+(`specVersion 4` / `instanceVersion 2` unchanged). Consumers see one deps-bundle
+rebuild — see [`MIGRATING.md`](MIGRATING.md#038).
+
+The motivating measurement, for context: seeding a cargo target directory from a
+crane deps bundle achieves **nothing** on its own — cargo discards the artifacts
+and rebuilds — unless the shell also resolves dependencies through the same
+vendored source replacement the bundle was built against. That is why alignment
+is worth a tool: every way of getting it wrong is silent, and looks exactly like
+an honest long build.
+
+### Added
+
+- **Alignment manifests beside every deps bundle.** `lib.rust`'s deps-only
+  derivations now write `manifest.json` next to `target.tar.zst`, recording what
+  cargo folds into every unit hash: the rustc identity, target triple, profile,
+  `RUSTFLAGS` / `CARGO_ENCODED_RUSTFLAGS` / `CARGO_BUILD_RUSTFLAGS`, a content
+  hash of the workspace cargo config the build actually saw, and the vendored
+  source directory. `target.tar.zst` itself is unchanged and crane ignores the
+  extra file.
+- **`lib.rust.checkArtifactAlignment`** —
+  `katsuobushi-check-artifact-alignment [--profile <name>] <manifest.json|bundle-dir>`.
+  Compares a bundle's manifest against the environment a live cargo would run
+  under, reproducing cargo's own config resolution (`.cargo/config.toml` from
+  the cwd upward plus `$CARGO_HOME`, nearest wins) to find the effective
+  `[source.crates-io] replace-with` directory. Exit **0** aligned, **1** with
+  the diverged field named and its consequence spelled out, **2** when the
+  verdict is unknown (no manifest, a cargo config that cargo itself could not
+  parse, or a broken check) — an unknown is never reported as a mismatch.
+  Verified against ground truth: a green verdict corresponds to cargo reusing
+  the closure (3 workspace units), a red one to a full rebuild (91 units).
+- **A `sourceInclude` lint.** `lib.rust` warns at evaluation when the project
+  has a `.cargo/config.toml` that `sourceInclude` does not carry into the Nix
+  builds. Those flags then apply to the dev shell but not to anything Nix
+  builds, and cargo discards the mismatched artifacts without saying why. The
+  default `sourceInclude` already includes `.cargo`; this catches a project that
+  overrode it for an unrelated reason.
+
+### Changed
+
+- **The guest contract points dispatched agents at the project's menu.** Both
+  the sandbox's guest README and the always-on agent contract now tell an agent
+  to run `nix develop -c menu` before its first build/test/run command and to
+  prefer the project's own commands — and, when the menu has nothing for the
+  job, to use the raw tool and **report the gap**, so a missing menu command
+  becomes board signal instead of a silent divergence. The contract is explicit
+  that an agent session starts in a plain login shell, where `menu`/`showMenu`
+  are not on `PATH` until you go through `nix develop`.
+- **The `project-orchestration` and `sandbox` skills drop the cold-compile
+  folklore.** The reviewer-directive template no longer teaches "first build
+  cold-compiles and takes minutes"; build/test commands are documented as
+  belonging in the menu rather than in `.dispatch-instructions.md`; and the
+  advice to raise `progressStallSecs` now asks first why the guest is compiling
+  that long at all.
+
 ## [0.3.7] — 2026-08-05
 
 Takes the rebuild latency out of the multi-turn review loop and stops the

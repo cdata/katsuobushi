@@ -8,6 +8,42 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.3.8
+
+**Expect one deps-bundle rebuild.** `lib.rust`'s deps-only derivations now emit
+an alignment `manifest.json`, which changes their derivation hash. The bundled
+`target.tar.zst` is unchanged in content and crane ignores the new file, so
+nothing behaves differently — but the first build after upgrading recompiles the
+dependency closure once. No action required.
+
+**A new evaluation warning may fire.** If your project has a
+`.cargo/config.toml` and your `sourceInclude` does not carry `.cargo` into the
+Nix source, `lib.rust` now warns. It is telling you something real: those flags
+apply to your dev shell but not to anything Nix builds, so cargo silently
+discards Nix-built artifacts and rebuilds. Add `".cargo"` to `sourceInclude` (it
+is in the default set) or drop the config file. Projects using the default
+`sourceInclude`, or with no cargo config, see nothing.
+
+**New export: `checkArtifactAlignment`.** Additive; nothing existing changes.
+Wire it into your menu if you want an answer to "why is this rebuilding?":
+
+```nix
+rust = katsuobushi.lib.rust { inherit pkgs; /* … */ };
+# rust.checkArtifactAlignment → katsuobushi-check-artifact-alignment
+```
+
+Exit codes are **0** aligned, **1** misaligned with the field named, **2**
+unknown (no manifest / unparseable cargo config / broken check). A `2` is not a
+mismatch — do not treat it as one.
+
+**If you drive agents into sandboxes, check your menu.** The guest contract now
+instructs dispatched agents to run `nix develop -c menu` and prefer the
+project's own build/test commands, reporting a gap when the menu has none. A
+project whose menu lists only housekeeping (format, lint) will see agents
+legitimately fall back to raw `cargo`/`nix build` — the fix is to give the
+project real menu commands rather than to write build instructions into
+`.dispatch-instructions.md`.
+
 ## 0.3.7
 
 **Docs only — no action required.** No tooling, spec, or instance-state change
