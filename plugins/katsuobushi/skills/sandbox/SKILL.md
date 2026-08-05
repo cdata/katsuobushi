@@ -143,8 +143,11 @@ sandbox = katsuobushi.lib.sandbox {
 
   # How long a turn may go without a *report* before the host prints its
   # first "no reports" notice (default 300; a stronger one follows at 3x that).
-  # Only reports reset this clock,
-  # so set it past the project's cold-build time or it fires every launch.
+  # Only reports reset this clock, so it must clear the project's real
+  # first-build time. Before raising it far, ask why the guest is compiling that
+  # long at all: a project whose menu commands are Nix-backed hands its VM
+  # prebuilt artifacts, and a large value here is often a warm-start problem
+  # wearing a timeout as a disguise.
   progressStallSecs = 1500;
 
   # Escape hatch: extra NixOS modules merged into the guest

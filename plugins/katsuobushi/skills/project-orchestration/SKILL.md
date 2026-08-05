@@ -98,8 +98,12 @@ A good review directive:
 - Lists what to review: correctness on the fragile paths, test quality
   (meaningful vs. rubber-stamp), failure modes, and what should **block**.
 - Requires **empirical** verification — run the build/tests/clippy, don't just
-  read: "start the test build once in the background and wait; first build cold-
-  compiles and takes minutes."
+  read. Point the reviewer at the **project's menu** for how: "list the
+  project's commands with `nix develop -c menu` and use its own test/lint
+  commands — a sandbox starts in a plain login shell, so `menu`/`showMenu` are
+  not on PATH until you go through `nix develop`. Reach for raw
+  `cargo`/`nix build` only if the menu has nothing for what you need, and say so
+  in your report if you do."
 - Ends:
   `report done "VERDICT: accept | needs-changes + strongest findings (file:line) + test-quality assessment + would-you-block"`.
 
@@ -187,11 +191,31 @@ plus the instructions file. (If the VM never came up at all, reset the card to
 `todo` and re-dispatch instead.)
 
 Write a **`.dispatch-instructions.md`** in the board dir with the project's
-conventions (how to build/test in the sandbox, the acceptance gate, one-command-
-per-Bash, commit/push discipline, `report done`/`report blocked`). Dispatch
-prepends it to every card so the agent doesn't have to rediscover them. Generic
-sandbox working-rules already come from the guest + the `sandbox` skill — don't
-restate them.
+conventions: the acceptance gate, one-command-per-Bash, commit/push discipline,
+`report done`/`report blocked`. Dispatch prepends it to every card so the agent
+doesn't have to rediscover them. Generic sandbox working-rules already come from
+the guest + the `sandbox` skill — don't restate them.
+
+**Build and test commands do not belong there — they belong in the menu.** A
+"how to build" section in a prose file is a copy that drifts from the commands
+that actually exist, and it competes with the dev shell's own table. Put the
+project's real build/test/run commands in the flake's menu, where they are
+executable and discoverable (`nix develop -c menu` from anywhere, `showMenu`
+inside the shell) — and where any artifact sharing the project has set up is
+actually wired. Keep the instructions file for what the menu cannot express.
+
+**A project whose menu has no build/test command has nothing to steer agents
+to.** Check before you rely on this: if `nix develop -c menu` lists only
+housekeeping (format, lint, board), every dispatched agent will legitimately
+take the fallback branch, and the fix is to give the project a real menu rather
+than to write build instructions into the prose file.
+
+Then hold agents to it: a dispatched agent should consult the menu before
+building, use the project's command when one exists, and fall back to raw
+`cargo`/`nix build` only when the menu has nothing for the job — **reporting the
+gap when it does**. The guest contract states this too, but a missing menu
+command surfacing in a report is your signal to file it as a card rather than
+let every future dispatch improvise past it.
 
 ### The report bridge (orchestrator-driven)
 

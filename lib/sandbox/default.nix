@@ -494,9 +494,23 @@ let
     nix develop
     ```
 
-    which drops you into the project's dev shell (run `showMenu` there to see the
-    project's build/test/format commands). You may extend the flake exactly as on
-    the host; in-guest `nix` builds work against a writable store overlay.
+    which drops you into the project's dev shell. You may extend the flake
+    exactly as on the host; in-guest `nix` builds work against a writable store
+    overlay.
+
+    **The menu is the interface — consult it before you build, test, or run.**
+    The shell prints the project's command table on entry, and `showMenu`
+    reprints it at any time; from outside the shell, `nix develop -c menu` lists
+    the same table. Those commands are the project's own answer for how it is
+    built and tested. Where a project has arranged to share prebuilt artifacts
+    with this VM, its menu commands are what reach them — a generic `cargo build`
+    / `npm test` you reached for out of habit does not, and can cost you a long
+    rebuild of work that was already done for you.
+
+    Use the project's command when one exists. Reach for a raw toolchain command
+    (`cargo`, `nix build`, …) **only** when the menu has nothing for what you
+    need — and when that happens, say so in your report. A missing menu command
+    is a gap in the project worth fixing, not a licence to improvise silently.
 
     ## Returning your work
 
@@ -559,6 +573,23 @@ let
       the work is complete and pushed, or `report blocked` if you cannot proceed.
       If the operator re-prompts you because you stopped without one, treat that
       as a reminder to report your real state now.
+
+    **Build and test through the project's menu, not from Rust/JS/etc. habit.**
+    Before your first build, test, or run command, list the project's own
+    commands with
+
+    ```
+    nix develop -c menu
+    ```
+
+    and use one if it covers what you need. (You are **not** in the dev shell —
+    this session starts in a plain login shell — so `menu` and `showMenu` are not
+    on your PATH until you go through `nix develop`.) A project's own command is
+    where its build/test knowledge lives, and where any artifact sharing it has
+    set up actually happens; a generic toolchain invocation gets none of it. When
+    the menu has no command for what you need, use the raw tool and **name that
+    gap in your report** — the operator turns it into work; improvising silently
+    just hides it.
 
     Do not wait for, or ask for, interactive confirmation — there is no human at
     this terminal. When the operator tells you that you are finished (or to shut
