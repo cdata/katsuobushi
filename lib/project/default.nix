@@ -26,6 +26,14 @@
 #   # Merge into the menu, and (optionally) the flake checks:
 #   commands = … // project.menuCommands;
 #   checks   = … // project.checks;
+#
+# If the project also uses `lib.markdown`, feed `project.markdownExclude` into
+# its `exclude` so the machine-managed `BOARD.md` is never format-gated:
+#
+#   markdown = katsuobushi.lib.markdown {
+#     inherit pkgs; workspaceRoot = ./.;
+#     exclude = project.markdownExclude;   # keeps issues/*.md gated
+#   };
 {
   pkgs,
   # The built `katsuctl` binary (host-side controller). Required — this library
@@ -47,6 +55,17 @@ let
   # subcommand`. Rewrite `katsuctl project` back to `project` so what a user
   # sees matches what they typed.
   usageSed = "${pkgs.gnused}/bin/sed -E 's|katsuctl project|project|g'";
+
+  # `BOARD.md` has three writers with mutually incompatible serializations: the
+  # `katsuctl project` CLI, Prettier (via `lib.markdown`), and the Obsidian
+  # Community Kanban plugin. The plugin's serializer is fixed and not
+  # configurable to match the other two, so merely opening the board in Obsidian
+  # rewrites the file into a shape a Prettier gate rejects. The board is
+  # machine-managed structured data, not prose, so the resolution is to take it
+  # out of the gate entirely — a consumer merges this into `lib.markdown`'s
+  # `exclude`. Card notes (`<boardDir>/issues/*.md`) are real prose that Obsidian
+  # does not reformat, and stay gated.
+  markdownExclude = [ "${boardDir}/BOARD.md" ];
 
   menuCommands = {
     project = {
@@ -94,5 +113,5 @@ let
   };
 in
 {
-  inherit menuCommands checks;
+  inherit menuCommands checks markdownExclude;
 }

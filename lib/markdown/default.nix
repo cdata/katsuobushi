@@ -64,14 +64,42 @@ let
 
   prettier = pkgs.prettier;
 
+  # Prettier applies `.gitignore` semantics to `--ignore-path`, which anchors a
+  # pattern containing a `/` to **the directory holding the ignore file** — not
+  # the working directory. A store-path ignore file therefore resolves
+  # `project/kanban/BOARD.md` against `/nix/store/…`, where it can never match,
+  # and `exclude` silently does nothing. So both call sites below stage the
+  # generated file *at the workspace root* and point `--ignore-path` at that
+  # copy, which is what makes `exclude` entries workspace-relative as documented.
+  ignoreName = ".prettierignore.${name}";
+
   # Shared invocation: parser pinned to markdown so bare globs/dirs are treated
-  # as Markdown, config + ignore file from the store, then the include targets.
-  # `$mode` is `--check` or `--write`.
+  # as Markdown, config from the store, root-staged ignore file, then the
+  # include targets. `$mode` is `--check` or `--write`.
+  #
+  # `--write` has to run in the real tree, so the staged ignore file is written
+  # into the repo root and removed on exit (including on Ctrl-C).
+  #
+  # The staged name carries the **pid**, not just `name`. Namespacing by `name`
+  # alone is not enough: `<name> format` and `<name> lint` share a `name`, so two
+  # overlapping runs would share one path and the first to finish would delete
+  # the file out from under the second. That failure is silent and dangerous —
+  # Prettier does **not** error on a missing `--ignore-path`, it exits 0 having
+  # ignored nothing, so the losing `format` run would happily rewrite every
+  # excluded file (a machine-managed `BOARD.md` among them). The explicit
+  # existence check below is belt-and-braces against the same class of bug.
   runPrettier = mode: ''
     cd "$(git rev-parse --show-toplevel)"
+    ignore="${ignoreName}.$$"
+    cp -f ${prettierIgnore} "$ignore"
+    trap 'rm -f "$ignore"' EXIT INT TERM
+    if [ ! -f "$ignore" ]; then
+      echo "${name}: could not stage the ignore file at $PWD/$ignore" >&2
+      exit 1
+    fi
     ${prettier}/bin/prettier ${mode} \
       --config ${prettierConfig} \
-      --ignore-path ${prettierIgnore} \
+      --ignore-path "$ignore" \
       --parser markdown \
       ${lib.escapeShellArgs include}
   '';
@@ -109,11 +137,17 @@ in
   # (filtered by include/exclude), so every included file must be tracked — a
   # check cannot reach .gitignore'd paths, which aren't in the flake source.
   checks = {
+    # The check is read-only, so instead of writing into the (immutable) source
+    # store path it copies the tree into the build dir and stages the ignore
+    # file there — the copy is what lets `exclude` patterns resolve
+    # workspace-relative (see the `ignoreName` note above).
     "${name}" = pkgs.runCommand "lint-${name}" { } ''
-      cd ${workspaceRoot}
+      cp -r --no-preserve=mode,ownership ${workspaceRoot} ./workspace
+      cp -f ${prettierIgnore} ./workspace/${ignoreName}
+      cd ./workspace
       ${prettier}/bin/prettier --check \
         --config ${prettierConfig} \
-        --ignore-path ${prettierIgnore} \
+        --ignore-path ${lib.escapeShellArg ignoreName} \
         --parser markdown \
         ${lib.escapeShellArgs include}
       touch $out

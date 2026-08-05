@@ -51,6 +51,19 @@ without collision (there is no shared/global command).
   **tracked** — a flake check cannot reach `.gitignore`'d paths (they are not in
   the flake source). Format such paths with the menu command instead.
 
+**Exclude machine-managed Markdown.** The default `include` is every tracked
+`.md` file, which will sweep up files another tool owns. The
+[`lib.project`](../project/README.md) board is the case to know about: its
+`BOARD.md` is also written by the Obsidian Kanban plugin, whose serializer
+cannot be made Prettier-stable, so opening the board in Obsidian fails the gate.
+`lib.project` exports the glob to skip:
+
+```nix
+exclude = project.markdownExclude; # ⇒ [ "<boardDir>/BOARD.md" ]
+```
+
+The board's card notes stay gated — they are prose.
+
 ## Defaults
 
 `settings` are [Prettier options][options], merged over these defaults with
