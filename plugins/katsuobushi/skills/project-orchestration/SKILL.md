@@ -26,28 +26,9 @@ The `project` skill covers card/board mechanics. This skill is the
 implementation and review. Every step below that touches a VM assumes you have
 loaded the `sandbox` skill as instructed above.
 
-### If you loaded only this skill
+**IMPORTANT: If you loaded only this skill...**
 
-Defense in depth for the case where you are mid-incident without the `sandbox`
-skill. These are the three facts whose absence has actually cost sessions — they
-are **not** a substitute for loading it:
-
-- **The state dir holds two logs, and which one you want depends on the phase.**
-  Before the VM boots, `sandbox status` reads `provisioning (<step>)` and the
-  live diagnostic is `provision.log`; once booted it reads `running` and the
-  diagnostic is `console.log` (the teed serial console). `sandbox attach <name>`
-  watches the agent live.
-- **`⚠ no reports for …` is usually benign.** Only reports reset that clock, and
-  an agent inside one long foreground call (a cold build is routinely 20
-  minutes) emits none. The first notice says as much; a stronger one follows
-  only if the silence reaches three times the window. Inspect with
-  `sandbox attach` before concluding anything is wrong — never kill a
-  provisioning step because it looks slow. If it fires on every launch, the
-  project should raise `progressStallSecs`.
-- **Stop is not remove.** `sandbox stop <name>` pauses a named instance and
-  keeps its scratch volume, so it can be restarted;
-  `sandbox stop --remove <name>` discards the instance and its state dir. Reach
-  for `--remove` only once the work is landed or abandoned.
+...then load the /sandbox and /project skills!
 
 ## The four roles
 
@@ -82,9 +63,10 @@ flowing:
 - **Pump the backlog** — dispatch Available cards to implementor agents and keep
   work moving as cards clear.
 - **Bound concurrency** — fan work out in parallel only as wide as you can
-  actually integrate _and_ as wide as the host's cores allow (each VM is ~4
-  vCPU; budget half the box by default, and ask the owner at session start — see
-  "Swarming"). Too many in-flight branches is merge thrash, not throughput.
+  actually integrate _and_ as wide as the host's cores allow. Read the VM's size
+  out of **this project's flake** rather than assuming the 4-vCPU default;
+  budget half the box, and ask the owner at session start — see "Swarming". Too
+  many in-flight branches is merge thrash, not throughput.
 - **Wrangle merges** — land each returned branch, and when parallel work
   collides, drive the **conflict reconciliation** (delegate it to a fresh
   sandbox like any other work — see the `sandbox` skill).
@@ -129,9 +111,13 @@ to get it reviewed. When it reports:
   reviewer's decision), file any non-blocking follow-ups as their own cards, and
   hand the `ready → accepted` step to the human.
 - **needs-changes** → append the findings to the card's `## Review notes`, move
-  it `→ in-progress`, address them, and re-review.
+  it `→ in-progress`, and send them to the card's **paused implementor VM** (see
+  "Keep the pair warm", below) rather than fixing them yourself or dispatching a
+  cold instance. Then re-review with the same reviewer.
 
-Then remove the spent reviewer VM: `sandbox stop --remove review-<slug>`.
+Only once the card reaches `ready` is the reviewer spent — then remove it:
+`sandbox stop --remove review-<slug>`. Until then **pause** it
+(`sandbox stop review-<slug>`, no `--remove`) so the re-review starts warm.
 
 ## Implement in a sandbox by default
 
@@ -214,10 +200,13 @@ into `dispatch` — you (the orchestrator) drive it, per the `sandbox` skill's
 collect- and-integrate flow:
 
 - **`done`** → `sandbox fetch card-<id>`, land the branch (rebase workflow from
-  the `sandbox` skill), then `project status set <id> needs-review`. Now review
-  it (a sandbox reviewer, above) before it reaches `ready`. **Check that work
-  actually landed:** `sandbox fetch` compares the fetched branch tip to the seed
-  it launched from and warns (human: a `WARNING: no committed work landed` line;
+  the `sandbox` skill), then `project status set <id> needs-review`. **Pause the
+  VM instead of removing it** — the landing procedure's
+  `sandbox stop --remove <name>` assumes the unit of work is accepted, which is
+  not true at `needs-review` (see "Keep the pair warm", below). Now review it (a
+  sandbox reviewer, above) before it reaches `ready`. **Check that work actually
+  landed:** `sandbox fetch` compares the fetched branch tip to the seed it
+  launched from and warns (human: a `WARNING: no committed work landed` line;
   `--json`: `"landed": false`) when they match — i.e. the agent ended its turn
   without committing. Treat that as a non-`done`: inspect with `sandbox attach`,
   reset the card to `todo`, and re-dispatch a fresh instance rather than
@@ -251,6 +240,60 @@ unreported yield, because you are watching and can re-prompt. Its warning tells
 you how to wait instead. Don't substitute arbitrary `sleep`s for a completion
 event; use the armed drive.
 
+### Keep the pair warm until the card is `ready`
+
+A card in `needs-review` is **not** finished work — it is work mid-loop, and the
+loop usually runs more than one turn. So **pause** both VMs of the pair rather
+than discarding them:
+
+```sh
+sandbox stop card-<id>          # pause the implementor — no --remove
+sandbox stop review-<slug>      # pause the reviewer   — no --remove
+```
+
+`stop` on a named instance powers the VM off but keeps its state dir, branch,
+and **scratch volume** — the cargo / rustup / nix caches and the built target
+dir. A resumed instance therefore picks up where its build left off, while a
+fresh dispatch cold-compiles the whole project first. That rebuild is the
+dominant latency in a multi-turn review loop, and paying it on every bounce is
+the mistake this section exists to prevent. `sandbox prompt` on a paused
+instance **auto-starts it** (~30–60s to boot and arm), so resuming is just:
+
+```sh
+sandbox prompt card-<id> "<the review findings, verbatim, + what to change>"
+sandbox prompt review-<slug> "<re-review directive pointing at the new commits>"
+```
+
+Remove each VM only when its work is truly spent:
+
+- **implementor `card-<id>`** — when the card reaches `ready` (review passed).
+- **reviewer `review-<slug>`** — same: it may be asked to re-review any number
+  of times before then.
+- **either one, early** — if the card is bounced to `todo`, cancelled, or the
+  instance is stalled/unreported. A stalled VM is not warm, it's stuck; remove
+  it and dispatch fresh.
+
+Three properties of a resume to write your prompts around:
+
+- **RAM is wiped, so the conversation is gone.** The resumed agent is a fresh
+  session reading its branch — not a continuation. Make the prompt stand on its
+  own: quote the review findings in full, point at the branch and the card, and
+  never say "as we discussed".
+- **The instance's mirror is frozen at its launch**, so it cannot see host
+  commits landed since. Fixes come back as more commits on the old seed and you
+  rebase them on landing, exactly as before. If the feedback genuinely requires
+  the agent to build against work landed after its launch, that's the case for a
+  **fresh** instance — take the cold build knowingly.
+- **Record both full instance names on the card** (in `## Dispatch log`) as soon
+  as you launch them. `--name` returns a suffixed name, and a later turn — or a
+  later orchestrator — can only resume the pair if the names are on the card
+  rather than in a context that has since compacted.
+
+Paused VMs cost **disk, not cores or RAM** — they don't count against the
+concurrency budget below. They do hold their store/scratch volumes, though, so
+sweep the pairs of cards that reached `ready` instead of letting them
+accumulate; `sandbox status` lists what is running vs. stopped.
+
 ## Swarming the backlog
 
 To burn down several Available cards at once, dispatch one per card as a batch
@@ -261,22 +304,39 @@ most landings stay fast-forwards. Keep review in the loop: each landed card
 still goes `needs-review → (sandbox review) → ready` before a human accepts. See
 the `sandbox` skill's "Parallel fan-out" for the mechanics.
 
-### Bound concurrency to the host's cores
+### Bound concurrency to the host's resources
 
-Each sandbox is a **real VM with its own vCPUs** (the `sandbox` lib defaults to
-**4 vCPU per VM**), so a wide fan-out oversubscribes the host and grinds
-everything — including your own orchestrator loop — to a crawl. Size the batch
-to the hardware, not to the number of Available cards:
+Each sandbox is a **real VM with its own vCPUs and its own RAM**, so a wide
+fan-out oversubscribes the host and grinds everything — including your own
+orchestrator loop — to a crawl. Size the batch to the hardware, not to the
+number of Available cards:
 
-- **Budget half the box by default.** Let sandboxes claim at most **half the
-  host's logical cores**, unless the product owner says otherwise. Roughly
-  `max concurrent VMs ≈ (system cores ÷ 2) ÷ vCPU-per-VM` — so an 8-core host
-  with default 4-vCPU VMs runs **one** at a time; 16 cores → **two**; 32 →
-  **four**. (Read the host's core count, e.g. `nproc`, rather than guessing.)
+- **Read the VM's size from the project's flake — don't assume the default.**
+  The consumer sets `vcpu` and `mem` on its `lib.sandbox` call, so a project may
+  be running 8- or 16-vCPU VMs, and one of those is worth two or four of the
+  defaults. Grep the project's `flake.nix` (or wherever it calls `lib.sandbox` /
+  `sandboxLib`) for `vcpu` and `mem` before you compute anything. Only when the
+  call sets neither does the lib's default apply: **4 vCPU, 8192 MiB**. Nothing
+  asserts a ceiling, so a graphics-enabled or build-heavy project has usually
+  raised one or both — read, don't assume.
+- **Budget half the box by default, on _both_ axes.** Let sandboxes claim at
+  most **half the host's logical cores** and **half its RAM**, unless the
+  product owner says otherwise. The batch size is whichever bound is tighter:
+
+  ```
+  max concurrent VMs ≈ min( (cores ÷ 2) ÷ vcpu , (RAM MiB ÷ 2) ÷ mem )
+  ```
+
+  Read the host's actual numbers (`nproc`, `free -m`) rather than guessing. With
+  default 4-vCPU / 8 GiB VMs, a 16-core / 32 GiB host runs **two**; the same
+  16-core host with a project configured at `vcpu = 8` runs **one**.
+
 - **Ask at the start of a session.** When the work is just getting going, prompt
   the owner for the share of system resources to devote to concurrency (e.g.
   "half", "all but two cores") _before_ you fan out, and carry that budget for
-  the rest of the session. Don't guess and swamp the machine.
+  the rest of the session. Tell them the per-VM size you read from the flake and
+  the VM count it implies — a bare "half the box" is not actionable to someone
+  who doesn't have `vcpu` memorized. Don't guess and swamp the machine.
 
 ## Gotchas learned in practice
 
@@ -294,6 +354,11 @@ to the hardware, not to the number of Available cards:
 - **Reviewer ≠ implementor is a hard rule, not a nicety.** When you both build
   and review, you rubber-stamp your own blind spots. The sandbox boundary makes
   the separation real and cheap.
+- **Don't `--remove` a VM whose card is still in review.** The habit comes from
+  the `sandbox` skill's landing procedure, which removes an instance once its
+  work is accepted — but at `needs-review` it isn't. Removing it throws away the
+  warm build caches, so every round of reviewer feedback pays a full cold
+  compile before it can change a line. Pause instead; see "Keep the pair warm".
 - **Trust the branch, not "the VM ran."** A dispatched agent can end its turn
   **unreported** (`sandbox status` shows `ended-unreported`) having done the
   work in-VM but never committing/pushing — `sandbox fetch` then shows only the
