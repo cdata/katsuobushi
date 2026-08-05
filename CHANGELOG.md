@@ -5,6 +5,47 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.3.7] — 2026-08-05
+
+Takes the rebuild latency out of the multi-turn review loop and stops the
+orchestrator guessing at how big a sandbox VM is. Docs-only — the
+`project-orchestration` skill; no tooling, spec, or instance-state change
+(`specVersion 4` / `instanceVersion 2` unchanged). See
+[`MIGRATING.md`](MIGRATING.md#037).
+
+### Changed
+
+- **A card's sandboxes stay warm until it is `ready`.** The skill previously
+  read as though a VM were spent once its branch landed, so orchestrators
+  carried the `sandbox` skill's `sandbox stop --remove <name>` habit — correct
+  when work is _accepted_ — into `needs-review`, where it isn't. Every round of
+  reviewer feedback then paid a full cold compile in a fresh instance before it
+  could change a line, which in a project with a 20-minute build is most of the
+  loop. The implementor VM is now **paused** (`sandbox stop card-<id>`, no
+  `--remove`) at `needs-review` and resumed with the findings — `sandbox prompt`
+  auto-starts a paused instance, and its scratch volume still holds the built
+  target dir and the cargo/nix caches. The counterpart reviewer is paused the
+  same way between rounds, since it may re-review several times. `--remove` for
+  both is now tied to the card reaching `ready` (or being bounced, cancelled, or
+  stalled). The skill spells out the three things a resume forces you to write
+  around: the VM's RAM is wiped so the prompt must stand alone, its mirror is
+  frozen at launch so fixes come back on the old seed, and both full instance
+  names belong on the card's `## Dispatch log` so a later turn can find the
+  pair.
+- **Fan-out is sized from the project's own `lib.sandbox` config.** The
+  concurrency guidance asserted "each VM is ~4 vCPU", which is only the lib's
+  default — a project that sets `vcpu = 8` was silently budgeted at half its
+  real cost. The orchestrator now reads `vcpu` and `mem` out of the consuming
+  flake before computing anything, and falls back to **4 vCPU / 8192 MiB** only
+  when the call sets neither. RAM joins cores as a bound, since `mem` often
+  binds first: `max VMs ≈ min((cores ÷ 2) ÷ vcpu, (RAM ÷ 2) ÷ mem)`, read from
+  `nproc` / `free -m`. The session-start question to the product owner now has
+  to quote the per-VM size and the VM count it implies, rather than asking for
+  "half the box" in the abstract.
+- **The "if you loaded only this skill" section is a pointer, not a summary.**
+  It restated three sandbox facts that have since been documented in place; it
+  now just says to load the `sandbox` and `project` skills.
+
 ## [0.3.6] — 2026-08-05
 
 Burns down the 2026-08 post-mortem: a sandbox launch is now diagnosable while it

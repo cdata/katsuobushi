@@ -8,6 +8,22 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.3.7
+
+**Docs only — no action required.** No tooling, spec, or instance-state change
+(`specVersion 4` / `instanceVersion 2` unchanged); the `project-orchestration`
+skill is the only file that moved.
+
+One consequence worth knowing if you drive a board with agents: an orchestrator
+following the updated skill now **pauses** a card's implementor and reviewer VMs
+(`sandbox stop <name>`) at `needs-review` and removes them only once the card
+reaches `ready`, instead of removing them as soon as the branch lands. That is
+deliberate — a resumed instance skips the cold rebuild that otherwise
+front-loads every round of review feedback — but it means paused instances hold
+their `storeVolumeSize` + `scratchVolumeSize` volumes on disk for the length of
+the review loop rather than releasing them at `needs-review`. `sandbox status`
+lists what is stopped; `sandbox stop --remove <name>` reclaims it.
+
 ## 0.3.6
 
 **`sandbox dispatch` and prompted `sandbox start --agent` now wait for a
