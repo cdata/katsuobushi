@@ -28,12 +28,24 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
+use crate::sandbox::directive;
 use crate::sandbox::emit::{self, Recipe};
 use crate::sandbox::gfx::{self, Resolution};
 use crate::sandbox::host::{pick_cid, pick_port, Host, HostImpl, OsRng, Rng};
 use crate::sandbox::instance::{self, Instance, Mode, SUPPORTED_INSTANCE_VERSION};
 use crate::sandbox::spec::{load_spec, resolve_roots, ResolvedRoots, SecretSource, Spec};
 use crate::Global;
+
+/// Wall-clock bound on the pre-boot host Nix DB snapshot.
+///
+/// The snapshot is best-effort by design — a guest with no snapshot boots with a
+/// system-only store DB — so the only thing that must never happen is the step
+/// running unbounded. On a quiescent DB `VACUUM INTO` finishes in well under a
+/// second for a ~72 MB database; two minutes leaves room for a very large host
+/// store on slow storage while still failing fast enough that an operator does
+/// not conclude the launch has hung and kill it (which is what the unbounded
+/// `.backup` used to provoke).
+const NIX_DB_SNAPSHOT_TIMEOUT_SECS: u32 = 120;
 
 /// How the instance branch is seeded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +172,21 @@ pub fn run(
         seed: Some(plan.seed.commit().to_string()),
     };
     instance::write(&roots.state_glob, &meta).context("writing instance.json")?;
+
+    // Persist the directive next to it. Until now the composed text lived only
+    // in this process's argv and the transient recipe, so killing the launch
+    // (or losing its terminal) left a healthy, idle VM, a card marked
+    // in-progress, and the directive nowhere on disk — recoverable only by
+    // hand-recomposing it from the card. Writing it here makes
+    // `sandbox prompt --redeliver` a mechanical recovery.
+    //
+    // No new secret exposure: a directive is a card body plus the project's
+    // instructions prelude, both already plaintext in the board. Secrets ride
+    // fw_cfg and never appear here.
+    if let Some(text) = plan.prompt.as_deref() {
+        directive::write(&roots.state_glob, &plan.name, text)
+            .context("persisting the launch directive")?;
+    }
 
     let script_dir = emit::script_runtime_dir();
     emit::emit(&host, &script_dir, &mut rng, || {
@@ -575,6 +602,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     let sync_git = state_root.join("sync.git");
     let state_base = katsuobushi_base(&roots.state_glob, &spec.project_id);
     let console_log = state_root.join("console.log");
+    let phase_file = state_root.join("phase");
     let branch = format!("refs/heads/sandbox/{name}");
 
     let git = spec.tools.git.display().to_string();
@@ -606,10 +634,58 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     // within the per-instance dir. Mirrors the sync.git push-perm chmod below.
     r.line(format!("chmod a+rwX {}", qp(&state_root)));
 
+    // ---- provisioning visibility (log + phase marker) ----
+    //
+    // Everything from here until the runner starts is pre-boot: there is no QMP
+    // socket yet, so `sandbox status` cannot see the instance, and `console.log`
+    // does not exist yet because only the runner writes it. That window used to
+    // be structurally silent — an operator watching an 11-minute provisioning
+    // stall had `/proc` spelunking as their only diagnostic, and killed a live
+    // step because of it. Two cheap signals close it:
+    //
+    //   * `provision.log` — a tee of this script's own output, so every step's
+    //     begin/end marker is on disk the moment it happens.
+    //   * `phase` — the current step, one line, which `sandbox status` renders
+    //     as `provisioning (<step>)` instead of the untruthful `stopped`.
+    //
+    // stdout/stderr are *saved first* and restored before the handoff below:
+    // interactive mode hands the terminal to ssh+tmux, which needs a real TTY
+    // and would break behind a pipe.
+    r.blank()
+        .comment("Log provisioning from here (the runner's own console.log only starts at boot).");
+    // Both streams are logged, but they stay *separate*: stdout tees back to
+    // the saved stdout and stderr to the saved stderr. Collapsing them with
+    // `2>&1` would have sent the recipe's own failures (a missing secret exits
+    // via stderr) to the caller's stdout, quietly breaking the clean stream
+    // split `emit` documents.
+    r.line("exec 3>&1 4>&2".to_string());
+    r.line(format!(
+        "exec > >(tee -a {} >&3) 2> >(tee -a {} >&4)",
+        qp(&state_root.join("provision.log")),
+        qp(&state_root.join("provision.log"))
+    ));
+    r.line(format!(
+        "phase() {{ printf '%s\\n' \"$1\" > {}; _t0=$SECONDS; printf '::: %s\\n' \"$1\"; }}",
+        qp(&phase_file)
+    ));
+    r.line("phase_done() { printf '::: done (%ss)\\n' \"$((SECONDS-_t0))\"; }".to_string());
+    // Clear the marker if provisioning *aborts* — a missing secret exits 1, and
+    // `set -e` or Ctrl-C can end the script anywhere in here. Without this the
+    // marker outlives the dead launch and `sandbox status` reports
+    // `provisioning` forever, which is strictly worse than the `stopped` it used
+    // to report and would strand an orchestrator that (per MIGRATING) now treats
+    // `provisioning` as a live launch worth waiting for.
+    //
+    // Safe on every success path too: agent mode `exec`s away (traps do not run
+    // on exec) and has already removed the marker, and interactive mode installs
+    // its own EXIT trap later, which supersedes this one and also removes it.
+    r.line(format!("trap 'rm -f {}' EXIT INT TERM", qp(&phase_file)));
+
     // ---- bare mirror (idempotent) + branch seed + push-perm chmod ----
     r.blank().comment(
         "Per-instance bare git mirror + seeded branch (the guest clones it and pushes back).",
     );
+    r.line("phase 'staging project mirror'".to_string());
     if plan.clone_mirror {
         r.line(format!(
             "{git} clone --bare {} {} >/dev/null 2>&1",
@@ -634,6 +710,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     // Re-open the whole mirror to "other" writes so the guest can push (the
     // mapped-xattr saga) — run every launch, idempotent.
     r.line(format!("chmod -R a+rwX {}", qp(&sync_git)));
+    r.line("phase_done".to_string());
 
     // ---- importHostStoreDb snapshot, only when enabled ----
     if spec.import_host_store_db {
@@ -646,16 +723,39 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "sqlite3".to_string());
         r.blank()
-            .comment("Snapshot the host Nix DB so the guest reuses host-built paths (non-fatal).");
+            .comment("Snapshot the host Nix DB so the guest reuses host-built paths (non-fatal).")
+            .comment("VACUUM INTO, not .backup: SQLite's backup API restarts from page zero")
+            .comment("whenever another connection writes the source, and the nix-daemon writes")
+            .comment("db.sqlite on every derivation registration — so a snapshot overlapping any")
+            .comment("host `nix build` (a concurrent launch is one) restarts indefinitely.")
+            .comment("VACUUM INTO holds a read transaction instead and completes. `timeout` is")
+            .comment("belt-and-braces: on expiry the guest boots unseeded, the already-designed")
+            .comment("fallback, rather than wedging provisioning.");
+        r.line("phase 'snapshotting host nix DB'".to_string());
         r.line(r#"hostdb="${NIX_STATE_DIR:-/nix/var/nix}/db/db.sqlite""#.to_string());
-        // The dot-command is single-quoted for the *shell* (the path must not be
-        // shell-interpreted); the inner quotes are sqlite's own dot-arg quoting.
+        // VACUUM INTO refuses to write an existing file, so clear any leftover
+        // from a previous launch that timed out or was killed.
+        r.line(format!("rm -f {}", qp(&tmp)));
+        // The SQL is single-quoted for the *shell* (the path must not be
+        // shell-interpreted); the inner quotes are SQLite's own string literal.
+        // `mv` only on success, so a partial snapshot never lands as the real
+        // `nix-db.sqlite` the guest's seeding service conditions on.
+        // `[ -r "$hostdb" ]` first: sqlite3 *creates* a missing database on open,
+        // so without the guard an absent host DB would snapshot successfully as
+        // an empty one and ship that to the guest as if it were real. The
+        // `… && … || { … }` shape (rather than `if`) keeps the flat-recipe
+        // invariant — see the module docs on `emit`.
         r.line(format!(
-            "{sqlite} \"$hostdb\" {} 2>/dev/null && mv -f {} {} || true",
-            sq(&format!(".backup '{}'", tmp.display())),
+            "[ -r \"$hostdb\" ] && timeout {NIX_DB_SNAPSHOT_TIMEOUT_SECS} {sqlite} \"$hostdb\" {} 2>/dev/null && mv -f {} {} || {{ rm -f {}; echo {}; }}",
+            sq(&format!("VACUUM INTO '{}'", tmp.display())),
             qp(&tmp),
-            qp(&dest)
+            qp(&dest),
+            qp(&tmp),
+            sq(&format!(
+                "WARNING: host Nix DB snapshot failed or exceeded {NIX_DB_SNAPSHOT_TIMEOUT_SECS}s — the guest will boot with a system-only store DB (host-built paths won't be valid in the VM)."
+            )),
         ));
+        r.line("phase_done".to_string());
     }
 
     // ---- context staging, only when declared ----
@@ -664,6 +764,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
         r.blank().comment(
             "Stage declared untracked context (rsync --safe-links drops escaping symlinks).",
         );
+        r.line("phase 'staging workspace context'".to_string());
         r.line(format!("rm -rf {}", qp(&ctx_root)));
         r.line(format!("mkdir -p {}", qp(&ctx_root)));
         for p in &spec.context {
@@ -683,12 +784,14 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
                 qp(&dst_parent)
             ));
         }
+        r.line("phase_done".to_string());
     }
 
     // ---- secrets as REFERENCES, never values ----
     if !spec.secrets.is_empty() {
         r.blank()
             .comment("Declared secrets, staged as references — the value is re-read at runtime, never baked in.");
+        r.line("phase 'staging secrets'".to_string());
         for s in &spec.secrets {
             let cred = runtime_root.join(&s.dest);
             match &s.source {
@@ -730,6 +833,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
                 }
             }
         }
+        r.line("phase_done".to_string());
     }
 
     // ---- ephemeral ssh keypair + authorized_keys ----
@@ -796,12 +900,28 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
     }
     r.line(format!("cd {}", qp(&runtime_root)));
 
+    // ---- hand the terminal back, and mark the last pre-boot phase ----
+    //
+    // The runner takes over from here: it writes `console.log` itself, and in
+    // interactive mode the script goes on to hand a real TTY to ssh+tmux — which
+    // it cannot do while stdout is the `tee` pipe. Restoring the saved fds also
+    // closes the pipe's last writer, so `tee` flushes `provision.log` here.
+    // The marker is cleared as soon as the runner is *launched*, not when QMP
+    // starts answering, so the brief window between those two still reads
+    // `stopped` — by then `console.log` exists and is the better diagnostic.
+    r.blank()
+        .comment("Provisioning done: restore the real stdout/stderr before the runner takes over.");
+    r.line("phase 'booting VM'".to_string());
+    r.line("exec 1>&3 2>&4 3>&- 4>&-".to_string());
+
     // ---- mode-specific tail ----
     match plan.mode {
         Mode::Agent => agent_tail(
             &mut r,
             &runner,
             &console_log,
+            &phase_file,
+            &directive::path(&roots.state_glob, name),
             &runtime_root,
             config,
             plan,
@@ -812,6 +932,7 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
             &ssh,
             &runner,
             &console_log,
+            &phase_file,
             &state_root,
             &runtime_root,
             &id_key,
@@ -828,10 +949,13 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
 /// subcommand so `start` reuses the one streaming/readiness implementation
 /// rather than duplicating vsock logic; without a prompt, exit 0 and
 /// let the wrapper return.
+#[allow(clippy::too_many_arguments)]
 fn agent_tail(
     r: &mut Recipe,
     runner: &str,
     console_log: &Path,
+    phase_file: &Path,
+    directive_file: &Path,
     runtime_root: &Path,
     config: &Path,
     plan: &Plan,
@@ -846,6 +970,10 @@ fn agent_tail(
     ));
     r.line("vm=$!".to_string());
     r.line("disown \"$vm\" 2>/dev/null || true".to_string());
+    // The runner owns the diagnostics from here (it writes console.log), so the
+    // pre-boot phase marker has done its job — drop it, or a dead instance would
+    // read as "provisioning" forever.
+    r.line(format!("rm -f {}", qp(phase_file)));
     r.line(format!(
         "echo \"sandbox: agent instance '{}' running (cid {cid}).\"",
         plan.name
@@ -889,6 +1017,15 @@ fn agent_tail(
                 "echo \"sandbox: prompt it with: sandbox prompt {} \\\"<text>\\\"\"",
                 plan.name
             ));
+            // A promptless launch of a *named* instance may still be resuming
+            // one that was originally dispatched with a directive — whether that
+            // file is there is a genuine runtime fact, so the guard stays in the
+            // script (same shape as the context-staging guards above).
+            r.line(format!(
+                "[ -f {} ] && echo \"sandbox: or resend its original directive: sandbox prompt {} --redeliver\" || true",
+                qp(directive_file),
+                plan.name
+            ));
             r.line("exit 0".to_string());
         }
     }
@@ -905,6 +1042,7 @@ fn interactive_tail(
     ssh: &str,
     runner: &str,
     console_log: &Path,
+    phase_file: &Path,
     state_root: &Path,
     runtime_root: &Path,
     id_key: &Path,
@@ -926,6 +1064,7 @@ fn interactive_tail(
     r.line("    wait \"$vm\" 2>/dev/null || true".to_string());
     r.line("  fi".to_string());
     r.line(format!("  rm -rf {}", qp(runtime_root)));
+    r.line(format!("  rm -f {}", qp(phase_file)));
     r.line(format!("  [ -d {} ] || return 0", qp(state_root)));
     if plan.named {
         // Named instances are persistent (restart with the full suffixed name).
@@ -950,6 +1089,7 @@ fn interactive_tail(
     ));
     r.line(format!("{runner} > {} 2>&1 &", qp(console_log)));
     r.line("vm=$!".to_string());
+    r.line(format!("rm -f {}", qp(phase_file)));
     r.line(format!(
         "echo \"sandbox: connecting to '{}' on 127.0.0.1:{}\"",
         plan.name, plan.ssh_port
@@ -1514,6 +1654,141 @@ mod tests {
         p.seed = Seed::Resume("existingbranch789".into());
         p.prompt = Some("continue the work".into());
         insta::assert_snapshot!(render(&spec, &p));
+    }
+
+    #[test]
+    fn nix_db_snapshot_is_bounded_and_uses_vacuum_into() {
+        // Pinned explicitly, not just by the golden snapshot, because every
+        // clause here is load-bearing and a re-blessed snapshot would hide a
+        // regression. `.backup` restarts from page zero under a concurrent
+        // writer, and the nix-daemon writes db.sqlite throughout any host
+        // `nix build` — so the old command spun indefinitely (11m32s / 9.1 TB
+        // read observed) whenever a launch overlapped one.
+        let spec = spec_with(vec![file_secret()], vec![], true);
+        let recipe = render(&spec, &plan("20260627-120000-4242", false, Mode::Agent));
+
+        assert!(
+            recipe.contains("VACUUM INTO"),
+            "snapshot must use VACUUM INTO: {recipe}"
+        );
+        // Only the *commands* matter — the comment above the step names
+        // `.backup` deliberately, to say why it is not used.
+        assert!(
+            !recipe
+                .lines()
+                .any(|l| !l.trim_start().starts_with('#') && l.contains(".backup")),
+            "the restart-prone .backup must be gone from the commands: {recipe}"
+        );
+        assert!(
+            recipe.contains(&format!("timeout {NIX_DB_SNAPSHOT_TIMEOUT_SECS} ")),
+            "the snapshot must be time-bounded: {recipe}"
+        );
+        // VACUUM INTO refuses to overwrite, so a stale tmp from a killed launch
+        // would otherwise wedge every subsequent launch.
+        assert!(
+            recipe.contains(".nix-db.sqlite.tmp'\n[ -r \"$hostdb\" ]"),
+            "the tmp must be cleared immediately before the snapshot: {recipe}"
+        );
+        // sqlite3 creates a missing database on open, so without this guard an
+        // absent host DB snapshots "successfully" as an empty one.
+        assert!(
+            recipe.contains("[ -r \"$hostdb\" ] &&"),
+            "a missing host DB must skip the snapshot, not fabricate one: {recipe}"
+        );
+        // Non-fatal, no partial publish, and visibly warned.
+        assert!(
+            recipe.contains("|| { rm -f ") && recipe.contains("echo 'WARNING: host Nix DB"),
+            "failure must clean up and warn: {recipe}"
+        );
+        for line in recipe.lines() {
+            if !line.trim_start().starts_with('#') && line.contains("VACUUM INTO") {
+                // One self-contained line whose failure branch swallows the
+                // error, so `set -e` can never abort the launch here — and no
+                // `if`, per the flat-recipe invariant.
+                assert!(
+                    !line.starts_with("if ") && line.ends_with("; }"),
+                    "the step must stay flat, self-contained and non-fatal: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_aborted_launch_clears_its_phase_marker() {
+        // A launch can abort anywhere in provisioning — a missing secret exits
+        // 1, and `set -e`/Ctrl-C can end it mid-step. The marker must not
+        // outlive the dead launch, or `sandbox status` reports `provisioning`
+        // forever for an instance with no VM (worse than the `stopped` it
+        // reported before the marker existed).
+        for mode in [Mode::Agent, Mode::Interactive] {
+            let spec = spec_with(vec![file_secret()], vec![], true);
+            let recipe = render(&spec, &plan("20260627-120000-4242", false, mode));
+            let trap = recipe
+                .lines()
+                .find(|l| l.starts_with("trap 'rm -f ") && l.contains("/phase'"))
+                .unwrap_or_else(|| panic!("no phase-clearing trap for {mode:?}: {recipe}"));
+            assert!(
+                trap.contains("EXIT") && trap.contains("INT") && trap.contains("TERM"),
+                "{mode:?}: the trap must cover abort and interrupt: {trap}"
+            );
+
+            // It has to be armed before anything that can fail — in particular
+            // before the first `phase` call, or the window it guards is open.
+            let trap_at = recipe.lines().position(|l| l == trap).unwrap();
+            let first_phase = recipe
+                .lines()
+                .position(|l| l.starts_with("phase '"))
+                .expect("a provisioning phase");
+            assert!(
+                trap_at < first_phase,
+                "{mode:?}: the trap must be armed before the first phase"
+            );
+        }
+    }
+
+    #[test]
+    fn every_provisioning_phase_is_closed_except_the_terminal_one() {
+        // `provision.log` is only useful if each step's begin marker has a
+        // matching end: an unclosed phase reads as "still running that step"
+        // forever in the log. `booting VM` is deliberately the exception — the
+        // runner takes over there and nothing returns to close it.
+        for (label, spec, plan) in [
+            (
+                "full",
+                spec_with(vec![file_secret()], vec!["dist/build.tar".into()], true),
+                plan("20260627-120000-4242", false, Mode::Agent),
+            ),
+            (
+                "no secrets, no context, no nix-db",
+                spec_with(vec![], vec![], false),
+                plan("20260627-120000-4242", false, Mode::Interactive),
+            ),
+        ] {
+            let recipe = render(&spec, &plan);
+            let opened: Vec<&str> = recipe
+                .lines()
+                .filter(|l| l.starts_with("phase '"))
+                .collect();
+            let closed = recipe.lines().filter(|l| *l == "phase_done").count();
+            assert_eq!(
+                opened.len(),
+                closed + 1,
+                "{label}: every phase but the last must close: {opened:?} / {closed} closes"
+            );
+            assert_eq!(
+                opened.last().copied(),
+                Some("phase 'booting VM'"),
+                "{label}: the unclosed phase must be the terminal one"
+            );
+        }
+    }
+
+    #[test]
+    fn no_nix_db_snapshot_step_without_import_host_store_db() {
+        let spec = spec_with(vec![file_secret()], vec![], false);
+        let recipe = render(&spec, &plan("20260627-120000-4242", false, Mode::Agent));
+        assert!(!recipe.contains("VACUUM INTO"), "{recipe}");
+        assert!(!recipe.contains("hostdb="), "{recipe}");
     }
 
     #[test]

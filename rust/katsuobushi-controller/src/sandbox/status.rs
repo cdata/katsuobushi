@@ -27,18 +27,27 @@ use crate::sandbox::gfx::{self, Resolution};
 use crate::sandbox::host::{Host, HostImpl};
 use crate::sandbox::instance::{self, Mode};
 use crate::sandbox::liveness::{self, Liveness, TurnState};
+use crate::sandbox::report_log;
 use crate::sandbox::resolve::{list_instances, resolve_instance};
 use crate::sandbox::spec::{
     load_spec, resolve_roots, GpuRole, ResolvedRoots, SecretSource, SecretSpec, Spec,
 };
 use crate::Global;
 
-/// Whether an instance's VM is up — derived live from QMP, never stored.
+/// Where an instance is in its life: up (QMP answers), still being provisioned
+/// (a `phase` marker is present but QEMU has not started yet), or down.
 /// Serializes lowercase for the `--json` `state` field.
+///
+/// `Provisioning` exists because `instance.json` is written *before* the launch
+/// recipe runs, while the QMP socket only appears once QEMU is up — so the whole
+/// pre-boot window (mirror clone, nix DB snapshot, context and secret staging)
+/// used to list as `stopped`. That is exactly the window an operator most wants
+/// diagnostics in, and reading "stopped" there has led to killing a live launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum State {
     Running,
+    Provisioning,
     Stopped,
 }
 
@@ -73,12 +82,43 @@ struct InstanceView {
     /// machine-facing one).
     #[serde(skip)]
     liveness_brief: Option<String>,
+    /// The provisioning step currently in flight, from the recipe's `phase`
+    /// marker. `Some` only while `state` is `Provisioning`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<String>,
+    /// The guest's verdict on the host Nix DB seed, from `nixdb-status` in the
+    /// share. `None` when the guest has not reached that service yet (or the
+    /// instance predates it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store_db: Option<String>,
+    /// The most recent terminal report (`done`/`blocked`/`stopped`) from the
+    /// instance's `reports.ndjson`. Answers "what did it conclude?" out of band
+    /// — without it, losing the driving process's stdout lost the verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_report: Option<report_log::Entry>,
 }
 
 impl InstanceView {
     /// Whether the VM is currently up.
     fn running(&self) -> bool {
         self.state == State::Running
+    }
+
+    /// Whether the launch recipe is still working before boot.
+    fn provisioning(&self) -> bool {
+        self.state == State::Provisioning
+    }
+
+    /// The `STATE` column / detail value, naming the step while provisioning.
+    fn state_label(&self) -> String {
+        match self.state {
+            State::Running => "running".to_string(),
+            State::Stopped => "stopped".to_string(),
+            State::Provisioning => match &self.phase {
+                Some(step) => format!("provisioning ({step})"),
+                None => "provisioning".to_string(),
+            },
+        }
     }
 
     /// The `MODE` column / detail value: the rendered mode, or `-` when unknown.
@@ -411,10 +451,14 @@ fn render_list(views: &[InstanceView], r: &Renderer) -> String {
         .iter()
         .enumerate()
         .map(|(i, v)| {
-            let state = if v.running() {
-                TableCell::styled("running", CellStyle::Green)
-            } else {
-                TableCell::styled("stopped", CellStyle::Dim)
+            // The list stays scannable: a provisioning instance shows the bare
+            // word (the step goes in the detail view and `--json`), coloured
+            // apart from both up and down so a swarm mid-launch reads at a
+            // glance instead of looking like a row of dead VMs.
+            let state = match v.state {
+                State::Running => TableCell::styled("running", CellStyle::Green),
+                State::Provisioning => TableCell::styled("provisioning", CellStyle::Yellow),
+                State::Stopped => TableCell::styled("stopped", CellStyle::Dim),
             };
             vec![
                 TableCell::plain((i + 1).to_string()),
@@ -437,9 +481,11 @@ fn render_list(views: &[InstanceView], r: &Renderer) -> String {
 /// `agent` only for an instance carrying a CID.
 fn render_detail(v: &InstanceView, ssh: Option<&str>, console_log: &str, r: &Renderer) -> String {
     let state = if v.running() {
-        r.green("running")
+        r.green(&v.state_label())
+    } else if v.provisioning() {
+        r.yellow(&v.state_label())
     } else {
-        r.dim("stopped")
+        r.dim(&v.state_label())
     };
     let mut lines = vec![
         format!("instance:   {}", v.name),
@@ -459,6 +505,21 @@ fn render_detail(v: &InstanceView, ssh: Option<&str>, console_log: &str, r: &Ren
     // freshness, present only once the guest has written a `turn-state.json`.
     if let Some(liveness) = &v.liveness {
         lines.push(format!("liveness:   {liveness}"));
+    }
+    // Whether the guest is running on the host's store DB or only its own — the
+    // difference between an agent that can build and one that cannot.
+    if let Some(store_db) = &v.store_db {
+        lines.push(format!("store db:   {store_db}"));
+    }
+    // The last thing the agent actually concluded. `liveness` already says a
+    // turn reached `ended-ok`; this says *what it said* — recoverable even when
+    // the drive that streamed it is long gone.
+    if let Some(last) = &v.last_report {
+        lines.push(format!(
+            "last report: {} — {}",
+            last.status,
+            first_line(&last.text)
+        ));
     }
     if let Some(ssh) = ssh {
         lines.push(format!("ssh:        {ssh}"));
@@ -480,6 +541,14 @@ fn render_detail(v: &InstanceView, ssh: Option<&str>, console_log: &str, r: &Ren
         ));
     }
     lines.push(format!("console:    {console_log}"));
+    // While provisioning there is no console.log yet — the recipe's own log is
+    // the only thing on disk, and it is the one an operator needs.
+    if v.provisioning() {
+        lines.push(format!(
+            "provision:  {}",
+            console_log.replace("console.log", "provision.log")
+        ));
+    }
     lines.join("\n")
 }
 
@@ -497,8 +566,16 @@ fn summarize(
 ) -> InstanceView {
     let sock = roots.runtime_glob.join(name).join("katsuobushi.sock");
     let running = host.qmp_alive(&sock);
+    let inst_dir = roots.state_glob.join(name);
+    // The launch recipe writes `phase` before each pre-boot step and removes it
+    // once the runner is up, so its presence *while QMP is silent* is precisely
+    // "still provisioning". QMP wins if both are somehow true (a stale marker
+    // from a killed launch can never mask a live VM).
+    let phase = read_trimmed_line(host, &inst_dir.join("phase"));
     let state = if running {
         State::Running
+    } else if phase.is_some() {
+        State::Provisioning
     } else {
         State::Stopped
     };
@@ -520,7 +597,6 @@ fn summarize(
     // Out-of-band liveness: read the guest-authored `turn-state.json`
     // first (no connection needed), then the host-written `liveness.json` for
     // transport freshness. Both are advisory — a missing/old file just degrades.
-    let inst_dir = roots.state_glob.join(name);
     let turn_state = TurnState::read(host, &inst_dir.join("turn-state.json"));
     let live = Liveness::read(host, &inst_dir.join("liveness.json"));
     // The N·H watchdog deadline: the longest heartbeat silence a live driver
@@ -546,7 +622,65 @@ fn summarize(
         branch_present: branch_present(host, spec, roots, name),
         liveness,
         liveness_brief,
+        phase,
+        store_db: store_db_label(host, &inst_dir.join("nixdb-status")),
+        // Through the host seam, like every other read here — so a unit test
+        // of `summarize` never touches the real filesystem.
+        last_report: host
+            .read(&report_log::path(&roots.state_glob, name))
+            .ok()
+            .and_then(|b| report_log::latest_terminal(&b)),
     }
+}
+
+/// Read a one-line advisory marker file through the host seam. Missing,
+/// unreadable, non-UTF-8, or blank all degrade to `None` — every caller treats
+/// these files as hints, never as a source of truth.
+fn read_trimmed_line(host: &impl Host, p: &Path) -> Option<String> {
+    let bytes = host.read(p).ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    let line = text.lines().next()?.trim();
+    (!line.is_empty()).then(|| line.to_string())
+}
+
+/// The first non-empty line of a report, for the one-line detail row. Reports
+/// are frequently multi-paragraph verdicts; the full text stays in
+/// `reports.ndjson` (and in `--json`), so this only has to identify it.
+fn first_line(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    const MAX: usize = 100;
+    if line.chars().count() > MAX {
+        let head: String = line.chars().take(MAX).collect();
+        format!("{head}…")
+    } else {
+        line.to_string()
+    }
+}
+
+/// Render the guest's host-Nix-DB seed verdict for the detail view.
+///
+/// The seed is best-effort by design: a guest with no snapshot, or one whose
+/// swapped DB fails its sanity check, boots healthy on a *system-only* database
+/// — every host-built path present on the shared store is then invalid inside
+/// the VM, so the agent cannot run a single gate. Nothing used to tell the host
+/// that had happened; the first symptom was a burned agent session.
+fn store_db_label(host: &impl Host, p: &Path) -> Option<String> {
+    let verdict = read_trimmed_line(host, p)?;
+    Some(match verdict.as_str() {
+        "seeded" => "host-seeded (host-built paths valid in the guest)".to_string(),
+        "already-seeded" => "host-seeded (kept from this instance's volume)".to_string(),
+        "skipped-no-snapshot" => {
+            "system-only — host seed skipped (no snapshot was staged)".to_string()
+        }
+        "rolled-back" => {
+            "system-only — host seed rolled back (failed its sanity check)".to_string()
+        }
+        other => other.to_string(),
+    })
 }
 
 /// Whether `refs/heads/sandbox/<name>` exists in the instance's bare mirror —
@@ -723,6 +857,9 @@ mod tests {
             branch_present: false,
             liveness: None,
             liveness_brief: None,
+            phase: None,
+            store_db: None,
+            last_report: None,
         }
     }
 
@@ -1083,6 +1220,162 @@ mod tests {
             "no agent line without a cid: {text}"
         );
         assert!(text.contains("console:    /state/inst-y/console.log"));
+    }
+
+    // ---- pre-boot provisioning visibility (card e2e44b) ----
+
+    #[test]
+    fn a_phase_marker_without_qmp_reads_as_provisioning_not_stopped() {
+        // `instance.json` is written before the recipe runs and the QMP socket
+        // only appears at boot, so this whole window used to list as `stopped`.
+        let mut host = FakeHost::new(); // no alive socket: QEMU is not up yet
+        host.push_read(Ok(b"snapshotting host nix DB\n".to_vec()));
+
+        let v = summarize(&host, &sample_spec(), &sample_roots(), "inst-a", now());
+        assert_eq!(v.state, State::Provisioning);
+        assert_eq!(v.phase.as_deref(), Some("snapshotting host nix DB"));
+        assert_eq!(v.state_label(), "provisioning (snapshotting host nix DB)");
+    }
+
+    #[test]
+    fn no_phase_marker_and_no_qmp_is_still_stopped() {
+        let host = FakeHost::new();
+        let v = summarize(&host, &sample_spec(), &sample_roots(), "inst-a", now());
+        assert_eq!(v.state, State::Stopped);
+        assert_eq!(v.phase, None);
+        assert_eq!(v.state_label(), "stopped");
+    }
+
+    #[test]
+    fn a_live_vm_is_running_even_with_a_stale_phase_marker() {
+        // A launch killed after boot could strand the marker; QMP must win, or a
+        // healthy VM would read as forever-provisioning.
+        let mut host = FakeHost::new();
+        host.with_alive_sock(
+            PathBuf::from("/run")
+                .join("inst-a")
+                .join("katsuobushi.sock"),
+        )
+        .push_read(Ok(b"booting VM\n".to_vec()));
+
+        let v = summarize(&host, &sample_spec(), &sample_roots(), "inst-a", now());
+        assert_eq!(v.state, State::Running);
+        assert_eq!(v.state_label(), "running");
+    }
+
+    #[test]
+    fn the_provisioning_detail_names_the_step_and_the_provision_log() {
+        // While provisioning there is no console.log yet, so the detail view has
+        // to point at the recipe's own log — the only diagnostic that exists.
+        let r = Renderer::new(false, false);
+        let mut v = view("inst-p", State::Provisioning, Some(Mode::Agent), false);
+        v.phase = Some("staging workspace context".to_string());
+        let text = render_detail(&v, None, "/state/inst-p/console.log", &r);
+        assert!(
+            text.contains("state:      provisioning (staging workspace context)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("provision:  /state/inst-p/provision.log"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_running_instance_shows_no_provision_log_line() {
+        let r = Renderer::new(false, false);
+        let v = view("inst-r", State::Running, Some(Mode::Agent), false);
+        let text = render_detail(&v, None, "/state/inst-r/console.log", &r);
+        assert!(!text.contains("provision:"), "{text}");
+    }
+
+    #[test]
+    fn the_list_table_distinguishes_a_provisioning_instance() {
+        let r = Renderer::new(false, false);
+        let mut p = view("inst-p", State::Provisioning, Some(Mode::Agent), false);
+        p.phase = Some("staging project mirror".to_string());
+        let table = render_list(&[p, view("inst-s", State::Stopped, None, false)], &r);
+        assert!(table.contains("provisioning"), "{table}");
+        assert!(table.contains("stopped"), "{table}");
+    }
+
+    #[test]
+    fn the_guest_seed_verdict_is_surfaced_in_the_detail_view() {
+        // An unseeded guest boots "healthy" but cannot run a single gate, since
+        // no host-built path is valid inside it. Nothing used to say so.
+        let r = Renderer::new(false, false);
+        for (verdict, expected) in [
+            (
+                "seeded",
+                "host-seeded (host-built paths valid in the guest)",
+            ),
+            (
+                "skipped-no-snapshot",
+                "system-only — host seed skipped (no snapshot was staged)",
+            ),
+            (
+                "rolled-back",
+                "system-only — host seed rolled back (failed its sanity check)",
+            ),
+        ] {
+            let mut v = view("inst-a", State::Running, Some(Mode::Agent), false);
+            v.store_db = store_db_label(
+                &{
+                    let mut h = FakeHost::new();
+                    h.push_read(Ok(format!("{verdict}\n").into_bytes()));
+                    h
+                },
+                Path::new("/state/inst-a/nixdb-status"),
+            );
+            let text = render_detail(&v, None, "/state/inst-a/console.log", &r);
+            assert!(text.contains(&format!("store db:   {expected}")), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_detail_view_surfaces_the_last_terminal_report() {
+        // The field case: the operator lost the stream, grepped the state dir
+        // for "VERDICT", and found nothing. Now `status` answers it.
+        let r = Renderer::new(false, false);
+        let mut v = view("inst-a", State::Running, Some(Mode::Agent), false);
+        v.last_report = Some(report_log::Entry {
+            at: "2026-08-01T12:00:00Z".to_string(),
+            turn_id: Some(3),
+            status: "done".to_string(),
+            text: "VERDICT: accept\n\nNo blocking findings.".to_string(),
+        });
+        let text = render_detail(&v, None, "/state/inst-a/console.log", &r);
+        assert!(
+            text.contains("last report: done — VERDICT: accept"),
+            "{text}"
+        );
+        // Only the first line lands in the row; the full text stays in the
+        // journal and in `--json`.
+        assert!(!text.contains("No blocking findings"), "{text}");
+    }
+
+    #[test]
+    fn a_very_long_report_line_is_truncated_in_the_detail_row() {
+        let long = "x".repeat(400);
+        let shown = first_line(&long);
+        assert!(shown.ends_with('…'), "{shown}");
+        assert!(shown.chars().count() <= 101, "{}", shown.chars().count());
+    }
+
+    #[test]
+    fn an_instance_with_no_terminal_report_omits_the_last_report_line() {
+        let r = Renderer::new(false, false);
+        let v = view("inst-a", State::Running, Some(Mode::Agent), false);
+        let text = render_detail(&v, None, "/state/inst-a/console.log", &r);
+        assert!(!text.contains("last report:"), "{text}");
+    }
+
+    #[test]
+    fn an_instance_with_no_seed_verdict_omits_the_store_db_line() {
+        let r = Renderer::new(false, false);
+        let v = view("inst-a", State::Running, Some(Mode::Agent), false);
+        let text = render_detail(&v, None, "/state/inst-a/console.log", &r);
+        assert!(!text.contains("store db:"), "{text}");
     }
 
     // ---- json shape ----
@@ -1515,6 +1808,10 @@ mod tests {
                 .join("inst-a")
                 .join("katsuobushi.sock"),
         )
+        // `FakeHost` serves reads from a queue in call order, so the pre-boot
+        // `phase` probe (which runs first, and finds nothing on a booted
+        // instance) has to be accounted for before the turn-state payload.
+        .push_read(Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
         .push_read(Ok(
             br#"{"turnStateVersion":1,"turnId":3,"phase":"in-flight","acceptedAt":"2026-06-28T11:50:00Z","endedAt":null,"lastActivityAt":"2026-06-28T11:46:00Z"}"#
                 .to_vec(),

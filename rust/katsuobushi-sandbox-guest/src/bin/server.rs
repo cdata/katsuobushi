@@ -136,7 +136,28 @@ struct Turn {
     /// without a terminal report. Bounded by [`Session::max_nudges`]; once it is
     /// reached the turn resolves as `ended-unreported`.
     nudges: u32,
+    /// How many times this turn has been *re*-injected after a successful first
+    /// injection that the harness never began. Bounded by
+    /// [`MAX_REINJECTIONS`] — see the constant for why this exists.
+    reinjections: u32,
 }
+
+/// How many times a turn may be re-injected after `injected && !accepted`.
+///
+/// `injected` only means `peer.send_notification(...)` returned `Ok` — the
+/// notification reached the harness's MCP transport. It says nothing about the
+/// harness *processing* it. Observed in the field: Claude Code accepted the
+/// transport write and never started a turn, leaving `injected && !accepted`,
+/// a state the machine recorded but no recovery path consumed. Every host
+/// resend hit the dedupe arm and vanished, the drive bailed, and the only way
+/// out was `sandbox stop` + restart.
+///
+/// Re-injecting is safe here precisely *because* the turn never accepted: with
+/// no hook and no report, the harness has — from its own perspective — not
+/// begun it. The re-injected text still carries a guard preamble
+/// ([`reinjection_text`]) in case it did, and the count is small so a genuinely
+/// wedged harness still fails fast rather than looping.
+const MAX_REINJECTIONS: u32 = 2;
 
 /// Shared turn-state, behind one mutex, read/written by both the control task
 /// (`Prompt`s) and the report task (`Report`s + hook lines). [`state`] is the
@@ -214,6 +235,10 @@ struct Outcome {
     /// Inject an auto-nudge (a re-prompt) for `(turn_id, nudge_number)` into the
     /// live session before the next grace elapses.
     inject_nudge: Option<(u64, u32)>,
+    /// Set alongside `inject` when this is a **re**-injection of a turn the
+    /// harness acknowledged on the transport but never began: carries the
+    /// re-injection number so the async layer can prepend the guard preamble.
+    reinject: Option<u32>,
     /// Persist the snapshot below, if set.
     persist: Option<PersistMode>,
     /// The `TurnState` to write (cloned when `persist` is set).
@@ -233,7 +258,7 @@ impl Session {
                 // exists for), otherwise drop it — including during the
                 // grace window, where re-injecting an already-executed turn
                 // would run it twice.
-                if let Some(t) = self.turn.as_ref() {
+                if let Some(t) = self.turn.as_mut() {
                     if t.id == turn_id {
                         if !t.injected && !t.ended {
                             self.state.last_activity_at = now.to_string();
@@ -241,7 +266,26 @@ impl Session {
                             out.persist = Some(PersistMode::Throttled);
                             // Early return skips the common snapshot attach.
                             out.snapshot = Some(self.state.clone());
+                        } else if t.injected
+                            && !t.accepted
+                            && !t.ended
+                            && t.reinjections < MAX_REINJECTIONS
+                        {
+                            // Delivered to the harness's transport, but the
+                            // harness never began it. Plain dedupe would strand
+                            // the turn here forever (see `MAX_REINJECTIONS`), so
+                            // re-inject a bounded number of times, guarded.
+                            t.reinjections += 1;
+                            let n = t.reinjections;
+                            self.state.last_activity_at = now.to_string();
+                            out.inject = true;
+                            out.reinject = Some(n);
+                            out.persist = Some(PersistMode::Throttled);
+                            out.snapshot = Some(self.state.clone());
                         }
+                        // Anything else — accepted, ended, or re-injections
+                        // exhausted — still dedupes: re-running an executed turn
+                        // is worse than failing to deliver one.
                         return out;
                     }
                 }
@@ -253,6 +297,7 @@ impl Session {
                     terminal_reported: false,
                     ended: false,
                     nudges: 0,
+                    reinjections: 0,
                 });
                 self.state = TurnState {
                     turn_state_version: 1,
@@ -524,6 +569,20 @@ async fn inject_nudge_if_any(ctl: &Arc<Control>, outcome: &Outcome) {
             eprintln!("katsuobushi-control: auto-nudge inject failed: {e:#}");
         }
     }
+}
+
+/// The guard preamble for the `n`-th re-injection of a turn whose notification
+/// the harness acknowledged but never acted on.
+///
+/// Self-describing in the same style as [`nudge_text`]: the agent is told this
+/// may be a duplicate and what to do either way, so the small double-run risk
+/// degrades to "continue what you were doing" rather than a second full run.
+fn reinjection_text(turn_id: u64, n: u32, body: &str) -> String {
+    format!(
+        "[katsuobushi: re-delivering turn {turn_id} (attempt {n} of {MAX_REINJECTIONS}) — the \
+         first delivery was acknowledged but never began. If you already received turn \
+         {turn_id}, continue it and ignore this message; otherwise begin it now.]\n\n{body}"
+    )
 }
 
 /// The re-prompt text for the `n`-th auto-nudge of an agent that stopped without
@@ -798,7 +857,11 @@ where
                 Ok(HostMessage::Prompt(p)) => {
                     let outcome = drive_event(&ctl, Event::Prompt { turn_id: p.turn_id }).await;
                     if outcome.inject {
-                        match inject_prompt(&peer, p.turn_id, &p.text).await {
+                        let text = match outcome.reinject {
+                            Some(n) => reinjection_text(p.turn_id, n, &p.text),
+                            None => p.text.clone(),
+                        };
+                        match inject_prompt(&peer, p.turn_id, &text).await {
                             Ok(()) => {
                                 // Confirm delivery so resends of this id dedupe.
                                 let confirmed =
@@ -812,7 +875,9 @@ where
                             ),
                         }
                     } else {
-                        // dedupe: a resend for an already-delivered turn.
+                        // dedupe: a resend for an already-delivered turn — one
+                        // the harness has begun, one already ended, or one whose
+                        // re-injection budget is spent.
                         eprintln!(
                             "katsuobushi-control: dropping resend for in-flight turn {}",
                             p.turn_id
@@ -1092,15 +1157,114 @@ mod tests {
     }
 
     #[test]
-    fn it_dedupes_a_resend_of_a_delivered_in_flight_turn() {
+    fn it_dedupes_a_resend_of_a_turn_the_harness_has_begun() {
+        // Once the harness has actually started the turn — evidenced here by a
+        // report marking it accepted — a resend must never re-inject, or the
+        // work would run twice.
         let mut s = Session::default();
         step(&mut s, Event::Prompt { turn_id: 1 });
         step(&mut s, Event::Injected { turn_id: 1 });
+        step(
+            &mut s,
+            Event::Report(Report {
+                status: Status::Working,
+                text: "building".into(),
+                turn_id: Some(1),
+            }),
+        );
+        assert!(s.turn.as_ref().unwrap().accepted);
+
         let out = step(&mut s, Event::Prompt { turn_id: 1 });
-        // Dropped: no re-inject, no transition, no persist.
-        assert!(!out.inject);
+        assert!(!out.inject, "an accepted turn is never re-injected");
+        assert!(out.reinject.is_none());
         assert!(out.persist.is_none());
         assert!(out.messages.is_empty());
+    }
+
+    // ---- injected-but-never-accepted recovery (card d1936b) ----
+
+    #[test]
+    fn it_reinjects_an_injected_turn_the_harness_never_began_then_gives_up() {
+        // The field wedge: injection succeeded (the notification reached the
+        // harness's transport) but the harness never started the turn, so
+        // `injected && !accepted` — a state the machine recorded and nothing
+        // consumed. Every host resend hit the dedupe arm and vanished.
+        let mut s = Session::default();
+        step(&mut s, Event::Prompt { turn_id: 2 });
+        step(&mut s, Event::Injected { turn_id: 2 });
+
+        // No hook, no report — nothing says the harness began it.
+        let first = step(&mut s, Event::Prompt { turn_id: 2 });
+        assert!(first.inject, "the first resend re-injects");
+        assert_eq!(first.reinject, Some(1));
+        assert!(matches!(first.persist, Some(PersistMode::Throttled)));
+
+        step(&mut s, Event::Injected { turn_id: 2 });
+        let second = step(&mut s, Event::Prompt { turn_id: 2 });
+        assert!(second.inject);
+        assert_eq!(second.reinject, Some(2));
+
+        // Budget spent: back to plain dedupe, so a wedged harness fails fast
+        // instead of looping.
+        step(&mut s, Event::Injected { turn_id: 2 });
+        let third = step(&mut s, Event::Prompt { turn_id: 2 });
+        assert!(!third.inject, "re-injection is bounded");
+        assert!(third.reinject.is_none());
+
+        // Throughout, it stays the same logical turn — never restarted.
+        assert_eq!(s.state.turn_id, Some(2));
+        assert_eq!(s.state.phase, Phase::InFlight);
+        assert!(s.state.accepted_at.is_none());
+        assert_eq!(s.turn.as_ref().unwrap().reinjections, MAX_REINJECTIONS);
+    }
+
+    #[test]
+    fn a_reinjection_stops_as_soon_as_the_turn_is_accepted() {
+        // If the re-injection lands and the agent starts, further resends must
+        // dedupe immediately — the remaining budget is not spent.
+        let mut s = Session::default();
+        step(&mut s, Event::Prompt { turn_id: 2 });
+        step(&mut s, Event::Injected { turn_id: 2 });
+        assert_eq!(step(&mut s, Event::Prompt { turn_id: 2 }).reinject, Some(1));
+        step(&mut s, Event::Injected { turn_id: 2 });
+        step(&mut s, Event::Hook(HookEvent::TurnAccepted));
+
+        let out = step(&mut s, Event::Prompt { turn_id: 2 });
+        assert!(!out.inject, "an accepted turn is never re-injected");
+        assert_eq!(s.turn.as_ref().unwrap().reinjections, 1, "budget preserved");
+    }
+
+    #[test]
+    fn an_ended_turn_is_never_reinjected_even_with_budget_left() {
+        // An executed turn must not run again, whatever the counter says.
+        let mut s = Session::default();
+        step(&mut s, Event::Prompt { turn_id: 2 });
+        step(&mut s, Event::Injected { turn_id: 2 });
+        step(&mut s, Event::Hook(HookEvent::TurnEnded));
+
+        let out = step(&mut s, Event::Prompt { turn_id: 2 });
+        assert!(!out.inject);
+        assert!(out.reinject.is_none());
+        assert_eq!(s.turn.as_ref().unwrap().reinjections, 0);
+    }
+
+    #[test]
+    fn the_reinjected_text_carries_the_already_received_guard() {
+        // The double-run risk is small but real, so the re-injected text says
+        // so and tells the agent what to do either way.
+        let body = "Implement card a3f7b2.";
+        let text = reinjection_text(2, 1, body);
+        assert!(text.contains("re-delivering turn 2"), "{text}");
+        assert!(text.contains("attempt 1 of 2"), "{text}");
+        assert!(
+            text.contains("If you already received turn 2, continue it"),
+            "{text}"
+        );
+        assert!(text.contains("otherwise begin it now"), "{text}");
+        assert!(
+            text.ends_with(body),
+            "the original directive is preserved verbatim: {text}"
+        );
     }
 
     #[test]

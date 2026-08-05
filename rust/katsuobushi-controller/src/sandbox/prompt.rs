@@ -41,6 +41,7 @@ use crate::output::{Renderer, ReportKind, Reported};
 use crate::sandbox::host::{Host, HostImpl};
 use crate::sandbox::instance::{self, Instance};
 use crate::sandbox::liveness::{alloc_turn_id, now_rfc3339, Liveness};
+use crate::sandbox::report_log;
 use crate::sandbox::resolve::resolve_instance;
 use crate::sandbox::spec::{load_spec, resolve_roots, ResolvedRoots, Spec};
 use crate::Global;
@@ -66,7 +67,8 @@ struct Watchdog {
     /// transport is dead (error).
     heartbeat_deadline: Duration,
     /// `progressStallSecs`: no `Report`/lifecycle within this window ⇒ surface a
-    /// one-shot "no progress" notice (no break).
+    /// first "no reports" notice (no break; a second, stronger one follows at
+    /// 3x this if the silence continues).
     progress_deadline: Duration,
     /// `deliveryDeadlineSecs`: no `TurnAccepted` within this window ⇒ resend the
     /// identical `Prompt`.
@@ -100,7 +102,8 @@ impl Watchdog {
 enum DriveEvent<'a> {
     /// A relayed agent `Report` (working/info/done/blocked).
     Report(&'a Report),
-    /// The one-shot progress-stall notice: "no progress for T".
+    /// A progress-stall notice: the neutral "no reports for T" first, then a
+    /// stronger one at 3T. At most [`STALL_NOTICES`] per silent episode.
     Stalled(&'a str),
     /// The `reported:false` verdict for this `turn_id` — the agent stopped
     /// without a terminal report. Terminal (the drive loop breaks).
@@ -131,6 +134,7 @@ pub fn run(
     instance: &str,
     text: Vec<String>,
     until_report: bool,
+    redeliver: bool,
     global: Global,
 ) -> Result<()> {
     let spec = load_spec(config)?;
@@ -139,7 +143,18 @@ pub fn run(
     let renderer = Renderer::resolve(global);
 
     let state_glob = roots.state_glob.as_path();
-    let text = text.join(" ");
+    // `--redeliver` resolves the instance name first (it accepts an index, like
+    // every other subcommand) and then reads that instance's persisted
+    // directive. Delivery is otherwise identical to a typed prompt: a fresh turn
+    // id from the liveness counter, normal delivery-ack semantics.
+    let text = if redeliver {
+        let name = crate::sandbox::resolve::resolve_instance(state_glob, &host, instance)?;
+        let directive = crate::sandbox::directive::read(state_glob, &name)?;
+        eprintln!("redelivering the launch directive to '{name}'");
+        directive
+    } else {
+        text.join(" ")
+    };
     let port = spec.vsock_port;
     let watchdog = Watchdog::from_spec(&spec);
 
@@ -167,6 +182,8 @@ pub fn run(
                 watchdog,
                 until_report,
                 &liveness_path,
+                state_glob,
+                inst,
                 &renderer,
             )
         },
@@ -253,6 +270,8 @@ fn deliver_over_vsock(
     watchdog: Watchdog,
     until_report: bool,
     liveness_path: &Path,
+    state_dir: &Path,
+    instance_name: &str,
     renderer: &Renderer,
 ) -> Result<()> {
     let runtime = Builder::new_current_thread()
@@ -263,6 +282,12 @@ fn deliver_over_vsock(
     set_stream_active(host, liveness_path, true);
 
     let sink = |event: DriveEvent| -> Result<()> {
+        // Journal first, then render. This sink is the single point every
+        // streamed event passes through, so appending here is what makes a
+        // terminal report's *text* survive the loss of this process's stdout
+        // (closed terminal, dead tmux pane, killed orchestrator). Best-effort
+        // and additive: `--json` consumers see an unchanged stream.
+        journal_event(host, state_dir, instance_name, &event);
         match event {
             DriveEvent::Report(report) => render_report(renderer, report),
             DriveEvent::Stalled(text) => render_note(renderer, ReportKind::Stalled, text),
@@ -291,6 +316,7 @@ fn deliver_over_vsock(
     let result = runtime.block_on(drive(
         stream,
         turn_id,
+        instance_name,
         text.to_string(),
         watchdog,
         until_report,
@@ -325,10 +351,20 @@ fn set_stream_active(host: &impl Host, path: &Path, active: bool) {
 }
 
 /// The message for a turn that stopped without a terminal report.
+///
+/// Only reachable without `--until-report`, which is now the interactive
+/// `sandbox prompt` default (the orchestration flows stay armed). So it is
+/// addressed to a watching operator, and it carries the two recoveries: re-run
+/// armed, or look for a report the guest's auto-nudges land *after* this
+/// process exits — the turn is not necessarily over just because the command
+/// returned.
 fn stopped_message(turn_id: u64) -> String {
     format!(
         "agent stopped without reporting (turn {turn_id}) — possible silent \
-         completion or unreported hang; inspect with `sandbox attach` / `sandbox fetch`"
+         completion or unreported hang; inspect with `sandbox attach` / `sandbox fetch`. \
+         The guest keeps auto-nudging it, so a report may still land after this command \
+         exits: re-run with `--until-report` to wait for it, or check the instance's \
+         `turn-state.json` (and `sandbox status`) for a later `ended-ok`."
     )
 }
 
@@ -421,7 +457,7 @@ enum LineFlow {
 ///
 /// - `Heartbeat` is **silent** — reset `last_hb` + a throttled (≤1/s) `touch()`
 ///   of `liveness.json`, no render.
-/// - a `working`/`info` `Report` resets the stall timer, (re)arms the one-shot
+/// - a `working`/`info` `Report` resets the stall timer, re-arms the
 ///   notice, and counts as the implicit delivery ack (fallback).
 /// - a `done`/`blocked` `Report` relays then [`LineFlow::Break`]s (clean terminal).
 /// - `TurnAccepted`/`TurnCompleted` for *this* `turn_id` ack / terminate (the
@@ -443,7 +479,7 @@ fn handle_phase1_line<Sink, Touch>(
     last_prog: &mut Instant,
     last_touch: &mut Option<Instant>,
     accepted: &mut bool,
-    stall_surfaced: &mut bool,
+    stalls: &mut u32,
 ) -> Result<LineFlow>
 where
     Sink: FnMut(DriveEvent) -> Result<()>,
@@ -476,10 +512,11 @@ where
             }
             match report.status {
                 Status::Working | Status::Info => {
-                    // Progress: reset the stall timer, (re)arm the one-shot notice, and
-                    // treat it as the implicit delivery ack (fallback).
+                    // Progress: reset the stall timer, re-arm the notice
+                    // escalation from the start, and treat it as the implicit
+                    // delivery ack (fallback).
                     *last_prog = Instant::now();
-                    *stall_surfaced = false;
+                    *stalls = 0;
                     *accepted = true;
                     sink(DriveEvent::Report(&report))?;
                 }
@@ -545,9 +582,11 @@ where
 /// proceeds anyway; the ack-and-resend is the delivery guarantee. `Ready` is
 /// thereby demoted to "transport accepted" — it no longer authorizes a prompt.
 /// Generic over the transport so a test drives it with an in-memory duplex.
+#[allow(clippy::too_many_arguments)]
 async fn drive<S, Sink, Touch>(
     stream: S,
     turn_id: u64,
+    instance: &str,
     text: String,
     watchdog: Watchdog,
     until_report: bool,
@@ -635,7 +674,7 @@ where
     let mut last_touch: Option<Instant> = None;
     let mut accepted = false;
     let mut resends: u32 = 0;
-    let mut stall_surfaced = false;
+    let mut stalls: u32 = 0;
 
     // A fast agent may have produced its first line *during* the ready-gate;
     // stashed it rather than dropping it. Feed it through the identical handler the
@@ -651,7 +690,7 @@ where
             &mut last_prog,
             &mut last_touch,
             &mut accepted,
-            &mut stall_surfaced,
+            &mut stalls,
         )? {
             return Ok(());
         }
@@ -679,7 +718,7 @@ where
                             &mut last_prog,
                             &mut last_touch,
                             &mut accepted,
-                            &mut stall_surfaced,
+                            &mut stalls,
                         )? {
                             break;
                         }
@@ -692,13 +731,12 @@ where
                     heartbeat_deadline.as_secs()
                 );
             }
-            _ = sleep_until(last_prog + progress_deadline), if !stall_surfaced => {
-                let note = format!(
-                    "no progress for {}s — the agent may be stuck (inspect with `sandbox attach`)",
-                    progress_deadline.as_secs()
-                );
+            _ = sleep_until(stall_notice_at(last_prog, progress_deadline, stalls)), if stalls < STALL_NOTICES => {
+                stalls += 1;
+                let note = stall_message(progress_deadline, stalls);
                 sink(DriveEvent::Stalled(&note))?;
-                stall_surfaced = true; // one-shot per episode; no break, no kill
+                // Never a break and never a kill — the escalation only changes
+                // what is said, not what is done.
             }
             _ = sleep_until(sent + delivery_deadline), if !accepted => {
                 if resends < delivery_retries {
@@ -710,15 +748,108 @@ where
                     resends += 1;
                     sent = Instant::now();
                 } else {
+                    // Distinguish harness-wedge from transport failure. The
+                    // guest confirms every injection, and it now also re-injects
+                    // a bounded number of times on its own — so reaching here
+                    // means the notification kept landing and the harness kept
+                    // not starting a turn. More resends cannot help; only a
+                    // fresh session can. Naming that (and the exact commands)
+                    // is the difference between a recoverable stall and a
+                    // dead-end error.
                     bail!(
-                        "turn {turn_id} not accepted after {delivery_retries} resends — \
-                         delivery failed (the agent never began the turn)"
+                        "turn {turn_id} was delivered to the agent harness but never began \
+                         (no hook, no report) — after {delivery_retries} resends and the \
+                         guest's bounded re-injections. This is a wedged harness, not a \
+                         broken transport, so re-prompting will not help. Restart the \
+                         session:\n  sandbox stop {instance}\n  sandbox start --agent --name \
+                         {instance}\nthen re-send the turn (`sandbox prompt {instance} \
+                         --redeliver` if it was dispatched). The restarted agent is a fresh \
+                         session, so the directive must stand on its own."
                     );
                 }
             }
         }
     }
     Ok(())
+}
+
+/// How many progress notices one silent episode may produce. The first is
+/// neutral, the second (much later) is the actual warning; after that the
+/// episode goes quiet rather than nagging.
+const STALL_NOTICES: u32 = 2;
+
+/// When the next progress notice is due, given how many have already fired in
+/// this episode.
+///
+/// The first lands at the configured window. The second lands at **three times**
+/// it, which is what makes escalating honest: only `working`/`info` reports
+/// reset the clock (heartbeats are deliberately silent), so an agent inside one
+/// long foreground call — a cold workspace compile is routinely 15-25 minutes —
+/// looks idle however hard it is working. One window of silence is normal; three
+/// consecutive ones is worth a real warning.
+fn stall_notice_at(last_prog: Instant, window: Duration, stalls: u32) -> Instant {
+    match stalls {
+        0 => last_prog + window,
+        _ => last_prog + window * 3,
+    }
+}
+
+/// The text of the `n`-th progress notice in an episode.
+///
+/// The first fire informs; it must NOT assert the agent may be stuck. In the
+/// field the old always-alarming wording fired on essentially every cold launch
+/// and was benign every time — which trained the operator toward alarm, and
+/// their one alarmed response was the destructive one (killing a live
+/// provisioning step). A watchdog that always barks is worse than none.
+fn stall_message(window: Duration, n: u32) -> String {
+    let secs = window.as_secs();
+    if n < STALL_NOTICES {
+        format!(
+            "no reports for {secs}s — normal during long builds (only reports reset this \
+             clock, so a single long tool call looks idle); inspect with `sandbox attach` if \
+             unexpected"
+        )
+    } else {
+        format!(
+            "still no reports after {}s — the agent may be stuck; inspect with `sandbox attach` \
+             (raise `progressStallSecs` if this project's builds are simply this long)",
+            secs * 3
+        )
+    }
+}
+
+/// Append one drive event to the instance's report journal.
+///
+/// Best-effort in both directions: a `Stalled` notice is a *watchdog* opinion
+/// rather than something the agent said, so it is deliberately not journaled;
+/// and any failure to write warns once on stderr and is otherwise swallowed —
+/// the journal must never be able to break a live drive.
+fn journal_event(host: &impl Host, state_dir: &Path, name: &str, event: &DriveEvent) {
+    let (turn_id, status, text) = match event {
+        DriveEvent::Report(r) => (
+            r.turn_id,
+            match r.status {
+                Status::Working => "working",
+                Status::Done => "done",
+                Status::Blocked => "blocked",
+                Status::Info => "info",
+            },
+            r.text.clone(),
+        ),
+        DriveEvent::Stopped(id) => (Some(*id), "stopped", stopped_message(*id)),
+        DriveEvent::ReArmed(id) => (Some(*id), "re-armed", rearmed_message(*id)),
+        DriveEvent::Stalled(_) => return,
+    };
+    let at = now_rfc3339(host).unwrap_or_default();
+    let entry = report_log::Entry {
+        at,
+        turn_id,
+        status: status.to_string(),
+        text,
+    };
+    if let Err(e) = report_log::append(state_dir, name, &entry) {
+        eprintln!("sandbox: could not journal the report (continuing): {e:#}");
+    }
 }
 
 /// Render one streamed report: `--json` emits the `Report` as one line of NDJSON
@@ -1063,6 +1194,7 @@ mod tests {
             let driver = drive(
                 client,
                 turn_id,
+                "inst-a",
                 prompt.to_string(),
                 relaxed_watchdog(),
                 false,
@@ -1239,6 +1371,7 @@ mod tests {
             let driver = drive(
                 client,
                 1,
+                "inst-a",
                 "go".into(),
                 relaxed_watchdog(),
                 true, // --until-report
@@ -1307,6 +1440,7 @@ mod tests {
             let driver = drive(
                 client,
                 1,
+                "inst-a",
                 "go".into(),
                 relaxed_watchdog(),
                 false,
@@ -1361,6 +1495,7 @@ mod tests {
             let driver = drive(
                 client,
                 1,
+                "inst-a",
                 "go".into(),
                 wd_ms(60, LONG_MS, LONG_MS, 3),
                 false,
@@ -1387,18 +1522,23 @@ mod tests {
     }
 
     #[test]
-    fn it_surfaces_a_progress_stall_once_then_keeps_streaming() {
+    fn it_escalates_a_progress_stall_at_most_twice_then_keeps_streaming() {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
         let events: RefCell<Vec<Ev>> = RefCell::new(Vec::new());
+        let notes: RefCell<Vec<String>> = RefCell::new(Vec::new());
         let result = runtime.block_on(async {
             let (client, mut server) = tokio::io::duplex(4096);
             let driver = drive(
                 client,
                 1,
+                "inst-a",
                 "go".into(),
                 wd_ms(LONG_MS, 60, LONG_MS, 3),
                 false,
                 |event: DriveEvent| -> Result<()> {
+                    if let DriveEvent::Stalled(text) = event {
+                        notes.borrow_mut().push(text.to_string());
+                    }
                     events.borrow_mut().push(match event {
                         DriveEvent::Report(r) => Ev::Report(r.status),
                         DriveEvent::Stalled(_) => Ev::Stalled,
@@ -1411,8 +1551,9 @@ mod tests {
             );
             let ctrl = async {
                 let _ = read_chunk(&mut server).await;
-                // Accept the turn (disable delivery), then go quiet for two stall
-                // windows: the notice must surface exactly once, not per window.
+                // Accept the turn (disable delivery), then go quiet well past
+                // both notice deadlines (1x and 3x the window): the episode must
+                // produce exactly two notices, not one per window.
                 server
                     .write_all(br#"{"type":"report","status":"working","text":"x"}"#)
                     .await
@@ -1435,9 +1576,57 @@ mod tests {
         let events = events.into_inner();
         assert_eq!(
             events.iter().filter(|e| matches!(e, Ev::Stalled)).count(),
-            1,
-            "the stall must surface exactly once per episode: {events:?}"
+            2,
+            "an episode escalates once and then goes quiet: {events:?}"
         );
+
+        // The wording is the point of the escalation: the first fire must not
+        // assert the agent may be stuck (it fires on essentially every cold
+        // launch and is benign), and only the second one warns.
+        let notes = notes.into_inner();
+        assert!(!notes[0].contains("may be stuck"), "{notes:?}");
+        assert!(notes[0].contains("normal during long builds"), "{notes:?}");
+        assert!(notes[1].contains("may be stuck"), "{notes:?}");
+        assert!(notes[1].contains("progressStallSecs"), "{notes:?}");
+    }
+
+    #[test]
+    fn the_unreported_stop_warning_names_both_recoveries() {
+        // Reachable only without `--until-report`, which is now the interactive
+        // default — so it addresses a watching operator. AC 619259/2: it must
+        // say the turn may still conclude after this command exits, and how to
+        // find that out.
+        let msg = stopped_message(7);
+        assert!(msg.contains("turn 7"), "{msg}");
+        assert!(msg.contains("--until-report"), "{msg}");
+        assert!(msg.contains("turn-state.json"), "{msg}");
+        assert!(
+            msg.contains("auto-nudging") && msg.contains("after this command"),
+            "it must say a report can still land post-exit: {msg}"
+        );
+    }
+
+    #[test]
+    fn the_first_stall_notice_informs_and_only_the_second_warns() {
+        // Pure over the message builder, so the wording contract is pinned
+        // without waiting on real timers.
+        let window = Duration::from_secs(300);
+        let first = stall_message(window, 1);
+        assert!(first.contains("no reports for 300s"), "{first}");
+        assert!(!first.contains("may be stuck"), "{first}");
+
+        let second = stall_message(window, 2);
+        assert!(second.contains("may be stuck"), "{second}");
+        // The second names the *elapsed* silence, not the window.
+        assert!(second.contains("900s"), "{second}");
+    }
+
+    #[test]
+    fn the_second_stall_notice_is_due_three_windows_in() {
+        let start = Instant::now();
+        let window = Duration::from_secs(300);
+        assert_eq!(stall_notice_at(start, window, 0), start + window);
+        assert_eq!(stall_notice_at(start, window, 1), start + window * 3);
     }
 
     #[test]
@@ -1448,6 +1637,7 @@ mod tests {
             let driver = drive(
                 client,
                 7,
+                "inst-a",
                 "go".into(),
                 wd_ms(LONG_MS, LONG_MS, 80, 3),
                 false,
@@ -1494,6 +1684,7 @@ mod tests {
             let driver = drive(
                 client,
                 9,
+                "inst-a",
                 "go".into(),
                 wd_ms(LONG_MS, LONG_MS, 50, 2),
                 false,
@@ -1509,7 +1700,21 @@ mod tests {
             result
         });
         let err = result.expect_err("exhausted resends must fail");
-        assert!(format!("{err:#}").contains("not accepted"), "{err:#}");
+        let msg = format!("{err:#}");
+        // The verdict must distinguish a *wedged harness* from a broken
+        // transport — the two look identical from here but only one is fixable
+        // by re-prompting — and name the recovery, with the instance in it.
+        assert!(msg.contains("never began"), "{msg}");
+        assert!(
+            msg.contains("wedged harness, not a broken transport"),
+            "{msg}"
+        );
+        assert!(msg.contains("sandbox stop inst-a"), "{msg}");
+        assert!(msg.contains("sandbox start --agent --name inst-a"), "{msg}");
+        assert!(msg.contains("--redeliver"), "{msg}");
+        // A fresh session cannot see the old conversation, so the caller has to
+        // be told the directive must stand alone.
+        assert!(msg.contains("stand on its own"), "{msg}");
     }
 
     // ---- phase-0 ready-gate (canned channel, tier 2) ----
@@ -1544,6 +1749,7 @@ mod tests {
             let driver = drive(
                 client,
                 turn_id,
+                "inst-a",
                 prompt.to_string(),
                 watchdog,
                 false,
@@ -1683,6 +1889,7 @@ mod tests {
             let driver = drive(
                 client,
                 1,
+                "inst-a",
                 "go".into(),
                 watchdog,
                 false,
@@ -1713,5 +1920,128 @@ mod tests {
             elapsed >= Duration::from_millis(80),
             "the prompt must wait out the gate before proceeding: {elapsed:?}"
         );
+    }
+
+    // ---- the report journal (card 60b91e) ----
+
+    /// A `FakeHost` whose clock seam answers with a fixed timestamp.
+    fn host_with_clock(stamp: &str) -> FakeHost {
+        let mut host = FakeHost::new();
+        // One `date` per journaled event; queue plenty.
+        for _ in 0..8 {
+            host.push_run(Ok(std::process::Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: format!("{stamp}\n").into_bytes(),
+                stderr: Vec::new(),
+            }));
+        }
+        host
+    }
+
+    fn journal_root(tag: &str) -> PathBuf {
+        let p =
+            std::env::temp_dir().join(format!("katsu-prompt-journal-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        p
+    }
+
+    #[test]
+    fn the_drive_sink_journals_reports_stops_and_rearms() {
+        // The AC: a report, a `Stopped` verdict, and a `ReArmed` notice all land
+        // in `reports.ndjson`, so "what did it conclude?" is answerable after
+        // the streaming process and its terminal are gone.
+        let root = journal_root("all-events");
+        let host = host_with_clock("2026-08-01T12:00:00Z");
+
+        let done = Report {
+            status: Status::Done,
+            text: "VERDICT: accept\n\nNo blocking findings.".to_string(),
+            turn_id: Some(7),
+        };
+        journal_event(&host, &root, "inst-a", &DriveEvent::Report(&done));
+        journal_event(&host, &root, "inst-a", &DriveEvent::Stopped(8));
+        journal_event(&host, &root, "inst-a", &DriveEvent::ReArmed(9));
+
+        let entries = report_log::read(&root, "inst-a");
+        assert_eq!(entries.len(), 3, "{entries:?}");
+
+        assert_eq!(entries[0].status, "done");
+        assert_eq!(entries[0].turn_id, Some(7));
+        assert!(
+            entries[0].text.starts_with("VERDICT: accept"),
+            "{entries:?}"
+        );
+        assert_eq!(entries[0].at, "2026-08-01T12:00:00Z");
+
+        assert_eq!(entries[1].status, "stopped");
+        assert_eq!(entries[1].turn_id, Some(8));
+        assert_eq!(entries[2].status, "re-armed");
+        assert_eq!(entries[2].turn_id, Some(9));
+
+        // The terminal conclusion is what `sandbox status` surfaces; a later
+        // `re-armed` notice must not displace it.
+        let last = report_log::latest_terminal_at(&root, "inst-a").unwrap();
+        assert_eq!(last.status, "stopped");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_stall_notice_is_not_journaled_as_something_the_agent_said() {
+        // `Stalled` is the watchdog's opinion, not an agent report — journaling
+        // it would put words in the agent's mouth.
+        let root = journal_root("stall");
+        let host = host_with_clock("2026-08-01T12:00:00Z");
+        journal_event(
+            &host,
+            &root,
+            "inst-a",
+            &DriveEvent::Stalled("no progress for 300s"),
+        );
+        assert!(report_log::read(&root, "inst-a").is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn every_relayed_report_status_is_journaled_under_its_own_name() {
+        let root = journal_root("statuses");
+        let host = host_with_clock("2026-08-01T12:00:00Z");
+        for (status, name) in [
+            (Status::Working, "working"),
+            (Status::Info, "info"),
+            (Status::Done, "done"),
+            (Status::Blocked, "blocked"),
+        ] {
+            let r = Report {
+                status,
+                text: format!("a {name} report"),
+                turn_id: Some(1),
+            };
+            journal_event(&host, &root, "inst-a", &DriveEvent::Report(&r));
+        }
+        let got: Vec<String> = report_log::read(&root, "inst-a")
+            .into_iter()
+            .map(|e| e.status)
+            .collect();
+        assert_eq!(got, vec!["working", "info", "done", "blocked"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_journal_write_failure_never_breaks_the_drive() {
+        // Best-effort semantics: point the journal at a path that cannot be
+        // created (a file where the state dir should be) and confirm the call
+        // still returns normally.
+        let root = journal_root("unwritable");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("inst-a"), b"not a directory").unwrap();
+        let host = host_with_clock("2026-08-01T12:00:00Z");
+        let r = Report {
+            status: Status::Done,
+            text: "done".to_string(),
+            turn_id: Some(1),
+        };
+        journal_event(&host, &root, "inst-a", &DriveEvent::Report(&r)); // must not panic
+        assert!(report_log::read(&root, "inst-a").is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

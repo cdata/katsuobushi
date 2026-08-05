@@ -205,11 +205,16 @@ enum SandboxCommand {
         /// Agent mode: send this prompt once the instance is ready.
         #[arg(long)]
         prompt: Option<String>,
-        /// Stay armed across an unreported turn-end: keep waiting for a terminal
-        /// `report done`/`blocked` instead of returning when the agent stops
-        /// silently. Pairs with the guest's auto-nudges.
+        /// Accepted for compatibility — a prompted agent start now stays armed
+        /// by default, so this is a no-op.
         #[arg(long)]
         until_report: bool,
+        /// Return as soon as the agent yields, even without a terminal
+        /// `report done`/`blocked` (the pre-0.3.6 behavior). A first-turn
+        /// directive is dispatch-shaped, not interactive, so staying armed is
+        /// the default.
+        #[arg(long, conflicts_with = "until_report")]
+        no_until_report: bool,
     },
     /// Launch an agent VM to work a project-board card (guards Available-only,
     /// claims it to in-progress, seeds the agent with the card as its directive).
@@ -222,23 +227,37 @@ enum SandboxCommand {
         /// Dispatch even if the card isn't Available (not To-do, or blocked).
         #[arg(long)]
         force: bool,
-        /// Stay armed across an unreported turn-end: keep waiting for a terminal
-        /// `report done`/`blocked` instead of returning when the agent stops
-        /// silently. Pairs with the guest's auto-nudges.
+        /// Accepted for compatibility — dispatch now stays armed by default, so
+        /// this is a no-op.
         #[arg(long)]
         until_report: bool,
+        /// Return as soon as the agent yields, even without a terminal
+        /// `report done`/`blocked` (the pre-0.3.6 behavior). A dispatched
+        /// card's drive should normally end only on a terminal report,
+        /// transport death, or delivery exhaustion.
+        #[arg(long, conflicts_with = "until_report")]
+        no_until_report: bool,
     },
     /// Push a prompt to a running instance and stream its reports.
     Prompt {
         /// Instance name or 1-based index into the sorted listing.
         instance: String,
-        /// Prompt text; remaining args are joined with spaces.
+        /// Prompt text; remaining args are joined with spaces. Required unless
+        /// `--redeliver` supplies the text from the persisted directive —
+        /// without this, a bare `sandbox prompt <inst>` delivered an empty turn.
+        #[arg(required_unless_present = "redeliver")]
         text: Vec<String>,
         /// Stay armed across an unreported turn-end: keep waiting for a terminal
         /// `report done`/`blocked` instead of returning when the agent stops
         /// silently. Pairs with the guest's auto-nudges.
         #[arg(long)]
         until_report: bool,
+        /// Re-send the directive this instance was launched with, as a fresh
+        /// turn. Recovers a dispatch whose launching process died after the VM
+        /// detached, leaving an idle VM that never received its directive.
+        /// Mutually exclusive with TEXT.
+        #[arg(long, conflicts_with = "text")]
+        redeliver: bool,
     },
     /// Show one instance, or a table of all instances when omitted.
     Status {
@@ -417,15 +436,181 @@ mod tests {
                         instance,
                         text,
                         until_report,
+                        redeliver,
                     },
                 ..
             }) => {
                 assert_eq!(instance, "my-inst");
                 assert_eq!(text, vec!["hello", "world"]);
-                assert!(!until_report, "--until-report defaults off");
+                // Interactive prompt keeps the opposite default from the
+                // orchestration flows: an operator is watching and can
+                // re-prompt, so the command returning on a yield is fine.
+                assert!(
+                    !until_report,
+                    "interactive prompt still defaults --until-report off"
+                );
+                assert!(!redeliver, "--redeliver defaults off");
             }
             _ => panic!("expected sandbox prompt"),
         }
+    }
+
+    /// Dispatch is an orchestration flow: the drive stays armed unless the
+    /// caller explicitly opts out, so "the command returned" means "the work
+    /// concluded" rather than "the agent happened to yield".
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dispatch_stays_armed_by_default_and_opts_out_explicitly() {
+        let cli = parse(&[
+            "katsuctl", "sandbox", "--config", "/x", "dispatch", "a3f7b2",
+        ]);
+        match cli.domain {
+            Domain::Sandbox(SandboxArgs {
+                command:
+                    SandboxCommand::Dispatch {
+                        card,
+                        no_until_report,
+                        ..
+                    },
+                ..
+            }) => {
+                assert_eq!(card, "a3f7b2");
+                assert!(!no_until_report, "dispatch stays armed by default");
+            }
+            _ => panic!("expected sandbox dispatch"),
+        }
+
+        let cli = parse(&[
+            "katsuctl",
+            "sandbox",
+            "--config",
+            "/x",
+            "dispatch",
+            "a3f7b2",
+            "--no-until-report",
+        ]);
+        match cli.domain {
+            Domain::Sandbox(SandboxArgs {
+                command:
+                    SandboxCommand::Dispatch {
+                        no_until_report, ..
+                    },
+                ..
+            }) => assert!(
+                no_until_report,
+                "--no-until-report restores the early return"
+            ),
+            _ => panic!("expected sandbox dispatch"),
+        }
+    }
+
+    /// `--until-report` is still accepted on the flipped commands (it is now a
+    /// no-op), so existing scripts keep parsing; pairing it with the negation is
+    /// a usage error rather than a silent precedence rule.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_legacy_until_report_flag_still_parses_but_conflicts_with_its_negation() {
+        let cli = parse(&[
+            "katsuctl",
+            "sandbox",
+            "--config",
+            "/x",
+            "dispatch",
+            "a3f7b2",
+            "--until-report",
+        ]);
+        assert!(matches!(
+            cli.domain,
+            Domain::Sandbox(SandboxArgs {
+                command: SandboxCommand::Dispatch { .. },
+                ..
+            })
+        ));
+
+        assert!(Cli::try_parse_from([
+            "katsuctl",
+            "sandbox",
+            "--config",
+            "/x",
+            "dispatch",
+            "a3f7b2",
+            "--until-report",
+            "--no-until-report",
+        ])
+        .is_err());
+    }
+
+    /// `--redeliver` takes no text — the directive comes from the state dir.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prompt_redeliver_needs_no_text() {
+        let cli = parse(&[
+            "katsuctl",
+            "sandbox",
+            "--config",
+            "/x",
+            "prompt",
+            "card-a3f7b2",
+            "--redeliver",
+        ]);
+        match cli.domain {
+            Domain::Sandbox(SandboxArgs {
+                command:
+                    SandboxCommand::Prompt {
+                        instance,
+                        text,
+                        redeliver,
+                        ..
+                    },
+                ..
+            }) => {
+                assert_eq!(instance, "card-a3f7b2");
+                assert!(text.is_empty());
+                assert!(redeliver);
+            }
+            _ => panic!("expected sandbox prompt"),
+        }
+    }
+
+    /// A bare `sandbox prompt <inst>` used to deliver an *empty* turn. It is a
+    /// usage error now — `--redeliver` is the only way to omit the text.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prompt_requires_text_unless_redelivering() {
+        assert!(
+            Cli::try_parse_from(["katsuctl", "sandbox", "--config", "/x", "prompt", "my-inst"])
+                .is_err(),
+            "a prompt with no text and no --redeliver must not parse"
+        );
+        assert!(Cli::try_parse_from([
+            "katsuctl",
+            "sandbox",
+            "--config",
+            "/x",
+            "prompt",
+            "my-inst",
+            "--redeliver",
+        ])
+        .is_ok());
+    }
+
+    /// Passing both is a usage error, not a silent precedence rule — the two
+    /// mean different things and guessing which wins would be a trap.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prompt_rejects_redeliver_together_with_text() {
+        assert!(Cli::try_parse_from([
+            "katsuctl",
+            "sandbox",
+            "--config",
+            "/x",
+            "prompt",
+            "card-a3f7b2",
+            "--redeliver",
+            "some",
+            "text",
+        ])
+        .is_err());
     }
 
     #[cfg(target_os = "linux")]
@@ -468,14 +653,17 @@ mod tests {
                         agent,
                         name,
                         prompt,
-                        until_report,
+                        no_until_report,
+                        ..
                     },
                 config,
             }) => {
                 assert!(agent);
                 assert_eq!(name.as_deref(), Some("foo"));
                 assert_eq!(prompt.as_deref(), Some("do the thing"));
-                assert!(!until_report, "--until-report defaults off");
+                // A prompted agent start is dispatch-shaped, not interactive:
+                // it stays armed unless the caller opts out.
+                assert!(!no_until_report, "a prompted start stays armed by default");
                 assert_eq!(config, PathBuf::from("/x"));
             }
             _ => panic!("expected sandbox start"),

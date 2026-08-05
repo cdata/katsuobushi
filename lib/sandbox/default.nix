@@ -107,6 +107,22 @@ defaults:
   scratchVolumeSize ? 32768,
   dbVolumeSize ? 4096, # guest Nix database (importHostStoreDb)
 
+  # How long a driven turn may go without a *report* before the host prints a
+  # first "no reports for Ns" notice (a second, stronger one follows at 3x this
+  # if the silence continues). The turn is never broken or killed —
+  # the notice is purely informational.
+  #
+  # Only `working`/`info` reports reset this clock; heartbeats are deliberately
+  # silent and do not count. An agent inside one long foreground tool call
+  # therefore looks idle no matter how hard it is working, and a cold workspace
+  # compile is routinely 15-25 minutes — so on a project like that the default
+  # fires on essentially every launch and is benign every time. A watchdog that
+  # always barks trains operators toward alarm, and the one alarmed response is
+  # usually the destructive one. Raise this to comfortably exceed the project's
+  # cold-build time (e.g. 1500 for a ~20-minute build) and the notice starts
+  # meaning something again.
+  progressStallSecs ? 300,
+
   # Packages to put on the guest's PATH. This is where the agent harness goes —
   # it is just another package, not a built-in concept, so the consumer supplies
   # it (and any extra tooling) here. For Claude Code, pass nixpkgs' `claude-code`
@@ -123,10 +139,20 @@ defaults:
   # microvm.nix's guest Nix database only knows the VM's *system* closure — every
   # other host path is present as bytes on the 9p mount yet not registered as
   # valid, so the guest's `nix` ignores it and re-substitutes from the network.
-  # With this on, the runner snapshots the host's `db.sqlite` at launch (a
-  # consistent SQLite `.backup`, ~0.5s) into the per-instance share, and a guest
-  # boot service transplants it over the system-only DB *after* microvm's own
-  # closure registration. Because the guest system closure was itself built on the
+  # With this on, the runner snapshots the host's `db.sqlite` at launch into the
+  # per-instance share, and a guest boot service transplants it over the
+  # system-only DB *after* microvm's own closure registration.
+  #
+  # The snapshot is a SQLite `VACUUM INTO`, which takes a consistent read
+  # snapshot without restarting under concurrent writers. That matters because
+  # the nix-daemon writes `db.sqlite` on every derivation registration, so the
+  # snapshot routinely runs *while* the host is building — a second launch, or
+  # any unrelated `nix build`. (The older `.backup` restarted from page zero on
+  # every such write and could spin indefinitely.) Against a quiescent DB it is
+  # well under a second; the runner additionally bounds it with `timeout` so the
+  # worst case is a guest that boots unseeded rather than a launch that hangs.
+  #
+  # Because the guest system closure was itself built on the
   # host, the host DB is a strict superset, so the swap keeps the VM bootable
   # while marking all host paths valid — served straight from the shared store
   # with zero network and zero copying. Only genuinely host-absent paths then hit
@@ -224,7 +250,9 @@ let
   # into the agent env. Inert knobs until a consumer reads them.
   heartbeatSecs = 10; # heartbeat cadence (H)
   heartbeatMiss = 3; # dead after N·H = 30 s of silence (N)
-  progressStallSecs = 300; # surface "no progress" (no break)
+  # NB: `progressStallSecs` is NOT bound here — it is a consumer-facing argument
+  # (see the arg list above), because it is the one tunable whose right value
+  # depends on the project's cold-build time rather than on the protocol.
   deliveryDeadlineSecs = 20; # resend if no TurnAccepted
   deliveryRetries = 3; # max resends, then fail (K)
   readyGateSecs = 60; # wait for SessionReady, then send anyway (G)
@@ -1418,7 +1446,10 @@ let
           (mountUnit nixDbMount)
           "local-fs.target"
         ];
-        unitConfig.ConditionPathExists = "${shareMount}/nix-db.sqlite";
+        # Deliberately NOT gated on `ConditionPathExists = …/nix-db.sqlite`: a
+        # skipped unit writes nothing, and "the snapshot never arrived" is
+        # exactly the outcome the host needs told about. The script handles the
+        # missing-snapshot case itself (and records it), so the unit always runs.
         path = [ pkgs.coreutils ];
         serviceConfig = {
           Type = "oneshot";
@@ -1432,8 +1463,23 @@ let
           snap=${shareMount}/nix-db.sqlite
           marker="$dbdir/.katsu-seeded"
 
+          # Publish the verdict to the share so the *host* can see it: an
+          # unseeded guest boots perfectly healthy and only reveals itself when
+          # an agent finds it cannot run a single gate. Best-effort — the share
+          # is a 9p mount and this must never fail the boot.
+          verdict() {
+            printf '%s\n' "$1" > ${shareMount}/nixdb-status 2>/dev/null || true
+          }
+
           if [ -e "$marker" ]; then
             echo "katsuobushi: guest Nix DB already seeded (persistent volume); keeping it."
+            verdict already-seeded
+            exit 0
+          fi
+
+          if [ ! -e "$snap" ]; then
+            echo "katsuobushi: no host Nix DB snapshot in the share; booting with a system-only store DB (host-built paths will NOT be valid in this VM)." >&2
+            verdict skipped-no-snapshot
             exit 0
           fi
 
@@ -1450,8 +1496,10 @@ let
             rm -f "$db.katsu-orig"
             : > "$marker"
             echo "katsuobushi: seeded guest Nix DB from host; host-built paths are reusable offline."
+            verdict seeded
           else
             echo "katsuobushi: host Nix DB seed failed; rebuilding a system-only DB." >&2
+            verdict rolled-back
             rm -f "$db" "$db-wal" "$db-shm"
             # Re-register the system closure from the kernel-cmdline regInfo (the
             # same registration postBootCommands loads) so the fallback DB is at
