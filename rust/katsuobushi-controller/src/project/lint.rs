@@ -188,6 +188,21 @@ pub fn run(fs: &dyn Fs, paths: &Paths, renderer: &Renderer, fix: bool) -> Result
         match &e.meta {
             Err(err) => issues.push(error("note-parse", format!("{}: {err}", e.filename))),
             Ok(m) => {
+                // A title that parses empty is unambiguous corruption — `new`
+                // requires one — and it is the one defect nothing else
+                // surfaces: `status` renders a blank column and the Obsidian
+                // card face renders blank, while the board and the note stay
+                // perfectly consistent. Silent blanking is the sharpest edge
+                // here (card 579595), so it is an error, not a warning.
+                if m.title.trim().is_empty() {
+                    issues.push(error(
+                        "empty-title",
+                        format!(
+                            "note {} ({}) has no readable `title:` — the card face and `project status` will render blank",
+                            e.filename, m.id
+                        ),
+                    ));
+                }
                 if !board_ids.contains(&m.id) {
                     issues.push(warn(
                         "orphan-note",
@@ -356,6 +371,39 @@ mod tests {
             );
         let paths = Paths::new("/b");
         // Warnings only -> Ok (exit 0).
+        assert!(run(&fs, &paths, &Renderer::new(true, false), false).is_ok());
+    }
+
+    /// A board with one To-do card whose note is `note_text`.
+    fn board_with_note(note_text: &str) -> (FakeFs, Paths) {
+        let mut board = Board::parse(&layout::initial_board());
+        board.insert_card(
+            Status::Todo,
+            Card::new_link(&CardId::parse("a3f7b2").unwrap()),
+            false,
+        );
+        let fs = FakeFs::new()
+            .with_file("/b/BOARD.md", &board.to_text())
+            .with_file("/b/issues/a3f7b2.md", note_text);
+        (fs, Paths::new("/b"))
+    }
+
+    #[test]
+    fn a_card_with_no_readable_title_is_an_error() {
+        // The board and the note are perfectly consistent here, so every other
+        // check passes — lint used to report `clean` on a card that renders
+        // blank everywhere (card 579595).
+        let (fs, paths) = board_with_note("---\nid: a3f7b2\ntitle:\ntype: feature\n---\n");
+        assert!(run(&fs, &paths, &Renderer::new(true, false), false).is_err());
+    }
+
+    #[test]
+    fn a_prettier_wrapped_title_lints_clean() {
+        // The reflowed shape `markdown format` produces is readable, so it must
+        // not trip the empty-title error.
+        let (fs, paths) = board_with_note(
+            "---\nid: a3f7b2\ntitle:\n  \"Hit points in the heart: damage, the Damaged event, and phase-free death\"\ntype: feature\n---\n",
+        );
         assert!(run(&fs, &paths, &Renderer::new(true, false), false).is_ok());
     }
 }
