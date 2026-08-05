@@ -144,6 +144,10 @@
             "plugins/**/*.md"
             "project/kanban/README.md"
           ];
+          # The board is machine-managed and has writers Prettier disagrees with
+          # (see `lib/project`); belt-and-braces even though `include` above
+          # doesn't reach it today.
+          exclude = project.markdownExclude;
         };
 
         # The Katsuobushi sandbox, configured for this repo. The lean

@@ -12,3 +12,8 @@ result-*
 # Obsidian per-vault editor state (local layout + a vendored plugin binary),
 # created when the kanban board is opened in Obsidian. Not shared config.
 .obsidian/
+# lib.markdown stages its generated Prettier ignore file at the repo root for
+# the duration of a `format`/`lint` run (Prettier resolves ignore patterns
+# relative to the file's own directory). It is removed on exit, including on
+# Ctrl-C — this only catches the litter a SIGKILL would leave.
+.prettierignore.*

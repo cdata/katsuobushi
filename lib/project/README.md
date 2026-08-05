@@ -74,3 +74,38 @@ checks   = rust.cargoChecks // project.checks;
 `katsuctl` is Linux-only (it links `tokio-vsock` for the sandbox domain), so
 guard `menuCommands`/`checks` with your own `isLinux` check as this repo's own
 flake does.
+
+## Keep `BOARD.md` out of your Markdown gate
+
+If the project also uses [`lib.markdown`](../markdown/README.md), feed
+`project.markdownExclude` into its `exclude`:
+
+```nix
+markdown = katsuobushi.lib.markdown {
+  inherit pkgs;
+  workspaceRoot = ./.;
+  exclude = project.markdownExclude; # ⇒ [ "<boardDir>/BOARD.md" ]
+};
+```
+
+`markdownExclude` is derived from `boardDir`, so it tracks a relocated board.
+
+**Why.** `BOARD.md` has three writers with mutually incompatible serializations,
+and only two of them can be reconciled:
+
+| Writer                    | Writes                                                            |
+| ------------------------- | ----------------------------------------------------------------- |
+| `katsuctl project`        | `kanban-plugin: basic`, single-blank empty lanes, `---` separator |
+| Prettier (`lib.markdown`) | the same canonical form — the CLI is Prettier-stable by design    |
+| Obsidian Kanban plugin    | `kanban-plugin: board`, double-blank lanes, its own separator     |
+
+The Obsidian plugin's serializer is fixed and cannot be configured to match, so
+simply **opening the board in Obsidian** rewrites the file into a shape a
+Prettier gate rejects — a `markdown lint` / flake-check failure caused by
+reading the board. `BOARD.md` is machine-managed structured data rather than
+prose, so the fix is to stop gating it at all; whichever tool wrote last, the
+gate stays green.
+
+Card notes (`<boardDir>/issues/*.md`) are **not** excluded — they are real prose
+that Obsidian does not reformat, and they should stay gated. `project lint`
+remains the board's own consistency check and is unaffected.
