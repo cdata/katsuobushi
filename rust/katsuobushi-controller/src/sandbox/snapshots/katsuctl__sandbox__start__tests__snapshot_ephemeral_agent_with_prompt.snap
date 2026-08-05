@@ -11,18 +11,29 @@ chmod 700 '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242'
 chmod 700 '/state/katsuobushi'
 chmod a+rwX '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242'
 
+# Log provisioning from here (the runner's own console.log only starts at boot).
+exec 3>&1 4>&2
+exec > >(tee -a '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/provision.log' >&3) 2> >(tee -a '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/provision.log' >&4)
+phase() { printf '%s\n' "$1" > '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/phase'; _t0=$SECONDS; printf '::: %s\n' "$1"; }
+phase_done() { printf '::: done (%ss)\n' "$((SECONDS-_t0))"; }
+trap 'rm -f '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/phase'' EXIT INT TERM
+
 # Per-instance bare git mirror + seeded branch (the guest clones it and pushes back).
+phase 'staging project mirror'
 /nix/store/git/bin/git clone --bare '/home/user/project' '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/sync.git' >/dev/null 2>&1
 /nix/store/git/bin/git -C '/home/user/project' push --quiet '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/sync.git' "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0:refs/heads/sandbox/20260627-120000-4242" --force
 chmod -R a+rwX '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/sync.git'
+phase_done
 
 # Declared secrets, staged as references — the value is re-read at runtime, never baked in.
+phase 'staging secrets'
 if [ -z "${HARNESS_OAUTH_TOKEN:-}" ]; then
   echo "sandbox: required secret CLAUDE_CODE_OAUTH_TOKEN is not set on the host (expected in \$HARNESS_OAUTH_TOKEN)." >&2
   exit 1
 fi
 rm -f '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/cred-CLAUDE_CODE_OAUTH_TOKEN' && (umask 077; printf '%s' "${HARNESS_OAUTH_TOKEN}" > '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/cred-CLAUDE_CODE_OAUTH_TOKEN')
 export KATSU_CRED_CLAUDE_CODE_OAUTH_TOKEN='/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/cred-CLAUDE_CODE_OAUTH_TOKEN'
+phase_done
 
 # Ephemeral ssh keypair (private key stays in the runtime tmpfs; pubkey travels in the share).
 [ -f '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id' ] || /nix/store/openssh/bin/ssh-keygen -t ed25519 -N "" -f '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/id' -q
@@ -39,10 +50,15 @@ ln -sfn '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/nix-db.img' '
 ln -sfn '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/scratch.img' '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/scratch.img'
 cd '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242'
 
+# Provisioning done: restore the real stdout/stderr before the runner takes over.
+phase 'booting VM'
+exec 1>&3 2>&4 3>&- 4>&-
+
 # Agent mode: detach a lingering VM (setsid) that outlives this script.
 setsid /nix/store/microvm/bin/microvm-run > '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/console.log' 2>&1 < /dev/null &
 vm=$!
 disown "$vm" 2>/dev/null || true
+rm -f '/state/katsuobushi/cdata/katsuobushi/20260627-120000-4242/phase'
 echo "sandbox: agent instance '20260627-120000-4242' running (cid 4242)."
 # Wait for the VM's QMP monitor socket before delivering the first turn.
 for _ in $(seq 1 120); do [ -S '/run/katsuobushi/cdata/katsuobushi/20260627-120000-4242/katsuobushi.sock' ] && break; sleep 0.5; done

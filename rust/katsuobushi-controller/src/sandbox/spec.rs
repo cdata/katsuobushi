@@ -316,6 +316,20 @@ mod tests {
       "stopGraceMs": 1500
     }"#;
 
+    /// The knob is only useful if a consumer's override actually reaches the
+    /// host watchdog, so pin a NON-default value end-to-end through the parser
+    /// — the default alone would pass even if the plumbing dropped it.
+    #[test]
+    fn it_parses_a_non_default_progress_stall_window() {
+        let json =
+            EXAMPLE_SPEC_JSON.replace("\"progressStallSecs\": 300", "\"progressStallSecs\": 1500");
+        let spec = from_json_bytes(json.as_bytes()).expect("should parse");
+        assert_eq!(spec.progress_stall_secs, 1500);
+        // The other liveness tunables must not shift with it.
+        assert_eq!(spec.heartbeat_secs, 10);
+        assert_eq!(spec.delivery_deadline_secs, 20);
+    }
+
     #[test]
     fn it_parses_the_design_example_spec() {
         let spec = from_json_bytes(EXAMPLE_SPEC_JSON.as_bytes()).expect("example should parse");
