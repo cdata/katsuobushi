@@ -8,6 +8,95 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.3.6
+
+**`sandbox dispatch` and prompted `sandbox start --agent` now wait for a
+terminal report by default.** Previously they returned as soon as the agent
+yielded, even without a `report done`/`blocked`. If you relied on that early
+return — a script that treats the command exiting as "the turn is over, move on"
+— add **`--no-until-report`** to restore it. Everything else needs no change:
+`--until-report` still parses on both commands (it is now a no-op), so existing
+invocations that passed it behave identically, and this is the behavior they
+were asking for anyway.
+
+Practical effect if you do nothing: a dispatch that used to return early on a
+silent stop now keeps waiting, and ends only on a terminal report, transport
+death, or delivery exhaustion. That is usually what you want — but a wrapper
+with its own timeout around `dispatch` may now hit that timeout where it
+previously returned. Interactive `sandbox prompt` is unchanged.
+
+**The sandbox progress notice changed wording and now fires up to twice.**
+Nothing to do unless you scrape it: the first notice reads
+`no reports for Ns — normal during long builds …` (it no longer claims the agent
+may be stuck), and a second, stronger one fires only if the silence reaches 3×
+the window. Neither breaks the turn, and the default window is still 300s. If
+that notice fires on every launch of your project — it will, if a cold build is
+minutes long — set the new `progressStallSecs` argument past your build time:
+
+```nix
+sandbox = katsuobushi.lib.sandbox { inherit pkgs; …; progressStallSecs = 1500; };
+```
+
+**`sandbox status` can now report a third state: `provisioning`.** Anything
+parsing the `--json` `state` field must handle it alongside `running` and
+`stopped` — an instance that is still being provisioned previously reported
+`stopped`, so a consumer treating "not running" as "dead" will now see a live
+launch it used to misread (which is the point). The detail view and `--json`
+also gain an optional `phase` (the provisioning step in flight), `storeDb` (the
+guest's host-Nix-DB seed verdict) and `lastReport` (the latest terminal report
+object, from the new `reports.ndjson`); all three are omitted when unknown, so
+existing parsers are unaffected. Each instance's state dir gains a
+`provision.log` and, transiently, a `phase` file.
+
+**The guest Nix-DB seeding service now always runs.** It was gated on
+`ConditionPathExists` for the snapshot, so a missing snapshot skipped the unit
+silently; it now runs unconditionally and records its verdict to `nixdb-status`
+in the share, exiting early (and logging loudly) when no snapshot was staged.
+Seeding behavior itself is unchanged — only the reporting is new.
+
+**Check your board for cards a `markdown format` run already blanked.** If a
+project wired both `lib.markdown` and `lib.project`, Prettier reflowed any
+frontmatter value longer than the print width onto continuation lines, and the
+note reader took the result as absent — silently emptying long card titles and
+long `blocked_by` lists. The reader now folds those values back, so **existing
+reflowed notes heal on their own with no migration**. What does not heal is a
+card someone _re-saved_ while its title read as blank. Run `project lint`: the
+new `empty-title` error names any card whose title no longer parses, and it is
+an error, so a `project-lint` flake check that was green can now fail. Restore
+those titles from history (`git log -p <boardDir>/issues/<id>.md`) and re-run.
+
+**`lib.markdown`'s `exclude` now works — check yours.** Prettier resolves
+`--ignore-path` patterns relative to the directory holding the ignore file, and
+that file was generated into the Nix store, so every workspace-relative
+`exclude` entry silently matched nothing. Both the `<name> format`/`lint`
+commands and the flake check now stage the ignore file at the workspace root, so
+`exclude` behaves as its documentation always claimed. **If you passed `exclude`
+and it appeared to have no effect, those files are now genuinely skipped** — a
+gate that was quietly formatting/checking them will change behavior. Consumers
+that never passed `exclude` are unaffected.
+
+The staged file is named `.prettierignore.<name>` at the repo root and is
+removed when the command exits (including on Ctrl-C). It is namespaced by the
+configuration's `name`, so it never collides with a consumer's own
+`.prettierignore` or with a second `lib.markdown` invocation.
+
+**Keep `BOARD.md` out of the gate if you use `lib.project`.** Opening the board
+in Obsidian rewrites it into the Kanban plugin's serialization, which Prettier
+rejects and which the plugin cannot be configured away from — so reading the
+board could fail CI. Wire the new export:
+
+```nix
+markdown = katsuobushi.lib.markdown {
+  inherit pkgs;
+  workspaceRoot = ./.;
+  exclude = project.markdownExclude; # ⇒ [ "<boardDir>/BOARD.md" ]
+};
+```
+
+If your `include` already avoided the board (e.g. an explicit file list), this
+is belt-and-braces; if it globbed `project/kanban/**` or defaulted to `**/*.md`,
+it is the fix. Card notes stay gated either way.
+
 ## 0.3.5
 
 **`lib.rust` gains per-helper build profiles — additive, no action required.**

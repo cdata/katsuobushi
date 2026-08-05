@@ -5,6 +5,229 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.3.6] — 2026-08-05
+
+Burns down the 2026-08 post-mortem: a sandbox launch is now diagnosable while it
+provisions, recoverable when a dispatch dies or a harness wedges, and honest
+about what it concluded. Alongside it, two silent data-integrity fixes on the
+project board — a formatter run could blank a card's title and empty its
+dependency list, and opening the board in Obsidian could fail the Markdown gate.
+
+The consumer-visible behavior changes are the `--until-report` default flip for
+`sandbox dispatch` / prompted `sandbox start`, a third `sandbox status` state
+(`provisioning`), and `lib.markdown`'s `exclude` doing something for the first
+time. No spec or instance-state change (`specVersion 4` / `instanceVersion 2`
+unchanged). See [`MIGRATING.md`](MIGRATING.md#036).
+
+### Added
+
+- **`lib.project` exports `markdownExclude`.** A `lib.markdown` consumer merges
+  it into `exclude` to keep the machine-managed `BOARD.md` out of the Prettier
+  gate: `exclude = project.markdownExclude`. The glob is derived from
+  `boardDir`, so it follows a relocated board. Card notes
+  (`<boardDir>/issues/*.md`) stay gated — they are prose Obsidian does not
+  reformat.
+
+- **`progressStallSecs` is a `lib.sandbox` argument, and the progress notice no
+  longer cries wolf.** The stall window was a hard-coded internal constant
+  (300s) rendered into the spec but not exposed, and only `working`/`info`
+  reports reset its clock — heartbeats are deliberately silent — so an agent
+  inside one long foreground tool call looks idle however hard it is working. A
+  dispatched agent's first act is typically a 15-25 minute cold compile, so the
+  notice fired on essentially every launch and was benign every time. A watchdog
+  that always barks trains operators toward alarm, and in the field their one
+  alarmed response was the destructive one. Two changes: the window is now a
+  consumer knob (`progressStallSecs ? 300`, so a project with 20-minute builds
+  can set `1500`), and the notice escalates instead of asserting trouble up
+  front — the first fire reads "no reports for Ns — normal during long builds
+  …", and only a second fire at **three times** the window says the agent may be
+  stuck, after which the episode goes quiet. Neither ever breaks or kills the
+  turn, and the default window is unchanged.
+- **Report texts are journaled to `reports.ndjson`.** An agent's reports existed
+  only as a transient stream: the guest relayed each one and the driving
+  `prompt`/`dispatch` process rendered it to stdout, while host-side persistence
+  (`liveness.json`) held only heartbeat freshness and the turn counter and
+  guest-side (`turn-state.json`) only phase and timestamps. A turn could reach
+  `ended-ok` — the _fact_ of a clean terminal report durable — with the report's
+  _content_ gone if that stdout was lost. In the field a reviewer's
+  `report done "VERDICT: …"` landed, the operator lost the stream, grepped the
+  whole state dir for "VERDICT", found nothing, and had to re-prompt the
+  reviewer to restate its own verdict. Every relayed report — plus the
+  `Stopped`/`ReArmed` lifecycle verdicts — is now appended at the drive sink to
+  `reports.ndjson` in the instance state dir, one JSON object per line with
+  `turnId`, `status`, `text`, and a host timestamp. (The journal is written by
+  the live drive, so it survives losing that drive's _output_ — a closed
+  terminal, a dead tmux pane — but not the drive _process_ itself; a report
+  landed by a later auto-nudge after the drive is gone is not journaled.) (a
+  multi-line verdict stays one line; a torn trailing line never hides earlier
+  history). The watchdog's stall notice is deliberately not journaled — it is
+  not something the agent said. `sandbox status <inst>` renders the latest
+  terminal report as a `last report:` line. Best-effort throughout: a failed
+  append warns and never breaks the drive, and the `--json` stream is unchanged.
+- **A prompted launch persists its directive, and `sandbox prompt --redeliver`
+  resends it.** `dispatch` claims the card, composes the directive, boots the VM
+  **detached**, and only then tail-calls `prompt` to deliver it — so the text
+  lived solely in the launching process's argv. Killing that process left a
+  healthy idle VM, a card marked in-progress, and the directive nowhere on disk;
+  recovery meant hand-recomposing it from the card plus the instructions file,
+  which only works if you know the composition rule. The composed directive is
+  now written to `directive.md` in the instance's state dir beside
+  `instance.json`, and `sandbox prompt <inst> --redeliver` delivers it verbatim
+  as a fresh turn (normal turn-id and delivery-ack semantics; passing text as
+  well is a usage error, and a missing directive fails with the explicit command
+  to run instead). A promptless launch of an instance that has one prints the
+  `--redeliver` hint. No new secret exposure — a directive is card text already
+  plaintext in the board, and secrets ride fw_cfg. The file's lifetime follows
+  the state dir, so an ephemeral instance's is reaped with it and a named
+  instance's persists across stop/start.
+- **Pre-boot provisioning is visible.** The whole window between "launch
+  started" and "QEMU is up" — mirror clone, nix DB snapshot, context and secret
+  staging — used to be structurally silent: `instance.json` is written before
+  the recipe runs while the QMP socket only appears at boot, so `sandbox status`
+  said `stopped`, and `console.log` did not exist yet because only the runner
+  writes it. An operator watching an 11-minute stall had `/proc` spelunking as
+  their only diagnostic, and killed a live step because of it. Now:
+  - the launch recipe tees its own output to **`provision.log`** in the state
+    dir from its first step, with a `::: <step>` / `::: done (Ns)` marker pair
+    per step (the real stdout/stderr are saved and restored before the runner
+    takes over, so interactive mode still hands a true TTY to ssh+tmux);
+  - it maintains a **`phase`** marker that `sandbox status` renders as
+    `provisioning (<step>)` in the detail view and `--json`, and as
+    `provisioning` in the list — a live VM still wins, so a stranded marker can
+    never mask a running instance;
+  - the guest's Nix-DB seeding service publishes its verdict to the share, and
+    `sandbox status <inst>` renders it as a **`store db:`** line (`host-seeded`
+    / `system-only — host seed skipped` / `… rolled back`). An unseeded guest
+    boots perfectly healthy and can't run a single gate; that is now visible
+    before an agent burns a session discovering it.
+
+### Fixed
+
+- **An injected-but-never-accepted turn now has a recovery path.** The guest
+  turn machine distinguishes _created_, _injected_ (the channel notification was
+  written to the harness's MCP transport) and _accepted_ (the harness actually
+  began the turn, evidenced by a hook or first report). Injection success only
+  meant `send_notification` returned `Ok`, which says nothing about the harness
+  _processing_ it — so a harness that accepted the write and never started a
+  turn left `injected && !accepted`, a state the machine recorded but no
+  recovery path consumed: every host resend hit the dedupe arm and vanished, and
+  the only way out was `sandbox stop` plus a restart. The guest now allows a
+  **bounded** number of re-injections (2) for a turn that is injected but
+  neither accepted nor ended, carrying an "if you already received turn N,
+  continue it; otherwise begin it now" guard preamble so the small double-run
+  risk degrades to a no-op. Re-injection stops the moment the turn is accepted
+  (unspent budget is kept), and an accepted, ended, or budget-exhausted turn
+  still dedupes exactly as before — an executed turn is never re-run. If the
+  turn still never accepts, the host's verdict now names that specific state and
+  the recovery (`sandbox stop` / `sandbox start --agent --name`, then
+  `--redeliver`) instead of the ambiguous "delivery failed".
+- **An aborted launch no longer leaves an instance reading `provisioning`
+  forever.** The pre-boot `phase` marker was cleared only on the success path,
+  so a launch that failed mid-provisioning — an unreadable secret exits 1, and
+  `set -e`/Ctrl-C can end the recipe anywhere — left the marker behind and
+  `sandbox status` reported `provisioning (<step>)` indefinitely for an instance
+  with no VM. That is worse than the `stopped` it used to report, and would
+  strand an orchestrator that (per the migration note) treats `provisioning` as
+  a live launch worth waiting for. The recipe now arms
+  `trap 'rm -f <phase>' EXIT INT TERM` before the first step.
+- **A long `labels:`/`blocked_by:` list no longer gains a phantom empty entry.**
+  Once a flow list is long enough, Prettier explodes it one item per line _with
+  a trailing comma_ — the common on-disk shape for a real label set. The flow
+  parser read that trailing comma as an extra, empty item, which reached
+  `--json`, `project status`, and the Obsidian card face. Items whose raw text
+  is blank are now dropped; an explicitly empty item (written `""`) still
+  round-trips.
+- **Concurrent `<name> format` / `<name> lint` runs no longer race their staged
+  ignore file.** Both share a configuration `name`, so they shared one
+  `.prettierignore.<name>` path and the first to finish deleted it out from
+  under the second. Prettier does not error on a missing `--ignore-path` — it
+  exits 0 having ignored nothing — so the losing `format` run would silently
+  rewrite every excluded file, `BOARD.md` included. The staged file now carries
+  the pid, and a missing one is a hard error rather than a silent no-op.
+- **The launch recipe keeps stdout and stderr separate.** Provisioning output
+  was teed with `2>&1`, which sent the recipe's own failures (a missing secret)
+  to the caller's stdout. Each stream is now teed back to its own descriptor;
+  `provision.log` still captures both.
+- **`sandbox prompt <inst>` with no text is a usage error** instead of
+  delivering an empty turn. `--redeliver` is the supported way to omit it.
+- **The launch-time host Nix DB snapshot no longer livelocks against a busy
+  host.** The snapshot used a plain SQLite `.backup`, whose API restarts from
+  page zero whenever another connection writes the source — and the nix-daemon
+  writes `db.sqlite` on every derivation registration, so any overlapping host
+  `nix build` (a second concurrent launch is one) restarted it indefinitely.
+  Observed in the field at 11m32s and 9.1 TB read for a database that snapshots
+  in under a second when quiescent. It is now a `VACUUM INTO`, which holds a
+  read transaction instead of restarting, wrapped in a 120s `timeout` so any
+  future pathology degrades to the already-designed fallback — a guest that
+  boots unseeded — rather than wedging provisioning. Failure or timeout stays
+  non-fatal, publishes no partial `nix-db.sqlite`, clears its temp file, and
+  prints a visible warning naming the consequence. A missing host database is
+  now skipped rather than snapshotted into an empty one (`sqlite3` creates a
+  database on open).
+- **Prettier-reflowed frontmatter no longer blanks a card.** When a frontmatter
+  value exceeds Prettier's print width it is reflowed onto indented continuation
+  lines — valid YAML, and what `markdown format` considers canonical — but the
+  key's own line then reads as empty. The line-oriented note reader took that as
+  "absent", so a routine format run silently and retroactively blanked card
+  titles (`project status` and the Obsidian card face both rendered empty) and
+  emptied `blocked_by` lists, corrupting the dependency graph. `get_scalar` and
+  `get_list` now fold the continuation lines back into the value, the way YAML
+  does. Block lists and nested mappings are still never mistaken for a wrapped
+  value, and `set_scalar` replaces a wrapped value's continuation lines rather
+  than orphaning them. The reader-only fix keeps the editor's byte-for-byte
+  preservation guarantee — nothing rewrites the note, so unknown keys
+  (Obsidian's included) survive as before.
+- **`project lint` flags a card with no readable title (`empty-title`).**
+  Previously a blanked title left the board and the note perfectly consistent,
+  so lint reported `clean` while the card rendered blank everywhere — the
+  sharpest edge of the reflow bug. It is an error, not a warning: `new` requires
+  a title, so an empty one is unambiguous corruption.
+- **`lib.markdown`'s `exclude` never actually excluded anything.** Prettier
+  applies `.gitignore` semantics to `--ignore-path`, which anchors any pattern
+  containing a `/` to the directory holding the ignore file. Because the
+  generated file lived in the Nix store, a workspace-relative entry like
+  `vendor/**` resolved against `/nix/store/…` and silently matched nothing. The
+  format command and the flake check now stage the generated ignore file at the
+  workspace root (the check copies the source tree first, since a store path is
+  read-only) so `exclude` entries are workspace-relative as documented.
+- **Opening `BOARD.md` in Obsidian no longer fails the Markdown gate.** The
+  board has three writers with incompatible serializations — the
+  `katsuctl project` CLI, Prettier, and the Obsidian Community Kanban plugin —
+  and the plugin's serializer is fixed and cannot be made Prettier-stable, so
+  merely reading the board in Obsidian broke `markdown lint`. The board is
+  machine-managed structured data rather than prose, so it is excluded from the
+  gate (see `markdownExclude` above); this repo's own flake wires it.
+
+### Changed
+
+- **`sandbox dispatch` and a prompted `sandbox start --agent` stay armed by
+  default (`--until-report` is now the default for them).** With the flag off, a
+  drive returned the moment the agent yielded — a
+  `TurnCompleted{reported: false}` surfaced the "stopped without reporting"
+  warning and broke, instead of staying armed for the guest's auto-nudges or a
+  late terminal report. For an interactive prompt that is defensible; for an
+  orchestration flow it inverts what the command exiting _means_, since an
+  orchestrator (or a human skimming) reads "the command returned" as "the work
+  concluded". In the field the flag was omitted on both reviewer launches, so a
+  reviewer paused mid-cold-build read as complete and its verdict was judged
+  from a drive that had simply disarmed. Documenting the flag as opt-in made
+  forgetting it the default outcome exactly where it mattered most.
+  **`--no-until-report` restores the old early return**; `--until-report` is
+  still accepted on both and is now a no-op, so existing invocations keep
+  working. Interactive `sandbox prompt` is unchanged — it still returns on an
+  unreported yield — but its warning now names the two recoveries (re-run armed,
+  or check `turn-state.json` / `sandbox status` for a later `ended-ok`, since
+  the guest's auto-nudges may land a report after the command exits).
+- **Loading the `sandbox` skill is now a hard prerequisite of the
+  `project-orchestration` skill.** The skill previously only described the
+  relationship ("complements … the `sandbox` skill"), and an orchestrator that
+  read that line and skipped the skill flew its VMs blind. The body now opens
+  with an imperative instruction to load it, the frontmatter description says so
+  at selection time, the dispatch and reviewer sections name it as a
+  prerequisite, and a short "if you loaded only this skill" callout inlines the
+  three facts whose absence has actually cost sessions (where `console.log`
+  lives, that the no-progress notice is usually benign, and stop-vs-remove).
+
 ## [0.3.5] — 2026-07-23
 
 Teaches `lib.rust` to build under an arbitrary Cargo profile, refreshes the
