@@ -5,6 +5,70 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.4.0] — 2026-08-06
+
+Two design threads land together. The board grows a **label-and-icebox** model
+(PDD001): a label is an epic you read through a filter, an iced note is a card
+with no board entry, and the host is the board's single writer. On top of it
+come three **authoring skills** (PDD002): `design` writes a PDD, `plan` files
+its work as cards, and `implement` drives a sandbox swarm to `ready`. No spec or
+instance-state change (`specVersion 4` / `instanceVersion 2` unchanged) — the
+`sandbox fetch` change is host-local. Consumers with legacy `design:` fields run
+one `project lint --fix`; see [`MIGRATING.md`](MIGRATING.md#040).
+
+### Added
+
+- **`project status --label=<value>`** — read an epic as a filtered board view.
+  The match is exact and whole-token. Repetition is AND, and the option composes
+  with `--lane` and `--available`.
+- **`project labels`** — enumerate the label vocabulary with a card count per
+  label. `project labels --json` maps each label to its card ids. Archived cards
+  are excluded by default; `--include-archived` folds them in. Iced notes count.
+- **The icebox** — `project new --icebox` writes a note with no board card, so a
+  filer never collides with the host on `BOARD.md`. `project status --icebox`
+  lists the iced notes (id, title, labels) and composes with `--label`.
+  `project status set <id> icebox | todo | cancelled` shelves a card off the
+  board, promotes an iced note to the front of To-do, or cancels one straight
+  into the archive.
+- **`project new --label`** — the canonical, repeatable label option (the older
+  `--labels` spelling stays as an alias).
+- **Three authoring skills** — `katsuobushi:design`, `katsuobushi:plan`, and
+  `katsuobushi:implement`. `design` runs the PDD authoring ritual (grill, draft,
+  Simplified Technical English, context-free read-through). `plan` files an
+  accepted PDD's work as atomic cards. `implement` schedules a per-card
+  implementor and reviewer sandbox to take a label thread to `ready`.
+
+### Changed
+
+- **`sandbox fetch` lands into a per-instance tracking ref.** The guest branch
+  now fetches into `refs/katsuobushi/<inst>`, a ref the host never rebases,
+  instead of the local `sandbox/<inst>` branch. A second fetch of an
+  already-landed instance — every review bounce — is now a clean fast-forward
+  rather than a non-fast-forward failure. The guest push target and the
+  `sandbox status` mirror probe are unchanged.
+- **`project lint` treats an orphan note as the icebox.** A note with no board
+  card was a `warn: orphan-note`; it is now an `info` icebox inventory line that
+  never fails the gate.
+- **The card face drops the `design` column.** A freshly `init`ed board's
+  settings block no longer declares a `design` metadata-key; the value lives on
+  a label.
+- **The host-only board rule is stated as an invariant** in the `sandbox` and
+  `project-orchestration` skills and in `.dispatch-instructions.md`: a sandbox
+  guest never writes `project/kanban/`, and findings return through the `report`
+  channel.
+
+### Deprecated
+
+- **`project new --design <ref>`** — deprecated. It now warns and records the
+  reference as a label. Use `--label`.
+
+### Removed
+
+- **The `design:` note frontmatter field.** Its meaning moves to a label.
+  `project lint --fix` folds a legacy `design:` reference into the card's
+  labels, drops the dead key, and drops the `design` settings column. The
+  migration is idempotent.
+
 ## [0.3.8] — 2026-08-05
 
 Makes Nix-built Rust artifacts _diagnosable_ — the groundwork for having agents
