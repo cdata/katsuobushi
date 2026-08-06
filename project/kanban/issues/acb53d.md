@@ -5,6 +5,8 @@ type: feature
 blocked_by: []
 labels: [PDD001]
 created: 2026-08-06T18:06:50Z
+disposition: accepted
+disposition_at: 2026-08-06T20:04:54Z
 ---
 
 ## What to build
@@ -49,4 +51,3 @@ fails non-fast-forward. That second fetch is the shape of every review bounce.
 - [ ] Unit tests, BDD-named: `it_fetches_a_branch_into_the_instance_tracking_ref`,
       `it_fetches_the_same_instance_twice_without_non_fast_forward`,
       `it_reads_the_landed_probe_from_the_tracking_ref`.
-
