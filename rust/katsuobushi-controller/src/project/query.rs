@@ -31,7 +31,6 @@ struct CardView {
     blocked_by: Vec<String>,
     /// Grabbable: To-do with every blocker at ready/accepted.
     available: bool,
-    design: Option<String>,
     labels: Vec<String>,
 }
 
@@ -159,9 +158,6 @@ fn show_one(board: &Board, notes: &[NoteEntry], renderer: &Renderer, id_input: &
         let c = &out.card;
         let mut s = format!("{}  {}  {}", c.id, r.green(&status_display(c)), c.kind);
         s.push_str(&format!("\n  title: {}", c.title));
-        if let Some(d) = &c.design {
-            s.push_str(&format!("\n  design: {d}"));
-        }
         if !c.labels.is_empty() {
             s.push_str(&format!("\n  labels: {}", c.labels.join(", ")));
         }
@@ -201,7 +197,6 @@ fn build_view(board: &Board, notes: &[NoteEntry], id: &CardId, status: Option<St
             .unwrap_or_else(|| "(no note)".into()),
         blocked_by: blocked_by.iter().map(|c| c.to_string()).collect(),
         available,
-        design: meta.and_then(|m| m.design.clone()),
         labels: meta.map(|m| m.labels.clone()).unwrap_or_default(),
     }
 }

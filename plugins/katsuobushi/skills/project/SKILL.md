@@ -34,8 +34,7 @@ id: a3f7b2 # immutable 6-hex; the note's filename is issues/<id>.md
 title: Device identity and data root
 type: feature # feature | bug | chore | docs
 blocked_by: [1a2b3c] # hex ids; a blocker clears its dependents at `ready`
-design: PDD005 # optional design-doc reference
-labels: [security] # optional freeform tags
+labels: [security, PDD005] # freeform tags; a design/epic ref is just a label
 created: 2026-07-17T18:22:04Z
 # disposition: accepted             # appears only once the card is terminal (archived)
 # disposition_at: 2026-07-19T09:00:00Z  # when it became terminal (paired with disposition)
@@ -100,14 +99,15 @@ project status --available --json   # to parse
 
 ```bash
 project init                                     # scaffold project/kanban/
-project new --title "Add repo list endpoint" --type feature --design PDD006
-project new --title "…" --blocked-by a3f7b2,1a2b3c --labels net
+project new --title "Add repo list endpoint" --type feature --label PDD006
+project new --title "…" --blocked-by a3f7b2,1a2b3c --label net --label security
 echo "## What to build…" | project new --title "…" --body -   # pipe a body
 project status set a3f7b2 in-progress          # ids accept a unique prefix
 project status set --accept-all                # accept the whole Ready lane at once
 project prioritize a3f7b2 --top                # --top/--bottom/--before/--after
 project status                                    # the whole board
 project status --lane needs-review               # review queue (or --available)
+project status --label PDD006                     # one epic: cards carrying a label
 project status a3f7b2                           # one card: detail + body
 project lint                                      # board <-> note consistency (--fix)
 ```
