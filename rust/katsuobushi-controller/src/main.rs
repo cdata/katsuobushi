@@ -158,9 +158,10 @@ enum StatusCommand {
         /// Card id or unique prefix. Omit when using `--accept-all`.
         #[arg(required_unless_present = "accept_all")]
         id: Option<String>,
-        /// Target status. Omit when using `--accept-all`.
+        /// Target status, or `icebox` to shelve the card off the board. Omit
+        /// when using `--accept-all`.
         #[arg(value_enum, required_unless_present = "accept_all")]
-        status: Option<StatusArg>,
+        status: Option<SetTargetArg>,
         /// Accept every card in the Ready lane (ready -> accepted). The
         /// product owner's bulk sign-off; mutually exclusive with id/status.
         #[arg(long, conflicts_with_all = ["id", "status"])]
@@ -191,6 +192,20 @@ enum StatusArg {
     Ready,
     Accepted,
     Cancelled,
+}
+
+/// clap surface for a `status set` target: every lane, plus `icebox` (shelve a
+/// card off the board). Distinct from [`StatusArg`] because `--lane`/`--icebox`
+/// listing takes no `icebox` lane.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum SetTargetArg {
+    Todo,
+    InProgress,
+    NeedsReview,
+    Ready,
+    Accepted,
+    Cancelled,
+    Icebox,
 }
 
 #[cfg(target_os = "linux")]
@@ -332,6 +347,22 @@ impl From<StatusArg> for project::model::Status {
             StatusArg::Ready => Ready,
             StatusArg::Accepted => Accepted,
             StatusArg::Cancelled => Cancelled,
+        }
+    }
+}
+
+impl From<SetTargetArg> for project::set_status::SetTarget {
+    fn from(s: SetTargetArg) -> Self {
+        use project::model::Status::*;
+        use project::set_status::SetTarget;
+        match s {
+            SetTargetArg::Todo => SetTarget::Status(Todo),
+            SetTargetArg::InProgress => SetTarget::Status(InProgress),
+            SetTargetArg::NeedsReview => SetTarget::Status(NeedsReview),
+            SetTargetArg::Ready => SetTarget::Status(Ready),
+            SetTargetArg::Accepted => SetTarget::Status(Accepted),
+            SetTargetArg::Cancelled => SetTarget::Status(Cancelled),
+            SetTargetArg::Icebox => SetTarget::Icebox,
         }
     }
 }
@@ -750,7 +781,7 @@ mod tests {
                 ..
             }) => {
                 assert_eq!(id.as_deref(), Some("abc123"));
-                assert_eq!(status, Some(StatusArg::Ready));
+                assert_eq!(status, Some(SetTargetArg::Ready));
             }
             _ => panic!("expected project status set"),
         }

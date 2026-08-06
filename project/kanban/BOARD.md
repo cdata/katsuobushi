@@ -23,7 +23,6 @@ kanban-plugin: basic
 - [ ] [[c72eb6]]
 - [ ] [[acb53d]]
 - [ ] [[83ca5d]]
-- [ ] [[98ec91]]
 
 ## In Progress
 
@@ -33,6 +32,7 @@ kanban-plugin: basic
 - [ ] [[67ea1d]]
 - [ ] [[549073]]
 - [ ] [[8e6671]]
+- [ ] [[98ec91]]
 
 ## Ready
 
