@@ -79,7 +79,7 @@ kanban-plugin: basic
 %% kanban:settings
 
 ```
-{"kanban-plugin":"basic","metadata-keys":[{"containsMarkdown":false,"label":"","metadataKey":"title","shouldHideLabel":true},{"containsMarkdown":false,"label":"type","metadataKey":"type","shouldHideLabel":false},{"containsMarkdown":false,"label":"design","metadataKey":"design","shouldHideLabel":false},{"containsMarkdown":false,"label":"blocked by","metadataKey":"blocked_by","shouldHideLabel":false},{"containsMarkdown":false,"label":"labels","metadataKey":"labels","shouldHideLabel":false}]}
+{"kanban-plugin":"basic","metadata-keys":[{"containsMarkdown":false,"label":"","metadataKey":"title","shouldHideLabel":true},{"containsMarkdown":false,"label":"type","metadataKey":"type","shouldHideLabel":false},{"containsMarkdown":false,"label":"blocked by","metadataKey":"blocked_by","shouldHideLabel":false},{"containsMarkdown":false,"label":"labels","metadataKey":"labels","shouldHideLabel":false}]}
 ```
 
 %%

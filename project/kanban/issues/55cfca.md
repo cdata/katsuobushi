@@ -3,8 +3,7 @@ id: 55cfca
 title: "sandbox: agent terminal report truncated/CR-clobbered in captured (non-TTY) stream"
 type: bug
 blocked_by: []
-design: project
-labels: []
+labels: [project]
 created: 2026-07-19T06:46:48Z
 disposition: accepted
 disposition_at: 2026-07-19T07:48:04Z
