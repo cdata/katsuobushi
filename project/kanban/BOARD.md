@@ -26,9 +26,9 @@ kanban-plugin: basic
 
 ## In Progress
 
-- [ ] [[dd24e1]]
-
 ## Needs Review
+
+- [ ] [[dd24e1]]
 
 ## Ready
 
