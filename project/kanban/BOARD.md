@@ -26,11 +26,11 @@ kanban-plugin: basic
 
 ## Needs Review
 
-- [ ] [[dd24e1]]
-- [ ] [[8e2411]]
-- [ ] [[148c2d]]
-
 ## Ready
+
+- [ ] [[148c2d]]
+- [ ] [[8e2411]]
+- [ ] [[dd24e1]]
 
 ---
 
