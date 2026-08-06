@@ -28,10 +28,6 @@ kanban-plugin: basic
 
 ## Ready
 
-- [ ] [[148c2d]]
-- [ ] [[8e2411]]
-- [ ] [[dd24e1]]
-
 ---
 
 ## Archive
@@ -79,6 +75,9 @@ kanban-plugin: basic
 - [x] [[8e6671]]
 - [x] [[98ec91]]
 - [x] [[e88dc8]]
+- [x] [[148c2d]]
+- [x] [[8e2411]]
+- [x] [[dd24e1]]
 
 %% kanban:settings
 
