@@ -26,9 +26,9 @@ kanban-plugin: basic
 
 ## Needs Review
 
-- [ ] [[7f31c2]]
-
 ## Ready
+
+- [ ] [[7f31c2]]
 
 ---
 
