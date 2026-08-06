@@ -26,8 +26,6 @@ kanban-plugin: basic
 
 ## Needs Review
 
-- [ ] [[e88dc8]]
-
 ## Ready
 
 - [ ] [[67ea1d]]
@@ -37,6 +35,7 @@ kanban-plugin: basic
 - [ ] [[549073]]
 - [ ] [[8e6671]]
 - [ ] [[98ec91]]
+- [ ] [[e88dc8]]
 
 ---
 
