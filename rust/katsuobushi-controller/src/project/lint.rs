@@ -66,6 +66,56 @@ fn warn(code: &'static str, message: String) -> Issue {
     }
 }
 
+/// An informational line: never fails the gate, records inventory or a
+/// `--fix`-able migration the board owner should know about.
+fn info(code: &'static str, message: String) -> Issue {
+    Issue {
+        severity: "info",
+        code,
+        message,
+    }
+}
+
+/// Rewrite a board's `%% kanban:settings` JSON to drop the retired `design`
+/// metadata-key, returning the new board text only when the column was present.
+/// The JSON is a single compact line; serde re-serializes it in the same
+/// sorted-key form the settings block is written in, so every surviving column
+/// stays byte-for-byte.
+fn strip_design_column(board_text: &str) -> Option<String> {
+    let mut changed = false;
+    let mut lines: Vec<String> = Vec::new();
+    for line in board_text.lines() {
+        let trimmed = line.trim();
+        if !changed && trimmed.starts_with("{\"kanban-plugin\"") && trimmed.contains("metadata-keys") {
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                if let Some(keys) = value
+                    .get_mut("metadata-keys")
+                    .and_then(|k| k.as_array_mut())
+                {
+                    let before = keys.len();
+                    keys.retain(|k| {
+                        k.get("metadataKey").and_then(|m| m.as_str()) != Some("design")
+                    });
+                    if keys.len() != before {
+                        changed = true;
+                        lines.push(value.to_string());
+                        continue;
+                    }
+                }
+            }
+        }
+        lines.push(line.to_string());
+    }
+    if !changed {
+        return None;
+    }
+    let mut out = lines.join("\n");
+    if board_text.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
+}
+
 #[derive(Serialize)]
 struct LintOutput {
     issues: Vec<Issue>,
@@ -131,6 +181,11 @@ pub fn run(fs: &dyn Fs, paths: &Paths, renderer: &Renderer, fix: bool) -> Result
         issues.push(warn(
             "no-settings",
             "board has no `%% kanban:settings` block; the plugin won't surface card metadata (run `project init`)".into(),
+        ));
+    } else if strip_design_column(&board_text).is_some() {
+        issues.push(info(
+            "legacy-design-column",
+            "board settings still declare the retired `design` column; run `lint --fix` to drop it".into(),
         ));
     }
 
@@ -209,6 +264,17 @@ pub fn run(fs: &dyn Fs, paths: &Paths, renderer: &Renderer, fix: bool) -> Result
                         format!("note {} ({}) has no card on the board", e.filename, m.id),
                     ));
                 }
+                // The `design:` field is retired: it says what a label says.
+                // Flag any note that still carries one; `--fix` folds it in.
+                if e.note.get_scalar("design").is_some_and(|s| !s.is_empty()) {
+                    issues.push(info(
+                        "legacy-design",
+                        format!(
+                            "note {} ({}) carries a deprecated `design:` field; run `lint --fix` to fold it into a label",
+                            e.filename, m.id
+                        ),
+                    ));
+                }
                 for b in &m.blocked_by {
                     if !note_ids.contains(b) && !board_ids.contains(b) {
                         issues.push(warn(
@@ -235,15 +301,56 @@ pub fn run(fs: &dyn Fs, paths: &Paths, renderer: &Renderer, fix: bool) -> Result
         }
     }
 
-    // --fix: prune orphan cards (board cards whose note is gone).
-    if fix && !orphan_ids.is_empty() {
+    // --fix: prune orphan cards, migrate legacy `design:` fields into labels,
+    // and drop the retired `design` settings column. One board write at the end.
+    if fix {
+        let mut board_dirty = false;
         for id in &orphan_ids {
             if board.remove_card(id).is_some() {
                 fixed.push(format!("pruned orphan card {id}"));
+                board_dirty = true;
             }
         }
-        fs.write(&paths.board_md(), &board.to_text())?;
         issues.retain(|i| i.code != "orphan-card");
+
+        // Fold any legacy `design:` field into labels, then drop the dead key.
+        // The note is edited line-wise, so unknown keys stay byte-for-byte.
+        for e in &notes {
+            let Ok(m) = &e.meta else { continue };
+            let Some(reference) = e.note.get_scalar("design").filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let mut note = e.note.clone();
+            let mut labels = note.get_list("labels");
+            if !labels.contains(&reference) {
+                labels.push(reference.clone());
+            }
+            note.set_list("labels", &labels);
+            note.remove_key("design");
+            let path = paths.note(&m.id);
+            fs.write(&path, &note.to_text())
+                .with_context(|| format!("rewrite {}", path.display()))?;
+            fixed.push(format!("folded design `{reference}` into a label on {}", m.id));
+        }
+        issues.retain(|i| i.code != "legacy-design");
+
+        // Drop the retired `design` column from the settings block. Strip the
+        // freshly-rendered board if a card was pruned, else the original text.
+        let mut board_out = if board_dirty {
+            board.to_text()
+        } else {
+            board_text.clone()
+        };
+        if let Some(stripped) = strip_design_column(&board_out) {
+            board_out = stripped;
+            board_dirty = true;
+            fixed.push("dropped the `design` column from the board settings".into());
+        }
+        issues.retain(|i| i.code != "legacy-design-column");
+
+        if board_dirty {
+            fs.write(&paths.board_md(), &board_out)?;
+        }
     }
 
     let has_error = issues.iter().any(|i| i.severity == "error");
@@ -270,6 +377,7 @@ fn human(out: &LintOutput, r: &Renderer) -> String {
     for i in &out.issues {
         let tag = match i.severity {
             "error" => r.red("error"),
+            "info" => r.blue("info "),
             _ => r.yellow("warn "),
         };
         s.push_str(&format!("{tag} {}: {}\n", i.code, i.message));
@@ -282,6 +390,66 @@ mod tests {
     use super::*;
     use crate::project::board::Card;
     use crate::project::fs::FakeFs;
+    use crate::project::note::Note;
+
+    /// A legacy board: its settings still declare the retired `design` column,
+    /// and card `a3f7b2`'s note still carries a `design: PDD005` field.
+    fn legacy_fs() -> FakeFs {
+        let settings = "%% kanban:settings\n\n```\n{\"kanban-plugin\":\"basic\",\"metadata-keys\":[{\"containsMarkdown\":false,\"label\":\"\",\"metadataKey\":\"title\",\"shouldHideLabel\":true},{\"containsMarkdown\":false,\"label\":\"type\",\"metadataKey\":\"type\",\"shouldHideLabel\":false},{\"containsMarkdown\":false,\"label\":\"design\",\"metadataKey\":\"design\",\"shouldHideLabel\":false},{\"containsMarkdown\":false,\"label\":\"blocked by\",\"metadataKey\":\"blocked_by\",\"shouldHideLabel\":false},{\"containsMarkdown\":false,\"label\":\"labels\",\"metadataKey\":\"labels\",\"shouldHideLabel\":false}]}\n```\n\n%%";
+        let board = format!(
+            "---\nkanban-plugin: basic\n---\n\n## To-do\n\n- [ ] [[a3f7b2]]\n\n## In Progress\n\n## Needs Review\n\n## Ready\n\n{settings}\n"
+        );
+        FakeFs::new()
+            .with_file("/b/BOARD.md", &board)
+            .with_file(
+                "/b/issues/a3f7b2.md",
+                "---\nid: a3f7b2\ntitle: X\ntype: feature\nblocked_by: []\ndesign: PDD005\nlabels: [net]\ncreated: 2026-01-01T00:00:00Z\n---\n\nbody\n",
+            )
+    }
+
+    fn run_fix(fs: &FakeFs) {
+        run(fs, &Paths::new("/b"), &Renderer::new(true, false), true).unwrap();
+    }
+
+    #[test]
+    fn it_folds_a_legacy_design_field_into_labels() {
+        let fs = legacy_fs();
+        run_fix(&fs);
+        let note = Note::parse(&fs.get("/b/issues/a3f7b2.md").unwrap()).unwrap();
+        assert_eq!(note.get_list("labels"), vec!["net", "PDD005"]);
+    }
+
+    #[test]
+    fn it_drops_the_design_key_from_the_note() {
+        let fs = legacy_fs();
+        run_fix(&fs);
+        let note = Note::parse(&fs.get("/b/issues/a3f7b2.md").unwrap()).unwrap();
+        assert_eq!(note.get_scalar("design"), None);
+    }
+
+    #[test]
+    fn it_drops_the_design_column_from_the_board_settings() {
+        let fs = legacy_fs();
+        run_fix(&fs);
+        let board = fs.get("/b/BOARD.md").unwrap();
+        assert!(!board.contains("\"metadataKey\":\"design\""));
+        // Every other column survives.
+        assert!(board.contains("\"metadataKey\":\"labels\""));
+        assert!(board.contains("\"metadataKey\":\"blocked_by\""));
+        assert!(board.contains("\"metadataKey\":\"type\""));
+    }
+
+    #[test]
+    fn it_is_idempotent_on_a_second_run() {
+        let fs = legacy_fs();
+        run_fix(&fs);
+        let board_1 = fs.get("/b/BOARD.md").unwrap();
+        let note_1 = fs.get("/b/issues/a3f7b2.md").unwrap();
+        // A second --fix reports no change: the files are byte-identical.
+        run_fix(&fs);
+        assert_eq!(fs.get("/b/BOARD.md").unwrap(), board_1);
+        assert_eq!(fs.get("/b/issues/a3f7b2.md").unwrap(), note_1);
+    }
 
     #[test]
     fn clean_board_has_no_issues() {

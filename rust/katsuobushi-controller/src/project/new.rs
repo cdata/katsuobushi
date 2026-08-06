@@ -76,16 +76,7 @@ pub fn run(
         eprintln!("{}", renderer.yellow(warning));
     }
 
-    let note_text = render_new_note(
-        &id,
-        &args.title,
-        args.kind,
-        &blocked,
-        None,
-        &labels,
-        &created,
-        &body,
-    );
+    let note_text = render_new_note(&id, &args.title, args.kind, &blocked, &labels, &created, &body);
     let note_path = paths.note(&id);
     fs.create_dir_all(&paths.issues_dir())?;
     fs.write(&note_path, &note_text)
@@ -197,7 +188,10 @@ mod tests {
         assert_eq!(meta.id.as_str(), "a3f7b2");
         assert_eq!(meta.created.as_deref(), Some("2026-07-17T18:22:04Z"));
         // `--design PDD005` is folded into a label; no `design:` field is written.
-        assert_eq!(meta.design, None);
+        assert_eq!(
+            Note::parse(&note_text).unwrap().get_scalar("design"),
+            None
+        );
         assert_eq!(meta.labels, vec!["security".to_string(), "PDD005".to_string()]);
 
         // The card is in To-do.

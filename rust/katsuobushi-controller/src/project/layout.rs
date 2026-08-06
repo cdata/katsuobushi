@@ -160,7 +160,6 @@ fn settings_block() -> String {
         "metadata-keys": [
             {"metadataKey": "title", "label": "", "shouldHideLabel": true, "containsMarkdown": false},
             {"metadataKey": "type", "label": "type", "shouldHideLabel": false, "containsMarkdown": false},
-            {"metadataKey": "design", "label": "design", "shouldHideLabel": false, "containsMarkdown": false},
             {"metadataKey": "blocked_by", "label": "blocked by", "shouldHideLabel": false, "containsMarkdown": false},
             {"metadataKey": "labels", "label": "labels", "shouldHideLabel": false, "containsMarkdown": false}
         ]
@@ -173,7 +172,7 @@ fn settings_block() -> String {
 /// The body skeleton `new` writes when no body is piped, and the Obsidian Note
 /// template `init` scaffolds.
 pub fn card_body_template() -> &'static str {
-    "## What to build\n\n<!-- What this card delivers. Cite its design doc via the `design:` field if any. -->\n\n## Acceptance criteria\n\n- [ ] \n\n## Review notes\n\n<!-- Reviewers and the owner append context here on a bounce or return. -->\n"
+    "## What to build\n\n<!-- What this card delivers. Cite its design doc via a label (e.g. `--label PDD005`) if any. -->\n\n## Acceptance criteria\n\n- [ ] \n\n## Review notes\n\n<!-- Reviewers and the owner append context here on a bounce or return. -->\n"
 }
 
 /// The board README (workflow guide).

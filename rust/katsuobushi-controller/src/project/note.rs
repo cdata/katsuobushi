@@ -224,16 +224,65 @@ impl Note {
     }
 
     /// One past the last continuation line belonging to the key at `key_line`.
+    /// A continuation is an indented follow-on line (a Prettier-wrapped scalar or
+    /// an indented block-list item) or a block-list item at column 0 — the shape
+    /// [`collect_block_items`] also reads. A blank line or the next top-level key
+    /// ends it. Reading these here keeps `set_list`/`remove_key` from orphaning a
+    /// key's block-list items.
     fn continuation_end(&self, key_line: usize) -> usize {
         let mut end = key_line + 1;
         while let Some(line) = self.front.get(end) {
             let trimmed = line.trim();
-            if !line.starts_with([' ', '\t']) || trimmed.is_empty() {
+            if trimmed.is_empty() {
+                break;
+            }
+            let is_block_item = trimmed == "-" || trimmed.starts_with("- ");
+            if !line.starts_with([' ', '\t']) && !is_block_item {
                 break;
             }
             end += 1;
         }
         end
+    }
+
+    /// Remove a top-level key, along with any Prettier-wrapped continuation or
+    /// block-list lines it owns. Every other line — including unknown keys — is
+    /// preserved byte-for-byte. Returns whether the key was present.
+    pub fn remove_key(&mut self, key: &str) -> bool {
+        let Some((i, rest)) = self.find_key(key) else {
+            return false;
+        };
+        let drop_through = if rest.trim().is_empty() {
+            self.continuation_end(i)
+        } else {
+            i + 1
+        };
+        self.front.splice(i..drop_through, []);
+        true
+    }
+
+    /// Upsert a top-level key as a flow list (`key: [a, b]`), replacing an
+    /// existing entry — flow or block style — and its continuation lines, or
+    /// appending a new line before the closing fence. Items are quoted exactly
+    /// as [`render_new_note`] quotes them, so a migrated note round-trips
+    /// byte-stable.
+    pub fn set_list(&mut self, key: &str, items: &[String]) {
+        let joined = items
+            .iter()
+            .map(|item| emit_list_item(item))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rendered = format!("{key}: [{joined}]");
+        let Some((i, rest)) = self.find_key(key) else {
+            self.front.push(rendered);
+            return;
+        };
+        let drop_through = if rest.trim().is_empty() {
+            self.continuation_end(i)
+        } else {
+            i + 1
+        };
+        self.front.splice(i..drop_through, [rendered]);
     }
 }
 
@@ -245,7 +294,6 @@ pub struct NoteMeta {
     pub title: String,
     pub kind: Kind,
     pub blocked_by: Vec<CardId>,
-    pub design: Option<String>,
     pub labels: Vec<String>,
     pub created: Option<String>,
     /// Present only once a card is terminal (archived).
@@ -273,7 +321,6 @@ impl NoteMeta {
             .iter()
             .filter_map(|s| CardId::parse(s))
             .collect();
-        let design = note.get_scalar("design").filter(|s| !s.is_empty());
         let labels = note.get_list("labels");
         let created = note.get_scalar("created").filter(|s| !s.is_empty());
         let disposition = note
@@ -285,7 +332,6 @@ impl NoteMeta {
             title,
             kind,
             blocked_by,
-            design,
             labels,
             created,
             disposition,
@@ -297,13 +343,11 @@ impl NoteMeta {
 /// Render a fresh card note from scratch (used by `new`). Frontmatter keys are
 /// emitted in canonical order; the body is the caller-supplied template/piped
 /// content.
-#[allow(clippy::too_many_arguments)]
 pub fn render_new_note(
     id: &CardId,
     title: &str,
     kind: Kind,
     blocked_by: &[CardId],
-    design: Option<&str>,
     labels: &[String],
     created: &str,
     body: &str,
@@ -314,9 +358,6 @@ pub fn render_new_note(
     fm.push_str(&format!("type: {}\n", kind.token()));
     let bl: Vec<String> = blocked_by.iter().map(|c| c.to_string()).collect();
     fm.push_str(&format!("blocked_by: [{}]\n", bl.join(", ")));
-    if let Some(d) = design {
-        fm.push_str(&format!("design: {}\n", emit_scalar(d)));
-    }
     let lb: Vec<String> = labels.iter().map(|l| emit_list_item(l)).collect();
     fm.push_str(&format!("labels: [{}]\n", lb.join(", ")));
     fm.push_str(&format!("created: {created}\n"));
@@ -494,9 +535,61 @@ mod tests {
         assert_eq!(meta.id.as_str(), "a3f7b2");
         assert_eq!(meta.kind, Kind::Feature);
         assert_eq!(meta.blocked_by.len(), 2);
-        assert_eq!(meta.design.as_deref(), Some("PDD005"));
         assert_eq!(meta.labels, vec!["security", "net"]);
         assert_eq!(meta.disposition, None);
+        // The retired `design:` field is no longer part of the typed view; a
+        // legacy line survives verbatim as an unknown key for `lint --fix` to
+        // migrate.
+        assert_eq!(note.get_scalar("design").as_deref(), Some("PDD005"));
+    }
+
+    #[test]
+    fn remove_key_drops_a_key_and_preserves_the_rest() {
+        let mut note = Note::parse(SAMPLE).unwrap();
+        assert!(note.remove_key("design"));
+        assert_eq!(note.get_scalar("design"), None);
+        // Everything else stays byte-for-byte.
+        assert_eq!(note.get_scalar("id").as_deref(), Some("a3f7b2"));
+        assert_eq!(note.get_list("labels"), vec!["security", "net"]);
+        assert!(note.to_text().contains("title: Device identity"));
+        // A second removal is a no-op.
+        assert!(!note.remove_key("design"));
+    }
+
+    #[test]
+    fn set_list_replaces_a_zero_indent_block_list_without_orphans() {
+        // The reader accepts block-list items at column 0; the writer must drop
+        // them all when replacing the key, or they orphan as stray frontmatter.
+        let text = "---\nid: a3f7b2\nlabels:\n- security\n- net\ndesign: PDD005\n---\n\nbody\n";
+        let mut note = Note::parse(text).unwrap();
+        assert_eq!(note.get_list("labels"), vec!["security", "net"]);
+        note.set_list(
+            "labels",
+            &["security".into(), "net".into(), "PDD005".into()],
+        );
+        assert_eq!(note.get_list("labels"), vec!["security", "net", "PDD005"]);
+        // The old block items are gone — no orphaned `- security` line survives.
+        let out = note.to_text();
+        assert!(!out.contains("\n- security\n"));
+        assert!(out.contains("labels: [security, net, PDD005]"));
+        // Neighbours are intact.
+        assert_eq!(note.get_scalar("design").as_deref(), Some("PDD005"));
+        assert_eq!(note.get_scalar("id").as_deref(), Some("a3f7b2"));
+    }
+
+    #[test]
+    fn set_list_upserts_a_flow_list() {
+        let mut note = Note::parse(SAMPLE).unwrap();
+        note.set_list(
+            "labels",
+            &["security".into(), "net".into(), "PDD005".into()],
+        );
+        assert_eq!(note.get_list("labels"), vec!["security", "net", "PDD005"]);
+        assert!(note.to_text().contains("labels: [security, net, PDD005]"));
+        // Upsert of an absent key appends it.
+        note.remove_key("labels");
+        note.set_list("labels", &["only".into()]);
+        assert_eq!(note.get_list("labels"), vec!["only"]);
     }
 
     #[test]
@@ -574,7 +667,6 @@ mod tests {
             "Device identity and data root",
             Kind::Feature,
             &[CardId::parse("1a2b3c").unwrap()],
-            Some("PDD005"),
             &["security".to_string()],
             "2026-07-17T18:22:04Z",
             "## What to build\n\n## Acceptance criteria\n- [ ] ...",
@@ -595,16 +687,8 @@ mod tests {
             "trailing colon:",
         ] {
             let id = CardId::parse("a3f7b2").unwrap();
-            let text = render_new_note(
-                &id,
-                title,
-                Kind::Bug,
-                &[],
-                None,
-                &[],
-                "2026-01-01T00:00:00Z",
-                "b",
-            );
+            let text =
+                render_new_note(&id, title, Kind::Bug, &[], &[], "2026-01-01T00:00:00Z", "b");
             let note = Note::parse(&text).unwrap();
             assert_eq!(
                 note.get_scalar("title").as_deref(),
@@ -622,7 +706,6 @@ mod tests {
             "t",
             Kind::Chore,
             &[],
-            None,
             &["needs triage".to_string(), "net".to_string()],
             "2026-01-01T00:00:00Z",
             "b",
