@@ -313,8 +313,13 @@ to a per-instance mirror. The channel carries control/status only — the branch
 is the artifact.
 
 ```sh
-sandbox fetch <name>            # git fetch <mirror> sandbox/<name>:sandbox/<name>
+sandbox fetch <name>            # git fetch <mirror> sandbox/<name>:refs/katsuobushi/<name>
 ```
+
+The fetch lands the guest's branch into a per-instance tracking ref
+(`refs/katsuobushi/<name>`) the host never rebases, so refetching an instance you
+already landed once (every review bounce) is a clean fast-forward, never a
+non-fast-forward failure.
 
 `sandbox fetch` brings the branch into your repo but **never merges**.
 Integration is yours to drive, and the goal is to land the work as automatically
@@ -326,8 +331,8 @@ should feel just as hands-off.
 
 When an agent reports `done`, integrate **without asking**. The sandbox already
 bounded the _execution_; the safety net for the _diff_ is that everything you
-land stays revertable — the `sandbox/<name>` ref is preserved — not a pre-merge
-prompt.
+land stays revertable — the fetched `refs/katsuobushi/<name>` tracking ref is
+preserved — not a pre-merge prompt.
 
 Speak the user's VCS tool: `.jj/` present → use `jj`; else `.git` → `git`; if
 neither or it's ambiguous, ask. The sync layer is always git (the mirror +
@@ -349,8 +354,8 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
    files materialize in the working copy, then run
    `sandbox stop --remove <name>` — the instance's unit of work is accepted, so
    it's spent (a plain `sandbox stop` removes an ephemeral instance; `--remove`
-   also tears down a named one). Keep the `sandbox/<name>` ref as the revert
-   artifact, and surface the agent's `done` summary plus a diffstat of what
+   also tears down a named one). Keep the `refs/katsuobushi/<name>` tracking ref
+   as the revert artifact, and surface the agent's `done` summary plus a diffstat of what
    landed — that digest is the orchestrator's "return value".
 5. **Doesn't land cleanly →** treat the reconciliation as ordinary delegated
    work, not a special case (below).
