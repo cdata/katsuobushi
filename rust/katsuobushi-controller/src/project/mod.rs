@@ -75,6 +75,7 @@ pub fn dispatch(args: ProjectArgs, global: Global) -> Result<()> {
                 id,
                 lane,
                 available,
+                label,
             } = args;
             match command {
                 Some(StatusCommand::Set {
@@ -110,6 +111,7 @@ pub fn dispatch(args: ProjectArgs, global: Global) -> Result<()> {
                     id,
                     lane.map(Into::into),
                     available,
+                    &label,
                 ),
             }
         }

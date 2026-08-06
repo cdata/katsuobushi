@@ -134,6 +134,11 @@ struct StatusArgs {
     /// blocker at ready/accepted.
     #[arg(long, conflicts_with_all = ["lane", "id"])]
     available: bool,
+    /// When listing, only cards carrying this label (exact, whole-token
+    /// match). Repeatable; repetition is AND. Composes with --lane and
+    /// --available.
+    #[arg(long = "label", conflicts_with = "id")]
+    label: Vec<String>,
 }
 
 #[derive(Subcommand)]

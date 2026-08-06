@@ -35,8 +35,9 @@ struct CardView {
     labels: Vec<String>,
 }
 
-/// `project status [id] [--lane] [--available]`. With an id, detail one card;
-/// without, list the board (optionally filtered).
+/// `project status [id] [--lane] [--available] [--label ...]`. With an id,
+/// detail one card; without, list the board (optionally filtered).
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     fs: &dyn Fs,
     paths: &Paths,
@@ -45,6 +46,7 @@ pub fn show(
     id_input: Option<String>,
     status_filter: Option<Status>,
     available_only: bool,
+    label_filter: &[String],
 ) -> Result<()> {
     let board_text = fs
         .read(&paths.board_md())
@@ -61,6 +63,7 @@ pub fn show(
             clock,
             status_filter,
             available_only,
+            label_filter,
         ),
     }
 }
@@ -74,6 +77,7 @@ fn list_all(
     clock: &dyn Clock,
     status_filter: Option<Status>,
     available_only: bool,
+    label_filter: &[String],
 ) -> Result<()> {
     let now = clock.now_unix();
     let mut views = Vec::new();
@@ -102,6 +106,9 @@ fn list_all(
     }
     if available_only {
         views.retain(|v| v.available);
+    }
+    if !label_filter.is_empty() {
+        views.retain(|v| label_matches(v, label_filter));
     }
 
     renderer.emit(&views, |_| {
@@ -166,6 +173,15 @@ fn show_one(board: &Board, notes: &[NoteEntry], renderer: &Renderer, id_input: &
         }
         s
     })
+}
+
+/// Whether a card carries every requested label. The match is exact and
+/// whole-token; an empty request matches everything. Repetition is AND — the
+/// board is narrowed to the intersection of the requested labels.
+fn label_matches(view: &CardView, wanted: &[String]) -> bool {
+    wanted
+        .iter()
+        .all(|want| view.labels.iter().any(|have| have == want))
 }
 
 /// Build the projection for one card id.
@@ -300,9 +316,92 @@ mod tests {
         let r = Renderer::new(true, false);
         let clock = FixedClock(NOW);
         // Should not error; JSON path serializes the Vec.
-        show(&fs, &paths, &r, &clock, None, None, false).unwrap();
-        show(&fs, &paths, &r, &clock, None, Some(Status::Todo), false).unwrap();
-        show(&fs, &paths, &r, &clock, None, None, true).unwrap();
+        show(&fs, &paths, &r, &clock, None, None, false, &[]).unwrap();
+        show(&fs, &paths, &r, &clock, None, Some(Status::Todo), false, &[]).unwrap();
+        show(&fs, &paths, &r, &clock, None, None, true, &[]).unwrap();
+    }
+
+    /// A three-card board: two carry `PDD007`, one carries `debt`; one of the
+    /// PDD007 cards also carries `security`. Mirrors the design's worked example.
+    fn labelled() -> (FakeFs, Paths) {
+        let mut board = Board::parse(&layout::initial_board());
+        for id in ["aaaaaa", "bbbbbb", "cccccc"] {
+            board.insert_card(Status::Todo, Card::new_link(&CardId::parse(id).unwrap()), false);
+        }
+        let fs = FakeFs::new()
+            .with_file("/b/BOARD.md", &board.to_text())
+            .with_file(
+                "/b/issues/aaaaaa.md",
+                "---\nid: aaaaaa\ntitle: A\ntype: feature\nblocked_by: []\nlabels: [PDD007, security]\n---\nbody a\n",
+            )
+            .with_file(
+                "/b/issues/bbbbbb.md",
+                "---\nid: bbbbbb\ntitle: B\ntype: bug\nblocked_by: []\nlabels: [debt]\n---\nbody b\n",
+            )
+            .with_file(
+                "/b/issues/cccccc.md",
+                "---\nid: cccccc\ntitle: C\ntype: feature\nblocked_by: []\nlabels: [PDD007]\n---\nbody c\n",
+            );
+        (fs, Paths::new("/b"))
+    }
+
+    /// Build the label-carrying views for the `labelled` fixture, in board order.
+    fn labelled_views() -> Vec<CardView> {
+        let (fs, paths) = labelled();
+        let board = Board::parse(&fs.get("/b/BOARD.md").unwrap());
+        let notes = layout::load_notes(&fs, &paths).unwrap();
+        ["aaaaaa", "bbbbbb", "cccccc"]
+            .iter()
+            .map(|id| {
+                build_view(&board, &notes, &CardId::parse(id).unwrap(), Some(Status::Todo))
+            })
+            .collect()
+    }
+
+    fn ids_matching(wanted: &[&str]) -> Vec<String> {
+        let want: Vec<String> = wanted.iter().map(|s| s.to_string()).collect();
+        labelled_views()
+            .into_iter()
+            .filter(|v| label_matches(v, &want))
+            .map(|v| v.id)
+            .collect()
+    }
+
+    #[test]
+    fn it_selects_only_cards_that_carry_the_label() {
+        assert_eq!(ids_matching(&["PDD007"]), vec!["aaaaaa", "cccccc"]);
+    }
+
+    #[test]
+    fn it_matches_a_label_exactly_not_as_a_substring() {
+        // `PDD` is a prefix of `PDD007` but not a whole label -> no match.
+        assert!(ids_matching(&["PDD"]).is_empty());
+        // `security` is a whole label on exactly one card.
+        assert_eq!(ids_matching(&["security"]), vec!["aaaaaa"]);
+    }
+
+    #[test]
+    fn it_ands_a_label_with_a_lane_filter() {
+        // The lane filter runs before the label retain in `list_all`; here we
+        // assert the label predicate itself narrows the To-do lane to PDD007.
+        let todo_pdd007: Vec<String> = labelled_views()
+            .into_iter()
+            .filter(|v| v.status.as_deref() == Some("todo"))
+            .filter(|v| label_matches(v, &["PDD007".to_string()]))
+            .map(|v| v.id)
+            .collect();
+        assert_eq!(todo_pdd007, vec!["aaaaaa", "cccccc"]);
+    }
+
+    #[test]
+    fn it_ands_two_labels() {
+        assert_eq!(ids_matching(&["PDD007", "security"]), vec!["aaaaaa"]);
+        assert!(ids_matching(&["PDD007", "debt"]).is_empty());
+    }
+
+    #[test]
+    fn it_returns_the_whole_board_when_no_label_is_given() {
+        assert_eq!(ids_matching(&[]), vec!["aaaaaa", "bbbbbb", "cccccc"]);
     }
 
     /// Notes for archived cards, keyed by `(id, disposition, disposition_at)`;
