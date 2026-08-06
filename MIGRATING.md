@@ -8,6 +8,28 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.4.1
+
+**`sandbox fetch` moves back to `refs/heads/sandbox/<inst>` — this reverses the
+0.4.0 note below.** 0.4.0 landed the guest branch in `refs/katsuobushi/<inst>`,
+a ref namespace Jujutsu does not import, so a colocated jj repo could not reach
+the fetched work from any revset. 0.4.1 fetches
+`+sandbox/<inst>:refs/heads/sandbox/<inst>` instead. The leading `+` (force)
+keeps a refetch idempotent, and `refs/heads/` is a namespace jj imports. If you
+scripted against `refs/katsuobushi/<inst>` after 0.4.0, read
+`refs/heads/sandbox/<inst>` (or its short form `sandbox/<inst>`) now.
+
+**If you cannot upgrade off 0.4.0 yet**, bridge each fetch into a namespace jj
+imports:
+
+```sh
+git branch -f sandbox/<instance> refs/katsuobushi/<instance>
+jj git import
+```
+
+No spec or instance-state change (`specVersion 4` / `instanceVersion 2`
+unchanged).
+
 ## 0.4.0
 
 **Retire the `design:` field: run `project lint --fix` once.** The `design:`

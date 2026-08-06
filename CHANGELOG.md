@@ -5,6 +5,24 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.4.1] — 2026-08-06
+
+A fix for one 0.4.0 regression: `sandbox fetch`'s new ref layout was invisible
+to Jujutsu. See [`MIGRATING.md`](MIGRATING.md#041).
+
+### Fixed
+
+- **`sandbox fetch` is visible to Jujutsu again.** 0.4.0 landed the guest branch
+  in `refs/katsuobushi/<inst>`, a namespace jj never imports (jj reads
+  `refs/heads/*`, `refs/tags/*`, and `refs/remotes/*`), so on a colocated jj
+  repo the fetched commits sat in the object database unreachable from every
+  revset. The fetch now force-updates
+  `+sandbox/<inst>:refs/heads/sandbox/<inst>`. Idempotency comes from the
+  leading `+` — a refetch after a review bounce force-updates the branch rather
+  than failing non-fast-forward — not from the ref's location, so the branch
+  stays where jj can see it. The `landed` probe reads the same branch, and the
+  success message again names the ref actually written.
+
 ## [0.4.0] — 2026-08-06
 
 Two design threads land together. The board grows a **label-and-icebox** model
