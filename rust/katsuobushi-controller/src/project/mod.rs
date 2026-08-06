@@ -15,6 +15,7 @@ pub mod select;
 pub mod state;
 
 mod init;
+mod labels;
 mod lint;
 mod new;
 mod prioritize;
@@ -127,6 +128,9 @@ pub fn dispatch(args: ProjectArgs, global: Global) -> Result<()> {
             after,
         } => prioritize::run(&fs, &paths, &renderer, &id, top, bottom, before, after),
         ProjectCommand::Lint { fix } => lint::run(&fs, &paths, &renderer, fix),
+        ProjectCommand::Labels { include_archived } => {
+            labels::run(&fs, &paths, &renderer, include_archived)
+        }
     };
 
     result.map_err(|e| {
