@@ -120,6 +120,12 @@ enum ProjectCommand {
         #[arg(long)]
         fix: bool,
     },
+    /// List the label vocabulary and the cards under each label.
+    Labels {
+        /// Include archived (accepted/cancelled) cards in the counts.
+        #[arg(long)]
+        include_archived: bool,
+    },
 }
 
 /// The `status` surface: view the board (bare, or filtered) or one card, and

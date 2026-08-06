@@ -112,6 +112,8 @@ project status                                    # the whole board
 project status --lane needs-review               # review queue (or --available)
 project status --label PDD006                     # one epic: cards carrying a label
 project status --icebox                           # iced notes (compose with --label)
+project labels                                    # the label vocabulary + a card count each
+project labels --json                             # each label -> its card ids (archived excluded; --include-archived to add)
 project status a3f7b2                           # one card: detail + body
 project lint                                      # board <-> note consistency (--fix)
 ```
