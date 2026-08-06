@@ -25,21 +25,23 @@ pub fn run(config: &Path, instance: &str, global: Global) -> Result<()> {
 /// The testable core: resolve the instance, run the pinned `git fetch` through
 /// the seam, and return the line to print (machine-readable when `json`).
 ///
-/// The invocation lands the guest branch into a per-instance tracking ref the
-/// host never rebases (design/PDD001):
-/// `git fetch <stateGlob>/<inst>/sync.git sandbox/<inst>:refs/katsuobushi/<inst>`,
-/// with `git` taken from `spec.tools.git`. The host's landing work moves its own
-/// local branch; the fetch always writes the tracking ref, so a second fetch of
-/// an instance already landed once (every review bounce) never fails
-/// non-fast-forward.
+/// The invocation force-updates the local guest branch to the fetched tip:
+/// `git fetch <stateGlob>/<inst>/sync.git +sandbox/<inst>:refs/heads/sandbox/<inst>`,
+/// with `git` taken from `spec.tools.git`. Idempotency comes from the leading
+/// `+` (force), not from the ref's location: a second fetch of an instance
+/// already landed once (every review bounce) force-updates the branch rather
+/// than failing non-fast-forward. The branch stays in `refs/heads/` so a
+/// colocated Jujutsu repo imports it — jj reads `refs/heads/*`, `refs/tags/*`,
+/// and `refs/remotes/*`, never a custom namespace (card 7f31c2).
 fn fetch_with(host: &impl Host, spec: &Spec, instance: &str, json: bool) -> Result<String> {
     let roots = resolve_roots(&spec.roots)?;
     let inst = resolve_instance(&roots.state_glob, host, instance)?;
 
     let sync_git = roots.state_glob.join(&inst).join("sync.git");
     // The remote (mirror) side is the guest's pushed `sandbox/<inst>`; the local
-    // destination is the tracking ref the host never moves.
-    let refspec = format!("sandbox/{inst}:refs/katsuobushi/{inst}");
+    // destination is the same branch under `refs/heads/`. The leading `+` force-
+    // updates it to the fetched tip, so a refetch never fails non-fast-forward.
+    let refspec = format!("+sandbox/{inst}:refs/heads/sandbox/{inst}");
 
     let mut cmd = Command::new(&spec.tools.git);
     cmd.arg("fetch").arg(&sync_git).arg(&refspec);
@@ -65,17 +67,17 @@ fn fetch_with(host: &impl Host, spec: &Spec, instance: &str, json: bool) -> Resu
     })
 }
 
-/// Whether the fetched tracking ref advanced past its seed commit. Reads the
-/// seed SHA persisted in `instance.json` at launch and compares it to the
-/// tracking-ref tip (`git rev-parse refs/katsuobushi/<inst>`) — the same ref the
-/// fetch just wrote, not the host's local branch. If the seed is unknown or
-/// either probe fails, assume the work landed rather than raise a false alarm.
+/// Whether the fetched branch advanced past its seed commit. Reads the seed SHA
+/// persisted in `instance.json` at launch and compares it to the branch tip
+/// (`git rev-parse refs/heads/sandbox/<inst>`) — the same ref the fetch just
+/// wrote. If the seed is unknown or either probe fails, assume the work landed
+/// rather than raise a false alarm.
 fn work_landed(host: &impl Host, git: &Path, state_glob: &Path, inst: &str) -> bool {
     let Some(seed) = read_seed(host, state_glob, inst) else {
         return true;
     };
     let mut cmd = Command::new(git);
-    cmd.args(["rev-parse", &format!("refs/katsuobushi/{inst}")]);
+    cmd.args(["rev-parse", &format!("refs/heads/sandbox/{inst}")]);
     match host.run(&cmd) {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim() != seed,
         _ => true,
@@ -161,9 +163,9 @@ mod tests {
         let line = fetch_with(&host, &spec, "inst-abc", false).expect("fetch should succeed");
         assert_eq!(line, "fetched sandbox/inst-abc");
 
-        // The exact seam interaction: existence probe, the pinned git fetch (into
-        // the tracking ref), the instance.json read for the seed, then the
-        // `rev-parse` tip probe against that same tracking ref.
+        // The exact seam interaction: existence probe, the pinned git fetch (a
+        // forced update into the local heads branch), the instance.json read for
+        // the seed, then the `rev-parse` tip probe against that same branch.
         assert_eq!(
             host.calls(),
             vec![
@@ -172,20 +174,20 @@ mod tests {
                     "/nix/store/h1-git/bin/git".to_string(),
                     "fetch".to_string(),
                     format!("{state}/inst-abc/sync.git"),
-                    "sandbox/inst-abc:refs/katsuobushi/inst-abc".to_string(),
+                    "+sandbox/inst-abc:refs/heads/sandbox/inst-abc".to_string(),
                 ]),
                 Call::Read(PathBuf::from(state).join("inst-abc").join("instance.json")),
                 Call::Run(vec![
                     "/nix/store/h1-git/bin/git".to_string(),
                     "rev-parse".to_string(),
-                    "refs/katsuobushi/inst-abc".to_string(),
+                    "refs/heads/sandbox/inst-abc".to_string(),
                 ]),
             ]
         );
     }
 
     #[test]
-    fn it_fetches_a_branch_into_the_instance_tracking_ref() {
+    fn it_fetches_a_branch_into_a_jj_visible_heads_ref() {
         let state = "/state";
         let spec = fake_spec(state, "/bin/git");
         let mut host = FakeHost::new();
@@ -195,20 +197,21 @@ mod tests {
         host.push_run(Ok(output_stdout(b"realsha\n")));
 
         fetch_with(&host, &spec, "inst-t", false).expect("fetch ok");
-        // The fetch destination is the per-instance tracking ref, never the
-        // local `sandbox/<inst>` branch the host rebases.
+        // The destination is `refs/heads/sandbox/<inst>` so a colocated jj repo
+        // imports it, and the leading `+` force-updates it for idempotency
+        // (card 7f31c2).
         let fetched = host.calls().into_iter().find_map(|c| match c {
             Call::Run(v) if v.iter().any(|a| a == "fetch") => Some(v),
             _ => None,
         });
         assert_eq!(
             fetched.unwrap().last().unwrap(),
-            "sandbox/inst-t:refs/katsuobushi/inst-t"
+            "+sandbox/inst-t:refs/heads/sandbox/inst-t"
         );
     }
 
     #[test]
-    fn it_reads_the_landed_probe_from_the_tracking_ref() {
+    fn it_reads_the_landed_probe_from_the_heads_ref() {
         let state = "/state";
         let spec = fake_spec(state, "/bin/git");
         let mut host = FakeHost::new();
@@ -224,7 +227,7 @@ mod tests {
         });
         assert_eq!(
             rev_parse.unwrap().last().unwrap(),
-            "refs/katsuobushi/inst-p"
+            "refs/heads/sandbox/inst-p"
         );
     }
 
