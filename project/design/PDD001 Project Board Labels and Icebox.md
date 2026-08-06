@@ -46,6 +46,15 @@ entangles with commit signing. It needs its own design.
   them. So `--label=PDD007 --available` shows the grabbable work in the PDD007
   thread. This needs no new field, no reserved prefix, and no migration.
 
+- **The label vocabulary, enumerated.** A filter needs a label to filter by, so a
+  person must be able to read the labels that exist. `project labels` lists every
+  label in use with the count of cards under it. `project labels --json` maps each
+  label to the ids of the cards that carry it. This is the read companion to the
+  `--label` filter: the filter enters one epic, `labels` shows which epics there
+  are. An archived card is out of the count, because the index is about live work;
+  `--include-archived` folds the archive back in. An iced note is in the count,
+  because a label is a note property and iced work is still work.
+
 - **The `design` field folded into labels.** The note's optional `design:` field
   says what a label already says. It is a weaker, second way. This design removes
   it. The `project new --design <ref>` option stays as a **deprecated alias**. The
@@ -138,7 +147,8 @@ writing:
   (`rust/katsuobushi-controller/src/project/note.rs`) holds `labels: Vec<String>`
   and an optional `design: Option<String>`. Only `project new --labels a,b` sets
   labels. No `query`, `select`, or `lint` path reads or filters by them. The epic
-  filter is a new reader of a field that already exists. It is not a new field.
+  filter and the `labels` index are new readers of a field that already exists.
+  Neither is a new field.
 
 - **`design` is a single string that points at a design doc.**
   `NoteMeta::from_note` parses it. `render_new_note` writes it. The
@@ -214,6 +224,34 @@ The `--label=<value>` option on `project status` works like this:
 That last point is the whole grouping decision. A person gets a focused thread.
 The board file grows no second axis. The board stays one list per status. The
 epic is only a view over that list.
+
+### The label vocabulary is a listing
+
+_As the board owner, I forget which labels I have used. I run `project labels`. I
+see each label and how many cards carry it. I pick the one I want and filter into
+it with `project status --label=<value>`._
+
+The `--label` filter enters one epic. To use it, a person must first know which
+epics exist. `project labels` is that index. It reads the same labels the filter
+reads, and it never mutates anything:
+
+- **The plain form is labels and counts.** `project labels` prints one row per
+  unique label, with the count of cards that carry it. The rows sort by label, so
+  the list is stable to read and to diff.
+- **The JSON form maps a label to its cards.** `project labels --json` emits, for
+  each label, its count and the ids of the cards under it. This is the
+  high-fidelity form a tool reads to answer "which cards are in this epic."
+- **The archive is out by default.** An accepted or cancelled card sits in the
+  archive. The index is about live work, so it drops those cards from the count.
+  `project labels --include-archived` folds the archive back in when a person
+  wants the full history of a label.
+- **The icebox is in.** An iced note has no card on the board, but it carries
+  labels, and it is real unfiled work. So it counts. This keeps the index and the
+  icebox consistent: a label a person parked in the icebox still shows up as a
+  thread to promote.
+
+Like the filter, this adds no field and no state. It derives the vocabulary from
+the labels already on the notes, the same way the filter derives its view.
 
 ### The `design` field becomes a label
 
@@ -423,6 +461,12 @@ Unit tests, BDD-named in the house style:
   `it_returns_the_whole_board_when_no_label_is_given` (the filter is opt-in and
   changes nothing when absent).
 
+- **The labels index** — `it_enumerates_unique_labels_with_counts`;
+  `it_maps_each_label_to_its_card_ids`;
+  `it_excludes_archived_cards_by_default`;
+  `it_includes_archived_cards_with_the_flag`;
+  `it_counts_iced_notes`.
+
 - **The deprecated design alias** —
   `it_appends_the_design_reference_as_a_label`;
   `it_warns_that_design_is_deprecated`;
@@ -461,7 +505,10 @@ By hand, in a scratch board and a live sandbox instance:
 - File three cards. Label two of them `PDD007`. Check that
   `project status --label=PDD007` shows exactly those two, in board order. Check
   that plain `project status` still shows all three. The unlabeled card is the
-  miscellaneous backlog the filter omits.
+  miscellaneous backlog the filter omits. Run `project labels`. Check that
+  `PDD007` shows a count of two, and that `project labels --json` lists exactly
+  those two ids under it. Accept one of them, then check that the count drops to
+  one, and that `--include-archived` brings it back to two.
 - Take a note with a legacy `design:` field. Run `project lint --fix`. Check that
   the card face in Obsidian shows the value as a label, with no `design` column.
   Check that a second `lint` run is clean.
@@ -481,6 +528,8 @@ By hand, in a scratch board and a live sandbox instance:
   authoring rules this document follows.
 - [Note schema and parser](../../rust/katsuobushi-controller/src/project/note.rs)
   — where `labels`, `design`, and the `disposition` tombstone live.
+- [Labels index](../../rust/katsuobushi-controller/src/project/labels.rs) — the
+  `project labels` aggregation that enumerates the vocabulary from the notes.
 - [Board reader and writer](../../rust/katsuobushi-controller/src/project/board.rs)
   — the lane-per-status model and the archive lane the icebox edges write to.
 - [Lifecycle state machine](../../rust/katsuobushi-controller/src/project/state.rs)
