@@ -73,11 +73,13 @@ enum ProjectCommand {
         /// Ids this card is blocked by (comma-separated or repeated).
         #[arg(long = "blocked-by", value_delimiter = ',')]
         blocked_by: Vec<String>,
-        /// A design-doc reference this card implements (e.g. `PDD005`).
+        /// Deprecated: a design-doc reference (e.g. `PDD005`). Recorded as a
+        /// label now; prefer `--label`.
         #[arg(long)]
         design: Option<String>,
-        /// Freeform labels (comma-separated or repeated).
-        #[arg(long, value_delimiter = ',')]
+        /// Freeform labels (comma-separated or repeated). The canonical way to
+        /// tag a card, including its epic/design (e.g. `--label PDD005`).
+        #[arg(long = "label", visible_alias = "labels", value_delimiter = ',')]
         labels: Vec<String>,
         /// Insert at the top of To-do (highest priority) rather than the bottom.
         #[arg(long)]

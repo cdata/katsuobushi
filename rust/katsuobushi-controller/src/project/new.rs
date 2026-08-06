@@ -69,13 +69,20 @@ pub fn run(
     let created = format_rfc3339(clock.now_unix());
     let body = resolve_body(args.body)?;
 
+    // `--design` is a deprecated alias for a label: fold the reference into the
+    // label set and warn. No `design:` field is written any more.
+    let (labels, deprecation) = fold_design_into_labels(args.labels, args.design);
+    if let Some(warning) = &deprecation {
+        eprintln!("{}", renderer.yellow(warning));
+    }
+
     let note_text = render_new_note(
         &id,
         &args.title,
         args.kind,
         &blocked,
-        args.design.as_deref(),
-        &args.labels,
+        None,
+        &labels,
         &created,
         &body,
     );
@@ -95,6 +102,25 @@ pub fn run(
         status: Status::Todo.to_string(),
     };
     renderer.emit(&out, |_| format!("{}  {}", out.id, out.path))
+}
+
+/// Fold a deprecated `--design <ref>` into the label set. The reference is
+/// appended after any labels the caller already supplied, and — when `--design`
+/// was used — a deprecation warning is returned for the caller to surface. The
+/// canonical `--label` option passes through untouched with no warning.
+fn fold_design_into_labels(
+    mut labels: Vec<String>,
+    design: Option<String>,
+) -> (Vec<String>, Option<String>) {
+    let warning = design.map(|reference| {
+        let warning = format!(
+            "--design is deprecated; recording `{reference}` as a label instead. \
+             Use --label next time."
+        );
+        labels.push(reference);
+        warning
+    });
+    (labels, warning)
 }
 
 /// Resolve the body source: `Some("-")` reads stdin, `Some(text)` is literal,
@@ -170,7 +196,9 @@ mod tests {
         let meta = NoteMeta::from_note(&Note::parse(&note_text).unwrap()).unwrap();
         assert_eq!(meta.id.as_str(), "a3f7b2");
         assert_eq!(meta.created.as_deref(), Some("2026-07-17T18:22:04Z"));
-        assert_eq!(meta.design.as_deref(), Some("PDD005"));
+        // `--design PDD005` is folded into a label; no `design:` field is written.
+        assert_eq!(meta.design, None);
+        assert_eq!(meta.labels, vec!["security".to_string(), "PDD005".to_string()]);
 
         // The card is in To-do.
         let board = Board::parse(&fs.get("/b/BOARD.md").unwrap());
@@ -269,5 +297,30 @@ mod tests {
         let todo = board.cards_in(Status::Todo);
         assert_eq!(todo[0].id().unwrap().as_str(), "bbbbbb"); // top
         assert_eq!(todo[1].id().unwrap().as_str(), "aaaaaa");
+    }
+
+    #[test]
+    fn it_appends_the_design_reference_as_a_label() {
+        let (labels, _) =
+            fold_design_into_labels(vec!["security".into()], Some("PDD005".into()));
+        assert_eq!(labels, vec!["security".to_string(), "PDD005".to_string()]);
+    }
+
+    #[test]
+    fn it_warns_that_design_is_deprecated() {
+        let (_, warning) = fold_design_into_labels(vec![], Some("PDD005".into()));
+        let warning = warning.expect("a --design use must produce a deprecation warning");
+        assert!(warning.contains("deprecated"));
+        assert!(warning.contains("PDD005"));
+    }
+
+    #[test]
+    fn it_keeps_the_repeatable_label_option_as_canonical() {
+        // Labels given through the canonical option pass through unchanged, and
+        // no deprecation warning is raised.
+        let (labels, warning) =
+            fold_design_into_labels(vec!["a".into(), "b".into()], None);
+        assert_eq!(labels, vec!["a".to_string(), "b".to_string()]);
+        assert!(warning.is_none());
     }
 }
