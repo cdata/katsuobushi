@@ -77,6 +77,21 @@ flowing:
 
 Nothing here is hardcoded — the orchestrator _is_ the control loop.
 
+### The board is host-only (an invariant)
+
+The host is the **only** writer of `project/kanban/` — both `BOARD.md` and the
+`<id>.md` card notes. A sandbox guest never writes the board. It gets its card
+as prose in its directive, returns its code as a git branch, and returns its
+findings through the `report` channel; the host reads those and makes every
+board change. This is the structural cure for the card-note write conflict: with
+one writer, two writers cannot collide.
+
+So **never tell an agent to write a finding into a card note.** A reviewer's
+verdict and an implementor's summary both come back over `report`, and the host
+writes them down (a bounce's findings go into the card's `## Review notes` by
+the host, below). The past board corruption came from a directive that asked an
+agent to record its own findings in the note — a second writer by hand.
+
 ## Peer review in a sandbox (independent reviewer)
 
 The cleanest way to get an implementor≠reviewer split is to run the reviewer as

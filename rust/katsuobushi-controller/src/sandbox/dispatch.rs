@@ -229,6 +229,19 @@ mod tests {
     }
 
     #[test]
+    fn it_gives_the_guest_the_card_as_prose_and_never_a_board_write() {
+        // The board is host-only (design/PDD001): the directive hands the guest
+        // its card as prose and routes findings through `report`. It must never
+        // instruct the guest to write the board.
+        let (fs, paths) = seeded();
+        let (_, directive) = prepare(&fs, &paths, "aaaaaa", false).unwrap();
+        assert!(directive.contains("report done"));
+        assert!(!directive.contains("project/kanban"));
+        assert!(!directive.contains("BOARD.md"));
+        assert!(!directive.to_lowercase().contains("card note"));
+    }
+
+    #[test]
     fn compose_skips_an_empty_instructions_file() {
         let fs = FakeFs::new().with_file("/b/.dispatch-instructions.md", "   \n  ");
         let notes = notes_with_card();
