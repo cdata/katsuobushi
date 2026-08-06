@@ -8,6 +8,42 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.4.0
+
+**Retire the `design:` field: run `project lint --fix` once.** The `design:`
+note frontmatter field is removed, and the card face drops its `design` column.
+If any card note still carries `design: <ref>`, run `project lint --fix`. It
+folds the reference into the card's `labels`, drops the `design:` key, and drops
+the `design` metadata-key from the board settings block. The migration is
+idempotent and byte-stable — a second run reports no change. A plain
+`project lint` reports each legacy field as an `info` line until you run the
+fix. No spec or instance-state change (`specVersion 4` / `instanceVersion 2`
+unchanged).
+
+**`project new --design` is deprecated.** It still works, but it now prints a
+deprecation warning and records the reference as a label instead of a `design:`
+field. Move scripts to `--label` (for example `--label PDD007`). The old
+`--labels` spelling stays as an alias for the new `--label`.
+
+**`sandbox fetch` lands into `refs/katsuobushi/<inst>`.** The host used to fetch
+the guest branch into a local `sandbox/<inst>` branch and rebase it; it now
+fetches into a per-instance tracking ref, `refs/katsuobushi/<inst>`, that it
+never rebases. If you scripted against the local `sandbox/<inst>` branch that
+`sandbox fetch` wrote, read the tracking ref now. The guest push target
+(`sandbox/<inst>` in the instance's `sync.git` mirror) and the `sandbox status`
+branch probe are unchanged, so a repeated fetch of an already-landed instance no
+longer fails non-fast-forward.
+
+**`project lint` no longer warns on an orphan note.** A note with no card on the
+board is the icebox now, which is a normal state. `lint` reports it as an `info`
+inventory line and exits `0`. If you gated anything on the `orphan-note`
+warning, that signal moved to `info: <n> note(s) in icebox`.
+
+**Everything else is additive.** The `--label` filter, `project labels`, the
+icebox verbs (`new --icebox`, `status --icebox`, `status set <id> icebox`), and
+the three new skills (`design`, `plan`, `implement`) add surface without
+changing existing behavior. No action required for these.
+
 ## 0.3.8
 
 **Expect one deps-bundle rebuild.** `lib.rust`'s deps-only derivations now emit
