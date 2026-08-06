@@ -3,8 +3,7 @@ id: 1eccce
 title: Nothing reads the alignment manifest's schema field
 type: chore
 blocked_by: []
-design: warm-artifacts
-labels: [rust]
+labels: [rust, warm-artifacts]
 created: 2026-08-05T21:29:10Z
 ---
 
@@ -23,4 +22,3 @@ Make the checker assert the schema it understands and fail loudly (exit 2,
 - [ ] Checker refuses an unknown/newer schema rather than guessing
 - [ ] A schema-1 bundle still gets a clear, actionable message
 - [ ] The accepted range is stated in one place next to the emitter
-
