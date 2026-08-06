@@ -91,6 +91,9 @@ enum ProjectCommand {
         /// Skip validation that `--blocked-by` ids exist.
         #[arg(long)]
         force: bool,
+        /// File into the icebox: write the note with no card on the board.
+        #[arg(long)]
+        icebox: bool,
     },
     /// View the board or one card, or move a card between lanes.
     Status(StatusArgs),
@@ -137,10 +140,14 @@ struct StatusArgs {
     #[arg(long, conflicts_with_all = ["lane", "id"])]
     available: bool,
     /// When listing, only cards carrying this label (exact, whole-token
-    /// match). Repeatable; repetition is AND. Composes with --lane and
-    /// --available.
+    /// match). Repeatable; repetition is AND. Composes with --lane,
+    /// --available, and --icebox.
     #[arg(long = "label", conflicts_with = "id")]
     label: Vec<String>,
+    /// List the icebox instead of the board: notes with no card on the board.
+    /// Composes with --label.
+    #[arg(long, conflicts_with_all = ["lane", "available", "id"])]
+    icebox: bool,
 }
 
 #[derive(Subcommand)]

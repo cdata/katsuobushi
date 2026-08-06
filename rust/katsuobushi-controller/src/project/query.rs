@@ -46,6 +46,7 @@ pub fn show(
     status_filter: Option<Status>,
     available_only: bool,
     label_filter: &[String],
+    icebox_only: bool,
 ) -> Result<()> {
     let board_text = fs
         .read(&paths.board_md())
@@ -55,6 +56,7 @@ pub fn show(
 
     match id_input {
         Some(input) => show_one(&board, &notes, renderer, &input),
+        None if icebox_only => list_icebox(&board, &notes, renderer, label_filter),
         None => list_all(
             &board,
             &notes,
@@ -65,6 +67,54 @@ pub fn show(
             label_filter,
         ),
     }
+}
+
+/// List the icebox: notes that no card on the board references. The icebox is
+/// derived by set difference (issues on disk minus the ids the board names), so
+/// nothing about the iced state lives in the note. Composes with `--label`.
+fn list_icebox(
+    board: &Board,
+    notes: &[NoteEntry],
+    renderer: &Renderer,
+    label_filter: &[String],
+) -> Result<()> {
+    let views = iced_views(board, notes, label_filter);
+    renderer.emit(&views, |_| icebox_table(&views))
+}
+
+/// The icebox listing: id, title, and labels only (design/PDD001) — an iced note
+/// has no lane, so the board's status/type columns do not apply.
+fn icebox_table(views: &[CardView]) -> String {
+    if views.is_empty() {
+        return "(icebox empty)".to_string();
+    }
+    let rows: Vec<Vec<TableCell>> = views
+        .iter()
+        .map(|v| {
+            vec![
+                TableCell::plain(v.id.clone()),
+                TableCell::plain(v.title.clone()),
+                TableCell::plain(v.labels.join(", ")),
+            ]
+        })
+        .collect();
+    render_table(&["ID", "TITLE", "LABELS"], &rows, false)
+}
+
+/// The iced notes as card views, in note order: every note whose id no card on
+/// the board references, narrowed by the label filter.
+fn iced_views(board: &Board, notes: &[NoteEntry], label_filter: &[String]) -> Vec<CardView> {
+    let on_board: std::collections::HashSet<CardId> = super::board_ids(board).into_iter().collect();
+    let mut views: Vec<CardView> = notes
+        .iter()
+        .filter_map(|e| e.id())
+        .filter(|id| !on_board.contains(id))
+        .map(|id| build_view(board, notes, &id, None))
+        .collect();
+    if !label_filter.is_empty() {
+        views.retain(|v| label_matches(v, label_filter));
+    }
+    views
 }
 
 /// List the whole board (active lanes in priority order, then the archive),
@@ -311,9 +361,22 @@ mod tests {
         let r = Renderer::new(true, false);
         let clock = FixedClock(NOW);
         // Should not error; JSON path serializes the Vec.
-        show(&fs, &paths, &r, &clock, None, None, false, &[]).unwrap();
-        show(&fs, &paths, &r, &clock, None, Some(Status::Todo), false, &[]).unwrap();
-        show(&fs, &paths, &r, &clock, None, None, true, &[]).unwrap();
+        show(&fs, &paths, &r, &clock, None, None, false, &[], false).unwrap();
+        show(
+            &fs,
+            &paths,
+            &r,
+            &clock,
+            None,
+            Some(Status::Todo),
+            false,
+            &[],
+            false,
+        )
+        .unwrap();
+        show(&fs, &paths, &r, &clock, None, None, true, &[], false).unwrap();
+        // The icebox view (set difference) also renders without error.
+        show(&fs, &paths, &r, &clock, None, None, false, &[], true).unwrap();
     }
 
     /// A three-card board: two carry `PDD007`, one carries `debt`; one of the
@@ -321,7 +384,11 @@ mod tests {
     fn labelled() -> (FakeFs, Paths) {
         let mut board = Board::parse(&layout::initial_board());
         for id in ["aaaaaa", "bbbbbb", "cccccc"] {
-            board.insert_card(Status::Todo, Card::new_link(&CardId::parse(id).unwrap()), false);
+            board.insert_card(
+                Status::Todo,
+                Card::new_link(&CardId::parse(id).unwrap()),
+                false,
+            );
         }
         let fs = FakeFs::new()
             .with_file("/b/BOARD.md", &board.to_text())
@@ -348,7 +415,12 @@ mod tests {
         ["aaaaaa", "bbbbbb", "cccccc"]
             .iter()
             .map(|id| {
-                build_view(&board, &notes, &CardId::parse(id).unwrap(), Some(Status::Todo))
+                build_view(
+                    &board,
+                    &notes,
+                    &CardId::parse(id).unwrap(),
+                    Some(Status::Todo),
+                )
             })
             .collect()
     }
@@ -397,6 +469,54 @@ mod tests {
     #[test]
     fn it_returns_the_whole_board_when_no_label_is_given() {
         assert_eq!(ids_matching(&[]), vec!["aaaaaa", "bbbbbb", "cccccc"]);
+    }
+
+    /// A board with one To-do card (`aaaaaa`) and two iced notes: `bbbbbb`
+    /// (label `debt`) and `cccccc` (label `PDD001`), neither on the board.
+    fn iceboxed() -> (FakeFs, Paths) {
+        let mut board = Board::parse(&layout::initial_board());
+        board.insert_card(
+            Status::Todo,
+            Card::new_link(&CardId::parse("aaaaaa").unwrap()),
+            false,
+        );
+        let fs = FakeFs::new()
+            .with_file("/b/BOARD.md", &board.to_text())
+            .with_file(
+                "/b/issues/aaaaaa.md",
+                "---\nid: aaaaaa\ntitle: On board\ntype: feature\nblocked_by: []\n---\n",
+            )
+            .with_file(
+                "/b/issues/bbbbbb.md",
+                "---\nid: bbbbbb\ntitle: Iced debt\ntype: chore\nblocked_by: []\nlabels: [debt]\n---\n",
+            )
+            .with_file(
+                "/b/issues/cccccc.md",
+                "---\nid: cccccc\ntitle: Iced idea\ntype: feature\nblocked_by: []\nlabels: [PDD001]\n---\n",
+            );
+        (fs, Paths::new("/b"))
+    }
+
+    fn iced_ids(label_filter: &[String]) -> Vec<String> {
+        let (fs, paths) = iceboxed();
+        let board = Board::parse(&fs.get("/b/BOARD.md").unwrap());
+        let notes = layout::load_notes(&fs, &paths).unwrap();
+        iced_views(&board, &notes, label_filter)
+            .into_iter()
+            .map(|v| v.id)
+            .collect()
+    }
+
+    #[test]
+    fn it_lists_an_iced_note_under_status_icebox() {
+        // The two notes with no board card are iced; the on-board card is not.
+        assert_eq!(iced_ids(&[]), vec!["bbbbbb", "cccccc"]);
+    }
+
+    #[test]
+    fn it_composes_status_icebox_with_a_label_filter() {
+        assert_eq!(iced_ids(&["PDD001".to_string()]), vec!["cccccc"]);
+        assert_eq!(iced_ids(&["debt".to_string()]), vec!["bbbbbb"]);
     }
 
     /// Notes for archived cards, keyed by `(id, disposition, disposition_at)`;

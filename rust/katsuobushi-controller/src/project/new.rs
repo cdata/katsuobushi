@@ -24,6 +24,8 @@ pub struct NewArgs {
     pub top: bool,
     pub body: Option<String>,
     pub force: bool,
+    /// File the note into the icebox: write it with no card on the board.
+    pub icebox: bool,
 }
 
 #[derive(Serialize)]
@@ -76,21 +78,37 @@ pub fn run(
         eprintln!("{}", renderer.yellow(warning));
     }
 
-    let note_text = render_new_note(&id, &args.title, args.kind, &blocked, &labels, &created, &body);
+    let note_text = render_new_note(
+        &id,
+        &args.title,
+        args.kind,
+        &blocked,
+        &labels,
+        &created,
+        &body,
+    );
     let note_path = paths.note(&id);
     fs.create_dir_all(&paths.issues_dir())?;
     fs.write(&note_path, &note_text)
         .with_context(|| format!("write {}", note_path.display()))?;
 
-    if !board.insert_card(Status::Todo, Card::new_link(&id), args.top) {
-        bail!("board has no 'To-do' lane; run `project lint`");
+    // The icebox is the absence of a board card: write the note only, and leave
+    // BOARD.md byte-identical so a filer never collides with the host's edits.
+    if !args.icebox {
+        if !board.insert_card(Status::Todo, Card::new_link(&id), args.top) {
+            bail!("board has no 'To-do' lane; run `project lint`");
+        }
+        fs.write(&paths.board_md(), &board.to_text())?;
     }
-    fs.write(&paths.board_md(), &board.to_text())?;
 
     let out = NewOutput {
         id: id.to_string(),
         path: note_path.display().to_string(),
-        status: Status::Todo.to_string(),
+        status: if args.icebox {
+            "icebox".to_string()
+        } else {
+            Status::Todo.to_string()
+        },
     };
     renderer.emit(&out, |_| format!("{}  {}", out.id, out.path))
 }
@@ -178,6 +196,7 @@ mod tests {
                 top: false,
                 body: None,
                 force: false,
+                icebox: false,
             },
         )
         .unwrap();
@@ -188,11 +207,11 @@ mod tests {
         assert_eq!(meta.id.as_str(), "a3f7b2");
         assert_eq!(meta.created.as_deref(), Some("2026-07-17T18:22:04Z"));
         // `--design PDD005` is folded into a label; no `design:` field is written.
+        assert_eq!(Note::parse(&note_text).unwrap().get_scalar("design"), None);
         assert_eq!(
-            Note::parse(&note_text).unwrap().get_scalar("design"),
-            None
+            meta.labels,
+            vec!["security".to_string(), "PDD005".to_string()]
         );
-        assert_eq!(meta.labels, vec!["security".to_string(), "PDD005".to_string()]);
 
         // The card is in To-do.
         let board = Board::parse(&fs.get("/b/BOARD.md").unwrap());
@@ -216,6 +235,7 @@ mod tests {
             top: false,
             body: Some("b".into()),
             force,
+            icebox: false,
         };
 
         // Nonexistent blocker rejected...
@@ -264,6 +284,7 @@ mod tests {
                 top: false,
                 body: Some("b".into()),
                 force: false,
+                icebox: false,
             },
         )
         .unwrap();
@@ -283,6 +304,7 @@ mod tests {
                 top: true,
                 body: Some("b".into()),
                 force: false,
+                icebox: false,
             },
         )
         .unwrap();
@@ -294,9 +316,50 @@ mod tests {
     }
 
     #[test]
+    fn it_writes_a_note_and_no_card_for_new_icebox() {
+        let fs = board_fs();
+        let paths = Paths::new("/b");
+        let r = Renderer::new(false, false);
+        let mut rng = SeqRng::new(vec![0xa3f7b2]);
+        let clock = FixedClock(0);
+        let board_before = fs.get("/b/BOARD.md").unwrap();
+
+        run(
+            &fs,
+            &clock,
+            &mut rng,
+            &paths,
+            &r,
+            NewArgs {
+                title: "An iced idea".into(),
+                kind: Kind::Feature,
+                blocked_by: vec![],
+                design: None,
+                labels: vec![],
+                top: false,
+                body: Some("b".into()),
+                force: false,
+                icebox: true,
+            },
+        )
+        .unwrap();
+
+        // The note exists...
+        assert!(fs.get("/b/issues/a3f7b2.md").is_some());
+        // ...and no card was added: the board is byte-identical.
+        assert_eq!(fs.get("/b/BOARD.md").unwrap(), board_before);
+    }
+
+    #[test]
+    fn it_leaves_the_board_byte_identical_when_filing_to_the_icebox() {
+        // Covered above by the byte-for-byte board assertion; kept as a named
+        // guard for the design's test list.
+        it_writes_a_note_and_no_card_for_new_icebox();
+    }
+
+    #[test]
     fn it_appends_the_design_reference_as_a_label() {
-        let (labels, _) =
-            fold_design_into_labels(vec!["security".into()], Some("PDD005".into()));
+        let (labels, _) = fold_design_into_labels(vec!["security".into()], Some("PDD005".into()));
         assert_eq!(labels, vec!["security".to_string(), "PDD005".to_string()]);
     }
 
@@ -312,8 +375,7 @@ mod tests {
     fn it_keeps_the_repeatable_label_option_as_canonical() {
         // Labels given through the canonical option pass through unchanged, and
         // no deprecation warning is raised.
-        let (labels, warning) =
-            fold_design_into_labels(vec!["a".into(), "b".into()], None);
+        let (labels, warning) = fold_design_into_labels(vec!["a".into(), "b".into()], None);
         assert_eq!(labels, vec!["a".to_string(), "b".to_string()]);
         assert!(warning.is_none());
     }

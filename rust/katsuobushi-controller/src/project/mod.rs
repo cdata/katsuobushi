@@ -52,6 +52,7 @@ pub fn dispatch(args: ProjectArgs, global: Global) -> Result<()> {
             top,
             body,
             force,
+            icebox,
         } => new::run(
             &fs,
             &clock,
@@ -67,6 +68,7 @@ pub fn dispatch(args: ProjectArgs, global: Global) -> Result<()> {
                 top,
                 body,
                 force,
+                icebox,
             },
         ),
         ProjectCommand::Status(args) => {
@@ -76,6 +78,7 @@ pub fn dispatch(args: ProjectArgs, global: Global) -> Result<()> {
                 lane,
                 available,
                 label,
+                icebox,
             } = args;
             match command {
                 Some(StatusCommand::Set {
@@ -112,6 +115,7 @@ pub fn dispatch(args: ProjectArgs, global: Global) -> Result<()> {
                     lane.map(Into::into),
                     available,
                     &label,
+                    icebox,
                 ),
             }
         }

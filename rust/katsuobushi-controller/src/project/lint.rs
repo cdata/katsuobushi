@@ -86,7 +86,10 @@ fn strip_design_column(board_text: &str) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
     for line in board_text.lines() {
         let trimmed = line.trim();
-        if !changed && trimmed.starts_with("{\"kanban-plugin\"") && trimmed.contains("metadata-keys") {
+        if !changed
+            && trimmed.starts_with("{\"kanban-plugin\"")
+            && trimmed.contains("metadata-keys")
+        {
             if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(trimmed) {
                 if let Some(keys) = value
                     .get_mut("metadata-keys")
@@ -123,6 +126,22 @@ struct LintOutput {
 }
 
 pub fn run(fs: &dyn Fs, paths: &Paths, renderer: &Renderer, fix: bool) -> Result<()> {
+    let out = evaluate(fs, paths, fix)?;
+    let has_error = out.issues.iter().any(|i| i.severity == "error");
+    renderer.emit(&out, |r| human(&out, r))?;
+
+    // Nonzero exit (for the flake check) when errors remain; the report is
+    // already printed, so hand back a silent Reported.
+    if has_error {
+        return Err(Reported.into());
+    }
+    Ok(())
+}
+
+/// The board<->note checks and any `--fix` mutations, returning the findings so
+/// tests can inspect them directly. `run` renders this and maps errors to a
+/// nonzero exit.
+fn evaluate(fs: &dyn Fs, paths: &Paths, fix: bool) -> Result<LintOutput> {
     let board_text = fs
         .read(&paths.board_md())
         .with_context(|| format!("read {}", paths.board_md().display()))?;
@@ -185,7 +204,8 @@ pub fn run(fs: &dyn Fs, paths: &Paths, renderer: &Renderer, fix: bool) -> Result
     } else if strip_design_column(&board_text).is_some() {
         issues.push(info(
             "legacy-design-column",
-            "board settings still declare the retired `design` column; run `lint --fix` to drop it".into(),
+            "board settings still declare the retired `design` column; run `lint --fix` to drop it"
+                .into(),
         ));
     }
 
@@ -238,7 +258,10 @@ pub fn run(fs: &dyn Fs, paths: &Paths, renderer: &Renderer, fix: bool) -> Result
     }
     let board_ids: HashSet<CardId> = seen.keys().cloned().collect();
 
-    // 4. Notes: parse failures, orphans, unknown blockers, disposition sanity.
+    // 4. Notes: parse failures, iced notes, unknown blockers, disposition sanity.
+    // A note with no board card is the icebox (design/PDD001): an intentional,
+    // normal state, reported as an `info` inventory line rather than a warning.
+    let mut iced_ids: Vec<CardId> = Vec::new();
     for e in &notes {
         match &e.meta {
             Err(err) => issues.push(error("note-parse", format!("{}: {err}", e.filename))),
@@ -259,10 +282,7 @@ pub fn run(fs: &dyn Fs, paths: &Paths, renderer: &Renderer, fix: bool) -> Result
                     ));
                 }
                 if !board_ids.contains(&m.id) {
-                    issues.push(warn(
-                        "orphan-note",
-                        format!("note {} ({}) has no card on the board", e.filename, m.id),
-                    ));
+                    iced_ids.push(m.id.clone());
                 }
                 // The `design:` field is retired: it says what a label says.
                 // Flag any note that still carries one; `--fix` folds it in.
@@ -300,6 +320,17 @@ pub fn run(fs: &dyn Fs, paths: &Paths, renderer: &Renderer, fix: bool) -> Result
             }
         }
     }
+    if !iced_ids.is_empty() {
+        let ids = iced_ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        issues.push(info(
+            "icebox",
+            format!("{} note(s) in icebox: {ids}", iced_ids.len()),
+        ));
+    }
 
     // --fix: prune orphan cards, migrate legacy `design:` fields into labels,
     // and drop the retired `design` settings column. One board write at the end.
@@ -330,7 +361,10 @@ pub fn run(fs: &dyn Fs, paths: &Paths, renderer: &Renderer, fix: bool) -> Result
             let path = paths.note(&m.id);
             fs.write(&path, &note.to_text())
                 .with_context(|| format!("rewrite {}", path.display()))?;
-            fixed.push(format!("folded design `{reference}` into a label on {}", m.id));
+            fixed.push(format!(
+                "folded design `{reference}` into a label on {}",
+                m.id
+            ));
         }
         issues.retain(|i| i.code != "legacy-design");
 
@@ -353,16 +387,7 @@ pub fn run(fs: &dyn Fs, paths: &Paths, renderer: &Renderer, fix: bool) -> Result
         }
     }
 
-    let has_error = issues.iter().any(|i| i.severity == "error");
-    let out = LintOutput { issues, fixed };
-    renderer.emit(&out, |r| human(&out, r))?;
-
-    // Nonzero exit (for the flake check) when errors remain; the report is
-    // already printed, so hand back a silent Reported.
-    if has_error {
-        return Err(Reported.into());
-    }
-    Ok(())
+    Ok(LintOutput { issues, fixed })
 }
 
 fn human(out: &LintOutput, r: &Renderer) -> String {
@@ -528,17 +553,33 @@ mod tests {
         assert!(run(&fs, &paths, &Renderer::new(true, false), false).is_ok());
     }
 
-    #[test]
-    fn orphan_note_is_a_warning_not_an_error() {
-        // A note with no card on the board.
+    /// A board with no cards and one iced note (`a3f7b2`, no board card).
+    fn iced_fs() -> (FakeFs, Paths) {
         let fs = FakeFs::new()
             .with_file("/b/BOARD.md", &layout::initial_board())
             .with_file(
                 "/b/issues/a3f7b2.md",
                 "---\nid: a3f7b2\ntitle: X\ntype: feature\nblocked_by: []\n---\n",
             );
-        let paths = Paths::new("/b");
-        // Warnings only -> Ok (exit 0).
+        (fs, Paths::new("/b"))
+    }
+
+    #[test]
+    fn it_reports_an_iced_note_as_info_not_warn() {
+        let (fs, paths) = iced_fs();
+        let out = evaluate(&fs, &paths, false).unwrap();
+        let iced: Vec<_> = out.issues.iter().filter(|i| i.code == "icebox").collect();
+        assert_eq!(iced.len(), 1);
+        assert_eq!(iced[0].severity, "info");
+        assert!(iced[0].message.contains("a3f7b2"));
+        // The old `orphan-note` warning is gone.
+        assert!(out.issues.iter().all(|i| i.code != "orphan-note"));
+    }
+
+    #[test]
+    fn it_exits_zero_with_iced_notes_present() {
+        let (fs, paths) = iced_fs();
+        // Info only -> Ok (exit 0).
         assert!(run(&fs, &paths, &Renderer::new(true, false), false).is_ok());
     }
 
