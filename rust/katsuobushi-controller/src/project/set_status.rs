@@ -6,13 +6,32 @@ use serde::Serialize;
 
 use crate::output::Renderer;
 
-use super::board::{Board, Location};
+use super::board::{Board, Card, Location};
 use super::clock::{format_rfc3339, Clock};
 use super::fs::Fs;
 use super::layout::{self, Paths};
 use super::model::{CardId, Status};
 use super::note::Note;
 use super::state::{rejection_reason, transition_allowed};
+
+/// The target of a `status set`. Every board lane is a [`Status`]; `Icebox` is
+/// the extra target that shelves a card off the board (design/PDD001). It is not
+/// a `Status` because a note carries no status — the icebox is the absence of a
+/// board card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetTarget {
+    Status(Status),
+    Icebox,
+}
+
+impl SetTarget {
+    fn token(self) -> &'static str {
+        match self {
+            SetTarget::Status(s) => s.token(),
+            SetTarget::Icebox => "icebox",
+        }
+    }
+}
 
 #[derive(Serialize)]
 struct SetStatusOutput {
@@ -27,18 +46,96 @@ pub fn run(
     renderer: &Renderer,
     clock: &dyn Clock,
     id_input: &str,
-    to: Status,
+    target: SetTarget,
     force: bool,
 ) -> Result<()> {
-    let (id, from) = apply(fs, paths, clock, id_input, to, force)?;
+    let (id, from) = apply_target(fs, paths, clock, id_input, target, force)?;
     let out = SetStatusOutput {
         id: id.to_string(),
-        from: from.to_string(),
-        to: to.to_string(),
+        from,
+        to: target.token().to_string(),
     };
     renderer.emit(&out, |r| {
         format!("{} {} -> {}", out.id, out.from, r.green(&out.to))
     })
+}
+
+/// The full `status set` decision, including the icebox edges (design/PDD001):
+/// shelve a board card to the icebox, promote an iced note onto the board, or
+/// cancel an iced note straight into the archive. A card already on the board
+/// takes the ordinary state-machine path in [`apply`]. Returns `(id, from)`
+/// where `from` is the human "from" label (`icebox` for an iced note).
+pub fn apply_target(
+    fs: &dyn Fs,
+    paths: &Paths,
+    clock: &dyn Clock,
+    id_input: &str,
+    target: SetTarget,
+    force: bool,
+) -> Result<(CardId, String)> {
+    let board_text = fs
+        .read(&paths.board_md())
+        .with_context(|| format!("read {}", paths.board_md().display()))?;
+    let mut board = Board::parse(&board_text);
+    let notes = layout::load_notes(fs, paths)?;
+
+    // Resolve against every known id — board cards and notes alike — so an iced
+    // note (no board card) still resolves for a promote or a cancel.
+    let mut known = super::board_ids(&board);
+    known.extend(notes.iter().filter_map(|e| e.id()));
+    let id = layout::resolve_id(id_input, &known)?;
+    let on_board = board.locate(&id).is_some();
+
+    match target {
+        // Shelve a board card back to the icebox: remove the card, keep the note.
+        SetTarget::Icebox => {
+            if !on_board {
+                return Ok((id, "icebox".to_string())); // already iced — a no-op
+            }
+            let from = current_status(&board, &notes, &id)?;
+            if from != Status::Todo && !force {
+                bail!("shelving {id} from '{from}' needs --force (a clean shelve is from To-do)");
+            }
+            board.remove_card(&id);
+            fs.write(&paths.board_md(), &board.to_text())?;
+            Ok((id, from.to_string()))
+        }
+        SetTarget::Status(to) => {
+            if on_board {
+                // Ordinary board transition — the state machine in `apply`.
+                let (id, from) = apply(fs, paths, clock, id.as_str(), to, force)?;
+                return Ok((id, from.to_string()));
+            }
+            // Promote or cancel out of the icebox. Only `cancelled` shelves an
+            // iced note straight to the archive; `accepted` is not a promotion
+            // target (you don't accept work that was never done), so it falls to
+            // the non-todo guard below and is rejected without --force.
+            if to == Status::Cancelled {
+                // Build the archive mutation in memory first, so a corrupt board
+                // (missing lane) fails before any write. Then stamp the note (the
+                // first persistent write), then the board: a partial run leaves
+                // the note iced and repeatable, never a board tombstone with no
+                // disposition.
+                if !board.insert_card(Status::Todo, Card::new_link(&id), true)
+                    || !board.move_card(&id, to)
+                {
+                    bail!("cannot archive {id}: the board is missing a lane; run `project lint`");
+                }
+                update_note(fs, paths, clock, &notes, &id, Some(to))?;
+                fs.write(&paths.board_md(), &board.to_text())?;
+                return Ok((id, "icebox".to_string()));
+            }
+            if to != Status::Todo && !force {
+                bail!("a promotion lands in To-do; use --force to enter '{to}' instead");
+            }
+            // Enter the pipeline at the front of the target lane.
+            if !board.insert_card(to, Card::new_link(&id), true) {
+                bail!("board has no '{to}' lane; run `project lint`");
+            }
+            fs.write(&paths.board_md(), &board.to_text())?;
+            Ok((id, "icebox".to_string()))
+        }
+    }
 }
 
 /// `project status set --accept-all` — move every card in the Ready lane to
@@ -229,7 +326,7 @@ mod tests {
             &r,
             &FixedClock(T0),
             "a3f7b2",
-            Status::InProgress,
+            SetTarget::Status(Status::InProgress),
             false,
         )
         .unwrap();
@@ -251,7 +348,7 @@ mod tests {
             &r,
             &FixedClock(T0),
             "a3f7b2",
-            Status::Accepted,
+            SetTarget::Status(Status::Accepted),
             false
         )
         .is_err());
@@ -262,7 +359,7 @@ mod tests {
             &r,
             &FixedClock(T0),
             "a3f7b2",
-            Status::Accepted,
+            SetTarget::Status(Status::Accepted),
             true
         )
         .is_ok());
@@ -279,7 +376,16 @@ mod tests {
             Status::Ready,
             Status::Accepted,
         ] {
-            run(&fs, &paths, &r, &FixedClock(T0), "a3f7b2", to, false).unwrap();
+            run(
+                &fs,
+                &paths,
+                &r,
+                &FixedClock(T0),
+                "a3f7b2",
+                SetTarget::Status(to),
+                false,
+            )
+            .unwrap();
         }
         // The note now carries disposition: accepted, stamped at the clock instant.
         let note = Note::parse(&fs.get("/b/issues/a3f7b2.md").unwrap()).unwrap();
@@ -304,7 +410,7 @@ mod tests {
             &r,
             &FixedClock(T0),
             "a3f7b2",
-            Status::Cancelled,
+            SetTarget::Status(Status::Cancelled),
             false,
         )
         .unwrap();
@@ -331,7 +437,7 @@ mod tests {
             &r,
             &FixedClock(T0),
             "deadbe",
-            Status::InProgress,
+            SetTarget::Status(Status::InProgress),
             false
         )
         .is_err());
@@ -365,7 +471,16 @@ mod tests {
         // Newer aaaaaa enters Ready first, then older bbbbbb.
         for hex in ["aaaaaa", "bbbbbb"] {
             for to in [Status::InProgress, Status::NeedsReview, Status::Ready] {
-                run(&fs, &paths, &r, &FixedClock(T0), hex, to, false).unwrap();
+                run(
+                    &fs,
+                    &paths,
+                    &r,
+                    &FixedClock(T0),
+                    hex,
+                    SetTarget::Status(to),
+                    false,
+                )
+                .unwrap();
             }
         }
         let board = Board::parse(&fs.get("/b/BOARD.md").unwrap());
@@ -404,7 +519,7 @@ mod tests {
         let clock = FixedClock(T0);
         for hex in ["aaaaaa", "bbbbbb"] {
             for to in [Status::InProgress, Status::NeedsReview, Status::Ready] {
-                run(&fs, &paths, &r, &clock, hex, to, false).unwrap();
+                run(&fs, &paths, &r, &clock, hex, SetTarget::Status(to), false).unwrap();
             }
         }
 
@@ -445,7 +560,7 @@ mod tests {
             &r,
             &FixedClock(T0),
             "a3f7b2",
-            Status::Accepted,
+            SetTarget::Status(Status::Accepted),
             true,
         )
         .unwrap();
@@ -461,7 +576,7 @@ mod tests {
             &r,
             &FixedClock(T0),
             "a3f7b2",
-            Status::InProgress,
+            SetTarget::Status(Status::InProgress),
             true,
         )
         .unwrap();
@@ -474,5 +589,203 @@ mod tests {
             board.status_of(&CardId::parse("a3f7b2").unwrap()),
             Some(Status::InProgress)
         );
+    }
+
+    // ---- The icebox edges (design/PDD001) -----------------------------------
+
+    /// A board with no cards and one iced note (`a3f7b2`, no board card).
+    fn iced() -> (FakeFs, Paths) {
+        let board = Board::parse(&layout::initial_board());
+        let fs = FakeFs::new()
+            .with_file("/b/BOARD.md", &board.to_text())
+            .with_file(
+                "/b/issues/a3f7b2.md",
+                "---\nid: a3f7b2\ntitle: Iced idea\ntype: feature\nblocked_by: []\ncreated: 2026-01-01T00:00:00Z\n---\n\nbody\n",
+            );
+        (fs, Paths::new("/b"))
+    }
+
+    fn a3f7b2() -> CardId {
+        CardId::parse("a3f7b2").unwrap()
+    }
+
+    #[test]
+    fn it_promotes_an_iced_note_into_todo() {
+        let (fs, paths) = iced();
+        let r = Renderer::new(false, false);
+        run(
+            &fs,
+            &paths,
+            &r,
+            &FixedClock(T0),
+            "a3f7b2",
+            SetTarget::Status(Status::Todo),
+            false,
+        )
+        .unwrap();
+        let board = Board::parse(&fs.get("/b/BOARD.md").unwrap());
+        // A promotion enters the pipeline at the front of To-do.
+        assert_eq!(board.cards_in(Status::Todo)[0].id().unwrap(), a3f7b2());
+    }
+
+    #[test]
+    fn it_rejects_a_promotion_to_a_non_todo_lane_without_force() {
+        let (fs, paths) = iced();
+        let r = Renderer::new(false, false);
+        assert!(run(
+            &fs,
+            &paths,
+            &r,
+            &FixedClock(T0),
+            "a3f7b2",
+            SetTarget::Status(Status::InProgress),
+            false
+        )
+        .is_err());
+        // --force lands the promotion in the requested lane.
+        assert!(run(
+            &fs,
+            &paths,
+            &r,
+            &FixedClock(T0),
+            "a3f7b2",
+            SetTarget::Status(Status::InProgress),
+            true
+        )
+        .is_ok());
+        let board = Board::parse(&fs.get("/b/BOARD.md").unwrap());
+        assert_eq!(board.status_of(&a3f7b2()), Some(Status::InProgress));
+    }
+
+    #[test]
+    fn it_shelves_a_todo_card_back_to_the_icebox() {
+        let (fs, paths) = seeded(); // a3f7b2 in To-do
+        let r = Renderer::new(false, false);
+        run(
+            &fs,
+            &paths,
+            &r,
+            &FixedClock(T0),
+            "a3f7b2",
+            SetTarget::Icebox,
+            false,
+        )
+        .unwrap();
+        let board = Board::parse(&fs.get("/b/BOARD.md").unwrap());
+        // No board card, but the note survives.
+        assert_eq!(board.locate(&a3f7b2()), None);
+        assert!(fs.get("/b/issues/a3f7b2.md").is_some());
+    }
+
+    #[test]
+    fn it_rejects_a_shelve_from_an_active_lane_without_force() {
+        let (fs, paths) = seeded();
+        let r = Renderer::new(false, false);
+        run(
+            &fs,
+            &paths,
+            &r,
+            &FixedClock(T0),
+            "a3f7b2",
+            SetTarget::Status(Status::InProgress),
+            false,
+        )
+        .unwrap();
+        // Shelving from an active lane needs --force.
+        assert!(run(
+            &fs,
+            &paths,
+            &r,
+            &FixedClock(T0),
+            "a3f7b2",
+            SetTarget::Icebox,
+            false
+        )
+        .is_err());
+        assert!(run(
+            &fs,
+            &paths,
+            &r,
+            &FixedClock(T0),
+            "a3f7b2",
+            SetTarget::Icebox,
+            true
+        )
+        .is_ok());
+        let board = Board::parse(&fs.get("/b/BOARD.md").unwrap());
+        assert_eq!(board.locate(&a3f7b2()), None);
+    }
+
+    #[test]
+    fn it_cancels_an_iced_note_straight_into_the_archive() {
+        let (fs, paths) = iced();
+        let r = Renderer::new(false, false);
+        run(
+            &fs,
+            &paths,
+            &r,
+            &FixedClock(T0),
+            "a3f7b2",
+            SetTarget::Status(Status::Cancelled),
+            false,
+        )
+        .unwrap();
+        // The note is tombstoned...
+        let meta =
+            NoteMeta::from_note(&Note::parse(&fs.get("/b/issues/a3f7b2.md").unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(meta.disposition, Some(Status::Cancelled));
+        assert!(meta.disposition_at.is_some());
+        // ...and lands directly in the archive as a `- [x]` card, with no stop
+        // in an active lane.
+        let board = Board::parse(&fs.get("/b/BOARD.md").unwrap());
+        assert_eq!(board.archived().len(), 1);
+        assert_eq!(board.archived()[0].id().unwrap(), a3f7b2());
+        assert!(board.archived()[0].is_checked());
+        assert_eq!(board.status_of(&a3f7b2()), None);
+    }
+
+    #[test]
+    fn it_does_not_archive_an_iced_note_as_accepted_without_force() {
+        // Only `cancelled` shelves an iced note to the archive; `accepted` is not
+        // a promotion target and must be rejected (not silently archived).
+        let (fs, paths) = iced();
+        let r = Renderer::new(false, false);
+        assert!(run(
+            &fs,
+            &paths,
+            &r,
+            &FixedClock(T0),
+            "a3f7b2",
+            SetTarget::Status(Status::Accepted),
+            false
+        )
+        .is_err());
+        // The note was not tombstoned and stays iced.
+        let board = Board::parse(&fs.get("/b/BOARD.md").unwrap());
+        assert_eq!(board.archived().len(), 0);
+        assert_eq!(board.locate(&a3f7b2()), None);
+        let meta =
+            NoteMeta::from_note(&Note::parse(&fs.get("/b/issues/a3f7b2.md").unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(meta.disposition, None);
+    }
+
+    #[test]
+    fn it_is_a_noop_to_shelve_an_already_iced_note() {
+        let (fs, paths) = iced();
+        let r = Renderer::new(false, false);
+        let before = fs.get("/b/BOARD.md").unwrap();
+        run(
+            &fs,
+            &paths,
+            &r,
+            &FixedClock(T0),
+            "a3f7b2",
+            SetTarget::Icebox,
+            false,
+        )
+        .unwrap();
+        assert_eq!(fs.get("/b/BOARD.md").unwrap(), before);
     }
 }

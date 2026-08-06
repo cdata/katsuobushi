@@ -101,13 +101,17 @@ project status --available --json   # to parse
 project init                                     # scaffold project/kanban/
 project new --title "Add repo list endpoint" --type feature --label PDD006
 project new --title "…" --blocked-by a3f7b2,1a2b3c --label net --label security
+project new --icebox --title "An idea to triage later"   # file to the icebox (no card)
 echo "## What to build…" | project new --title "…" --body -   # pipe a body
 project status set a3f7b2 in-progress          # ids accept a unique prefix
+project status set a3f7b2 icebox               # shelve a card off the board (--force from an active lane)
+project status set a3f7b2 todo                 # promote an iced note to the front of To-do
 project status set --accept-all                # accept the whole Ready lane at once
 project prioritize a3f7b2 --top                # --top/--bottom/--before/--after
 project status                                    # the whole board
 project status --lane needs-review               # review queue (or --available)
 project status --label PDD006                     # one epic: cards carrying a label
+project status --icebox                           # iced notes (compose with --label)
 project status a3f7b2                           # one card: detail + body
 project lint                                      # board <-> note consistency (--fix)
 ```
