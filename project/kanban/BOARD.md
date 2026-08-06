@@ -20,8 +20,15 @@ kanban-plugin: basic
 - [ ] [[c64c16]]
 - [ ] [[1eccce]]
 - [ ] [[49f8bf]]
-
 - [ ] [[c72eb6]]
+- [ ] [[e18925]]
+- [ ] [[67ea1d]]
+- [ ] [[acb53d]]
+- [ ] [[83ca5d]]
+- [ ] [[549073]]
+- [ ] [[8e6671]]
+- [ ] [[98ec91]]
+
 ## In Progress
 
 ## Needs Review
