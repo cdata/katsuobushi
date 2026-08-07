@@ -12,19 +12,32 @@ use tokio::process::Command;
 use tokio::time::{timeout, MissedTickBehavior};
 
 use crate::heartbeat::{
-    apply_check, load_heartbeats, BeatState, CheckOutcome, Heartbeat, TurnBeat,
+    apply_check, load_heartbeats, BeatState, CheckOutcome, Heartbeat, HeartbeatError, TurnBeat,
 };
 
-/// Load all heartbeats from `hb_dir`, report any parse errors to stderr
-/// exactly once, then run each successfully-parsed heartbeat on its own
-/// interval with `cwd` as the working directory. Also spawns the turn
-/// heartbeat, which beats for the life of the current turn. Never returns
+/// Merge heartbeats from all directories in `dirs`. Errors are collected
+/// without stopping remaining directories from loading.
+pub fn collect_heartbeats(dirs: &[PathBuf]) -> (Vec<Heartbeat>, Vec<HeartbeatError>) {
+    let mut heartbeats = Vec::new();
+    let mut errors = Vec::new();
+    for dir in dirs {
+        let (hbs, errs) = load_heartbeats(dir);
+        heartbeats.extend(hbs);
+        errors.extend(errs);
+    }
+    (heartbeats, errors)
+}
+
+/// Load all heartbeats from every directory in `hb_dirs`, report any parse
+/// errors to stderr exactly once, then run each successfully-parsed heartbeat
+/// on its own interval with `cwd` as the working directory. Also spawns the
+/// turn heartbeat, which beats for the life of the current turn. Never returns
 /// normally.
 ///
 /// Heartbeats run concurrently — one tokio task per heartbeat — so a slow
 /// check on one heartbeat does not delay another.
-pub async fn run_heartbeat_set(hb_dir: PathBuf, cwd: PathBuf, turn_armed: Arc<AtomicBool>) {
-    let (heartbeats, errors) = load_heartbeats(&hb_dir);
+pub async fn run_heartbeat_set(hb_dirs: Vec<PathBuf>, cwd: PathBuf, turn_armed: Arc<AtomicBool>) {
+    let (heartbeats, errors) = collect_heartbeats(&hb_dirs);
     for err in &errors {
         eprintln!("katsuobushi-heartbeat: parse error: {err}");
     }
@@ -213,7 +226,52 @@ async fn spawn_detail(body: &str, cwd: &Path, budget: Duration) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::Path;
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir()
+                .join(format!("katsuobushi-runner-{tag}-{}", std::process::id()));
+            fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Heartbeats from two directories — shipped and project — must both appear
+    /// in the merged result with no errors when both directories contain valid files.
+    #[test]
+    fn it_merges_heartbeats_from_shipped_and_project_dirs() {
+        let shipped = TempDir::new("shipped");
+        let project = TempDir::new("project");
+        fs::write(
+            shipped.path().join("agent-work.yaml"),
+            "label: Agent work\ntimeout: 45m\ncheck: true\n",
+        )
+        .unwrap();
+        fs::write(
+            project.path().join("custom.yaml"),
+            "label: Custom\ntimeout: 10m\ncheck: true\n",
+        )
+        .unwrap();
+
+        let dirs = vec![shipped.path().to_owned(), project.path().to_owned()];
+        let (heartbeats, errors) = collect_heartbeats(&dirs);
+        assert_eq!(heartbeats.len(), 2, "expected one heartbeat per directory");
+        assert!(errors.is_empty(), "expected no errors: {errors:?}");
+        let labels: Vec<&str> = heartbeats.iter().map(|h| h.label.as_str()).collect();
+        assert!(labels.contains(&"Agent work"), "{labels:?}");
+        assert!(labels.contains(&"Custom"), "{labels:?}");
+    }
 
     /// A check whose body sleeps far beyond the budget must return `false`
     /// promptly — the process group (shell + any grandchildren) is killed on

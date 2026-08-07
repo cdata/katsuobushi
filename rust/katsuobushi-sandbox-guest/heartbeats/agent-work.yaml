@@ -1,0 +1,29 @@
+# Beats while the katsuobushi-agent cgroup (systemd.services.katsuobushi-agent)
+# is consuming CPU — confirming the agent session is doing work.
+#
+# Block-scalar syntax: every line in the check body is indented two spaces
+# relative to the `check:` key. The YAML parser strips those two leading spaces
+# before handing the body to sh(1). The indentation here is YAML structure,
+# not part of the shell script.
+#
+# Exit-status rule: the check beats only when it exits 0. Any branch that
+# should NOT report active must exit non-zero. On the first run there is no
+# previous reading to compare, so the script writes the baseline and exits 1
+# (no beat). On the next tick it compares and exits 0 only when CPU advanced.
+label: Agent work
+timeout: 45m
+interval: 10s
+check: |
+  cgroup=/sys/fs/cgroup/system.slice/katsuobushi-agent.service
+  prev=/run/katsuobushi/control/hb-agent.prev
+  [ -r "$cgroup/cpu.stat" ] || exit 1
+  cur=$(awk '/^usage_usec /{print $2}' "$cgroup/cpu.stat")
+  [ -n "$cur" ] || exit 1
+  if [ -f "$prev" ]; then
+    old=$(cat "$prev")
+    printf '%s\n' "$cur" > "$prev"
+    [ "$cur" -gt "$old" ]
+  else
+    printf '%s\n' "$cur" > "$prev"
+    exit 1
+  fi

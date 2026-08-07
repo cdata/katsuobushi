@@ -348,6 +348,15 @@ let
     cargoExtraArgs = "--package katsuobushi-controller";
   };
 
+  # Shipped heartbeat set — built from the YAML files in the Katsuobushi
+  # workspace source and installed at /etc/katsuobushi/heartbeats/ inside the
+  # guest. A project's own .katsuobushi/heartbeats/ adds to this set; it never
+  # replaces it, so a bare repo still gets the shipped beats.
+  shippedHeartbeatsDir = pkgs.runCommand "katsuobushi-shipped-heartbeats" { } ''
+    mkdir -p $out
+    cp ${controlSrc}/rust/katsuobushi-sandbox-guest/heartbeats/*.yaml $out/
+  '';
+
   # vsock + control-socket constants. The guest server listens on AF_VSOCK; the
   # `report` command and server rendezvous on a guest-local unix socket under a
   # per-agent dir in the RAM-backed /run. The host vsock port is fixed (the
@@ -1138,6 +1147,9 @@ let
         KATSU_MAX_NUDGES = toString maxNudges;
         KATSU_NUDGE_INTERVAL_MS = toString nudgeIntervalMs;
         KATSU_SHARE = shareMount;
+        # Shipped heartbeat set: the guest server loads these in addition to any
+        # project-local .katsuobushi/heartbeats/ files.
+        KATSU_SHIPPED_HEARTBEATS = "/etc/katsuobushi/heartbeats";
       };
 
       # Claude Code "managed settings" — the org-policy settings tier, highest
@@ -1172,6 +1184,11 @@ let
       # Schema: each event maps to a list of { hooks = [ { type; command; } ]; }
       # groups; Stop/SessionStart/UserPromptSubmit take no matcher (only tool
       # hooks do).
+      # Shipped heartbeat files — readable inside the VM at the path that
+      # KATSU_SHIPPED_HEARTBEATS points to. The guest server loads these first;
+      # a project's .katsuobushi/heartbeats/ appends on top.
+      environment.etc."katsuobushi/heartbeats".source = shippedHeartbeatsDir;
+
       environment.etc."claude-code/managed-settings.json".text = builtins.toJSON {
         channelsEnabled = true;
         skipDangerousModePermissionPrompt = true;

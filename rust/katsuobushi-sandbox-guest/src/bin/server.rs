@@ -1059,14 +1059,23 @@ async fn main() -> anyhow::Result<()> {
         Duration::from_secs(heartbeat_secs),
     ));
 
-    // The project heartbeat runner: runs `.katsuobushi/heartbeats/*.yaml`
-    // checks on their own intervals, plus the turn heartbeat. The launcher
-    // starts the server in the workspace root, so current_dir() is the
-    // workspace.
+    // The project heartbeat runner: runs shipped heartbeats (from
+    // KATSU_SHIPPED_HEARTBEATS) and project heartbeats (from
+    // `.katsuobushi/heartbeats/`) on their own intervals, plus the turn
+    // heartbeat. A bare repo with no project heartbeat directory still gets the
+    // shipped set. The launcher starts the server in the workspace root, so
+    // current_dir() is the workspace.
     let workspace = std::env::current_dir()
         .expect("katsuobushi-heartbeat: cannot determine working directory; check that the process has a valid cwd");
-    let hb_dir = workspace.join(".katsuobushi/heartbeats");
-    tokio::spawn(run_heartbeat_set(hb_dir, workspace, turn_armed));
+    let mut hb_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(shipped) = std::env::var("KATSU_SHIPPED_HEARTBEATS") {
+        hb_dirs.push(std::path::PathBuf::from(shipped));
+    }
+    let project_dir = workspace.join(".katsuobushi/heartbeats");
+    if project_dir.is_dir() {
+        hb_dirs.push(project_dir);
+    }
+    tokio::spawn(run_heartbeat_set(hb_dirs, workspace, turn_armed));
 
     // The control/report listeners are auxiliary: if they fail to bind (e.g. an
     // interactive guest launched with no vsock device, or a missing socket dir)
