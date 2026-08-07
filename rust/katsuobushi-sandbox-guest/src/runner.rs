@@ -3,21 +3,27 @@
 //! [`crate::heartbeat`], and reports parse errors to stderr exactly once.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::{timeout, MissedTickBehavior};
 
-use crate::heartbeat::{apply_check, load_heartbeats, BeatState, CheckOutcome, Heartbeat};
+use crate::heartbeat::{
+    apply_check, load_heartbeats, BeatState, CheckOutcome, Heartbeat, TurnBeat,
+};
 
 /// Load all heartbeats from `hb_dir`, report any parse errors to stderr
 /// exactly once, then run each successfully-parsed heartbeat on its own
-/// interval with `cwd` as the working directory. Never returns normally.
+/// interval with `cwd` as the working directory. Also spawns the turn
+/// heartbeat, which beats for the life of the current turn. Never returns
+/// normally.
 ///
 /// Heartbeats run concurrently — one tokio task per heartbeat — so a slow
 /// check on one heartbeat does not delay another.
-pub async fn run_heartbeat_set(hb_dir: PathBuf, cwd: PathBuf) {
+pub async fn run_heartbeat_set(hb_dir: PathBuf, cwd: PathBuf, turn_armed: Arc<AtomicBool>) {
     let (heartbeats, errors) = load_heartbeats(&hb_dir);
     for err in &errors {
         eprintln!("katsuobushi-heartbeat: parse error: {err}");
@@ -28,6 +34,31 @@ pub async fn run_heartbeat_set(hb_dir: PathBuf, cwd: PathBuf) {
         tokio::spawn(async move {
             run_one(heartbeat, cwd).await;
         });
+    }
+
+    // The turn heartbeat joins the same set: one task, armed/silenced by the
+    // server via `turn_armed`.
+    tokio::spawn(run_turn_heartbeat(turn_armed));
+}
+
+/// Run the turn heartbeat indefinitely: ticks every [`TurnBeat::INTERVAL`],
+/// reflecting the server's armed/silenced state via `armed`. The resulting
+/// [`BeatStatus`] is consumed by a later card for work-state reporting.
+pub async fn run_turn_heartbeat(armed: Arc<AtomicBool>) {
+    let mut ticker = tokio::time::interval(TurnBeat::INTERVAL);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut beat = TurnBeat::default();
+
+    loop {
+        ticker.tick().await;
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Sync armed flag from the shared atomic, then tick.
+        beat.armed = armed.load(Ordering::Relaxed);
+        let _status = beat.tick(now_secs);
+        // _status: a later card consumes this for work-state reporting.
     }
 }
 

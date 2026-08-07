@@ -46,6 +46,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -245,6 +246,10 @@ struct Outcome {
     persist: Option<PersistMode>,
     /// The `TurnState` to write (cloned when `persist` is set).
     snapshot: Option<TurnState>,
+    /// Arm the turn heartbeat — set when a turn is first accepted.
+    arm_turn_beat: bool,
+    /// Silence the turn heartbeat — set when the stop hook fires.
+    silence_turn_beat: bool,
 }
 
 impl Session {
@@ -338,6 +343,7 @@ impl Session {
                     let id = t.id;
                     if terminal {
                         // `done`/`blocked` → terminal_reported; phase ended-ok.
+                        let was_accepted = t.accepted;
                         t.terminal_reported = true;
                         t.accepted = true;
                         let was_ended = t.ended;
@@ -347,6 +353,9 @@ impl Session {
                         }
                         if self.state.accepted_at.is_none() {
                             self.state.accepted_at = Some(now.to_string());
+                        }
+                        if !was_accepted {
+                            out.arm_turn_beat = true;
                         }
                         force = true;
                         // A late terminal report arriving during the grace window
@@ -366,6 +375,7 @@ impl Session {
                         self.state.accepted_at = Some(now.to_string());
                         out.messages
                             .push(GuestMessage::TurnAccepted { turn_id: id });
+                        out.arm_turn_beat = true;
                         force = true;
                     }
                 }
@@ -398,6 +408,7 @@ impl Session {
                         self.state.accepted_at = Some(now.to_string());
                         out.messages
                             .push(GuestMessage::TurnAccepted { turn_id: id });
+                        out.arm_turn_beat = true;
                         force = true;
                     }
                 }
@@ -412,6 +423,9 @@ impl Session {
                 let mut clear_turn = false;
                 if let Some(t) = self.turn.as_mut() {
                     let id = t.id;
+                    // The stop hook always silences the turn heartbeat: the
+                    // agent has stopped, regardless of whether it reported.
+                    out.silence_turn_beat = true;
                     if t.terminal_reported {
                         // Clean stop: corroborate the terminal report and clear.
                         self.state.phase = Phase::EndedOk;
@@ -503,6 +517,9 @@ struct Control {
     /// through the pure state machine, not real injection.
     peer: Option<Peer<RoleServer>>,
     last_persist: Mutex<Option<Instant>>,
+    /// Shared flag that arms and silences the turn heartbeat task. Set `true`
+    /// on first turn accept; cleared on the stop hook.
+    turn_armed: Arc<AtomicBool>,
 }
 
 /// Step the machine for one event under the lock, returning the [`Outcome`].
@@ -525,10 +542,17 @@ async fn send_and_persist(ctl: &Arc<Control>, outcome: &Outcome) {
     }
 }
 
-/// Apply an [`Outcome`]: forward + persist, inject any auto-nudge, and — if the
-/// machine asked to schedule a grace check — spawn the grace-timer loop.
+/// Apply an [`Outcome`]: forward + persist, arm/silence the turn heartbeat,
+/// inject any auto-nudge, and — if the machine asked to schedule a grace check
+/// — spawn the grace-timer loop.
 async fn execute_outcome(ctl: &Arc<Control>, outcome: Outcome) {
     send_and_persist(ctl, &outcome).await;
+    if outcome.arm_turn_beat {
+        ctl.turn_armed.store(true, Ordering::Relaxed);
+    }
+    if outcome.silence_turn_beat {
+        ctl.turn_armed.store(false, Ordering::Relaxed);
+    }
     inject_nudge_if_any(ctl, &outcome).await;
     if let Some((turn_id, kind)) = outcome.schedule_grace {
         spawn_grace(ctl.clone(), turn_id, kind);
@@ -1001,6 +1025,8 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("KATSU_SHARE").unwrap_or_else(|_| "/mnt/katsuobushi".to_string()),
     );
 
+    let turn_armed = Arc::new(AtomicBool::new(false));
+
     let ctl = Arc::new(Control {
         host: host.clone(),
         session: Mutex::new(Session {
@@ -1013,6 +1039,7 @@ async fn main() -> anyhow::Result<()> {
         max_nudges,
         peer: Some(peer.clone()),
         last_persist: Mutex::new(None),
+        turn_armed: turn_armed.clone(),
     });
 
     // Seed the durable record with an `idle` baseline so `status` has something
@@ -1033,12 +1060,13 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // The project heartbeat runner: runs `.katsuobushi/heartbeats/*.yaml`
-    // checks on their own intervals. The launcher starts the server in the
-    // workspace root, so current_dir() is the workspace.
+    // checks on their own intervals, plus the turn heartbeat. The launcher
+    // starts the server in the workspace root, so current_dir() is the
+    // workspace.
     let workspace = std::env::current_dir()
         .expect("katsuobushi-heartbeat: cannot determine working directory; check that the process has a valid cwd");
     let hb_dir = workspace.join(".katsuobushi/heartbeats");
-    tokio::spawn(run_heartbeat_set(hb_dir, workspace));
+    tokio::spawn(run_heartbeat_set(hb_dir, workspace, turn_armed));
 
     // The control/report listeners are auxiliary: if they fail to bind (e.g. an
     // interactive guest launched with no vsock device, or a missing socket dir)
@@ -1165,6 +1193,59 @@ mod tests {
         assert!(matches!(out.persist, Some(PersistMode::Force)));
         assert!(s.turn.is_some());
     }
+
+    // ── Turn heartbeat arm/silence wiring ──────────────────────────────────
+
+    #[test]
+    fn it_arms_the_turn_beat_on_the_turn_accepted_hook() {
+        let mut s = Session::default();
+        step(&mut s, Event::Prompt { turn_id: 1 });
+        let out = step(&mut s, Event::Hook(HookEvent::TurnAccepted));
+        assert!(out.arm_turn_beat, "turn beat must be armed on first accept");
+        assert!(!out.silence_turn_beat);
+    }
+
+    #[test]
+    fn it_arms_the_turn_beat_on_the_first_working_report() {
+        let mut s = Session::default();
+        step(&mut s, Event::Prompt { turn_id: 1 });
+        let out = step(&mut s, working());
+        assert!(out.arm_turn_beat, "first working report must arm the beat");
+    }
+
+    #[test]
+    fn it_does_not_rearm_the_turn_beat_on_subsequent_reports() {
+        let mut s = Session::default();
+        step(&mut s, Event::Prompt { turn_id: 1 });
+        step(&mut s, working());
+        let out = step(&mut s, working());
+        assert!(!out.arm_turn_beat, "beat must not re-arm on repeat reports");
+    }
+
+    #[test]
+    fn it_silences_the_turn_beat_on_the_stop_hook() {
+        let mut s = Session::default();
+        step(&mut s, Event::Prompt { turn_id: 1 });
+        step(&mut s, Event::Hook(HookEvent::TurnAccepted));
+        let out = step(&mut s, Event::Hook(HookEvent::TurnEnded));
+        assert!(out.silence_turn_beat, "turn beat must be silenced on stop");
+        assert!(!out.arm_turn_beat);
+    }
+
+    #[test]
+    fn it_silences_the_turn_beat_on_a_clean_stop_after_terminal_report() {
+        let mut s = Session::default();
+        step(&mut s, Event::Prompt { turn_id: 1 });
+        step(&mut s, working());
+        step(&mut s, done());
+        let out = step(&mut s, Event::Hook(HookEvent::TurnEnded));
+        assert!(
+            out.silence_turn_beat,
+            "clean stop must still silence the beat"
+        );
+    }
+
+    // ── End turn heartbeat tests ────────────────────────────────────────────
 
     #[test]
     fn it_dedupes_a_resend_of_a_turn_the_harness_has_begun() {
@@ -1674,6 +1755,7 @@ mod tests {
             max_nudges: 0,
             peer: None,
             last_persist: Mutex::new(None),
+            turn_armed: Arc::new(AtomicBool::new(false)),
         })
     }
 

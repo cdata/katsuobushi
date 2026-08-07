@@ -202,6 +202,56 @@ pub struct BeatState {
     pub beat_started: Option<u64>,
 }
 
+// ── Turn heartbeat ────────────────────────────────────────────────────────────
+
+/// The in-flight turn heartbeat: beats for exactly as long as a turn is in
+/// flight. Armed on `TurnAccepted`, silenced on `TurnEnded`. Joins the same
+/// set as file heartbeats and uses the same [`apply_check`] machinery.
+///
+/// The timeout (60 minutes) names a turn that has been running unreasonably
+/// long — a fault the operator should act on.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TurnBeat {
+    state: BeatState,
+    /// Whether a turn is currently in flight.
+    pub armed: bool,
+}
+
+impl TurnBeat {
+    /// Heartbeat interval — matches the file-heartbeat default.
+    pub const INTERVAL: Duration = DEFAULT_INTERVAL;
+    /// Timeout: a turn in flight longer than this is late.
+    pub const TIMEOUT_SECS: u64 = 60 * 60;
+
+    /// Arm the heartbeat when a turn is accepted. Records the arm time as
+    /// `beat_started` so duration is measured from the turn's first activity.
+    pub fn arm(&mut self, now_secs: u64) -> BeatStatus {
+        self.armed = true;
+        self.tick(now_secs)
+    }
+
+    /// Silence the heartbeat when the stop hook fires — the turn ended.
+    pub fn silence(&mut self, now_secs: u64) -> BeatStatus {
+        self.armed = false;
+        self.tick(now_secs)
+    }
+
+    /// Tick on the heartbeat interval: emits `Beat` when armed, `Miss` when
+    /// not. The first `Beat` after an `arm` sets `beat_started`; subsequent
+    /// beats grow duration from that anchor; `silence` clears it.
+    pub fn tick(&mut self, now_secs: u64) -> BeatStatus {
+        let outcome = if self.armed {
+            CheckOutcome::Beat { detail: None }
+        } else {
+            CheckOutcome::Miss
+        };
+        let (new_state, status) =
+            apply_check(self.state.clone(), outcome, now_secs, Self::TIMEOUT_SECS);
+        self.state = new_state;
+        status
+    }
+}
+
 /// The outcome of one check interval, produced by the runner and consumed by
 /// [`apply_check`].
 #[derive(Debug, PartialEq, Eq)]
@@ -485,6 +535,62 @@ detail: |
         let (heartbeats, errors) = load_heartbeats(dir.path());
         assert_eq!(heartbeats.len(), 1);
         assert!(errors.is_empty());
+    }
+}
+
+// ── TurnBeat tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod turn_beat_tests {
+    use super::*;
+
+    const T: u64 = 1_000_000;
+
+    #[test]
+    fn it_beats_while_a_turn_is_in_flight() {
+        let mut beat = TurnBeat::default();
+        let status = beat.arm(T);
+        assert!(status.beating, "should beat immediately on arm");
+        let status = beat.tick(T + 10);
+        assert!(status.beating, "should keep beating while armed");
+    }
+
+    #[test]
+    fn it_goes_late_after_sixty_minutes() {
+        let mut beat = TurnBeat::default();
+        beat.arm(T);
+        // One second before the boundary: not late yet.
+        let status = beat.tick(T + TurnBeat::TIMEOUT_SECS - 1);
+        assert!(!status.is_late, "one second before the timeout: not late");
+        // At the 60-minute boundary: late.
+        let status = beat.tick(T + TurnBeat::TIMEOUT_SECS);
+        assert!(status.is_late, "at 60 minutes: late flag raised");
+    }
+
+    #[test]
+    fn it_stops_beating_when_a_turn_ends() {
+        let mut beat = TurnBeat::default();
+        beat.arm(T);
+        let status = beat.silence(T + 30);
+        assert!(!status.beating, "should stop beating on silence");
+    }
+
+    #[test]
+    fn it_is_idle_before_any_turn_starts() {
+        let mut beat = TurnBeat::default();
+        let status = beat.tick(T);
+        assert!(!status.beating, "no beat before a turn is armed");
+        assert!(!status.is_late);
+    }
+
+    #[test]
+    fn it_resets_duration_when_rearmed_after_silence() {
+        let mut beat = TurnBeat::default();
+        beat.arm(T);
+        beat.silence(T + 100);
+        // A new turn arms fresh; duration starts at zero again.
+        let status = beat.arm(T + 200);
+        assert_eq!(status.duration_secs, 0, "rearm resets the turn clock");
     }
 }
 
