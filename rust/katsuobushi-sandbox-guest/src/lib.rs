@@ -5,3 +5,5 @@
 //! The shared wire types now live in the standalone [`katsuobushi_sandbox_protocol`]
 //! crate so the host (`katsuctl`) and the guest server can both depend on them
 //! without the host linking the guest server's deps.
+
+pub mod heartbeat;
