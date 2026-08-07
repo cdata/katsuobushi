@@ -29,3 +29,4 @@ anyhow.workspace = true
 # server does not parse args today, but keeping the entry avoids a lock churn
 # unrelated to retiring the host client bin.
 clap.workspace = true
+libc.workspace = true

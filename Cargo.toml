@@ -29,3 +29,5 @@ comfy-table = "7"
 owo-colors = "4"
 # Dev-only: golden snapshot tests for the emitted start/attach scripts (#013).
 insta = "1"
+# Raw Unix syscalls (kill(2) for process-group SIGKILL on timeout).
+libc = "0.2"
