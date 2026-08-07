@@ -23,7 +23,7 @@ tokio-vsock.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
+serde_yaml_ng.workspace = true
 anyhow.workspace = true
 # Retained as a shared workspace dep so Cargo.lock stays in lockstep; the guest
 # server does not parse args today, but keeping the entry avoids a lock churn

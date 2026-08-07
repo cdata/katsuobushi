@@ -98,7 +98,7 @@ pub fn parse_heartbeat(text: &str, path: &Path) -> Result<Heartbeat, HeartbeatEr
     };
 
     let raw: HeartbeatRaw =
-        serde_yaml::from_str(text).map_err(|e| err(format!("YAML parse error: {e}")))?;
+        serde_yaml_ng::from_str(text).map_err(|e| err(format!("YAML parse error: {e}")))?;
 
     let label = raw
         .label
