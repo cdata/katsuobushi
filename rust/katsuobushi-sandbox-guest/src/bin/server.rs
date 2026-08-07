@@ -49,6 +49,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use katsuobushi_sandbox_guest::runner::run_heartbeat_set;
+
 use anyhow::Context as _;
 use katsuobushi_sandbox_protocol::{
     GuestLocalLine, GuestMessage, HookEvent, HostMessage, Report, Status, HEARTBEAT_SECS_DEFAULT,
@@ -1029,6 +1031,19 @@ async fn main() -> anyhow::Result<()> {
         ctl.host.clone(),
         Duration::from_secs(heartbeat_secs),
     ));
+
+    // The project heartbeat runner: runs `.katsuobushi/heartbeats/*.yaml`
+    // checks on their own intervals. The workspace is taken from
+    // `KATSU_WORKSPACE`; it defaults to the process working directory, which
+    // is the workspace root when Claude Code launches the server.
+    let workspace = PathBuf::from(std::env::var("KATSU_WORKSPACE").unwrap_or_else(|_| {
+        std::env::current_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    }));
+    let hb_dir = workspace.join(".katsuobushi/heartbeats");
+    tokio::spawn(run_heartbeat_set(hb_dir, workspace));
 
     // The control/report listeners are auxiliary: if they fail to bind (e.g. an
     // interactive guest launched with no vsock device, or a missing socket dir)

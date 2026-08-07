@@ -189,6 +189,93 @@ pub fn load_heartbeats(dir: &Path) -> (Vec<Heartbeat>, Vec<HeartbeatError>) {
     (ok, errs)
 }
 
+// ── Pure beat-state core ──────────────────────────────────────────────────────
+
+/// Per-heartbeat state across check intervals.
+///
+/// Stored per-heartbeat in the runner; contains only what the pure transition
+/// function needs to continue an unbroken beat run across ticks.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BeatState {
+    /// Unix-epoch seconds of the first beat in the current unbroken run.
+    /// `None` if the heartbeat has never beaten or the last check was a miss.
+    pub beat_started: Option<u64>,
+}
+
+/// The outcome of one check interval, produced by the runner and consumed by
+/// [`apply_check`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum CheckOutcome {
+    /// The check exited zero; `detail` is the first trimmed line of the detail
+    /// body's stdout, if a detail body ran and succeeded.
+    Beat { detail: Option<String> },
+    /// The check exited non-zero, timed out, or could not be spawned.
+    Miss,
+}
+
+/// The status returned by [`apply_check`] after one tick. A later card uses
+/// this to compute the aggregated work state.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BeatStatus {
+    /// Whether this heartbeat is currently beating.
+    pub beating: bool,
+    /// Seconds since the start of the current unbroken beat run; `0` when not
+    /// beating (the beat-started clock is unset).
+    pub duration_secs: u64,
+    /// Whether `duration_secs ≥ timeout_secs`: this heartbeat has beaten past
+    /// its own declared bound. A later card acts on this flag.
+    pub is_late: bool,
+    /// First line of the `detail` body's output, when available.
+    pub narration: Option<String>,
+}
+
+/// Apply one check outcome to `state` and return `(new_state, status)`.
+///
+/// `now_secs` is the current Unix-epoch time in seconds, injected so the core
+/// stays clock-free and unit-testable without timers. `timeout_secs` is the
+/// heartbeat's `timeout` field converted to seconds.
+///
+/// - A [`CheckOutcome::Beat`] either starts a new run (`beat_started = now_secs`)
+///   or continues the existing one, with duration growing from `beat_started`.
+/// - A [`CheckOutcome::Miss`] clears `beat_started`, ending the run. The next
+///   beat starts a fresh run with duration reset to zero.
+pub fn apply_check(
+    mut state: BeatState,
+    outcome: CheckOutcome,
+    now_secs: u64,
+    timeout_secs: u64,
+) -> (BeatState, BeatStatus) {
+    match outcome {
+        CheckOutcome::Beat { detail } => {
+            let started = state.beat_started.unwrap_or(now_secs);
+            let duration_secs = now_secs.saturating_sub(started);
+            let is_late = duration_secs >= timeout_secs;
+            state.beat_started = Some(started);
+            (
+                state,
+                BeatStatus {
+                    beating: true,
+                    duration_secs,
+                    is_late,
+                    narration: detail,
+                },
+            )
+        }
+        CheckOutcome::Miss => {
+            state.beat_started = None;
+            (
+                state,
+                BeatStatus {
+                    beating: false,
+                    duration_secs: 0,
+                    is_late: false,
+                    narration: None,
+                },
+            )
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -398,5 +485,98 @@ detail: |
         let (heartbeats, errors) = load_heartbeats(dir.path());
         assert_eq!(heartbeats.len(), 1);
         assert!(errors.is_empty());
+    }
+}
+
+// ── Pure beat-state core tests ─────────────────────────────────────────────────
+
+#[cfg(test)]
+mod beat_tests {
+    use super::*;
+
+    const NOW: u64 = 1_000_000;
+    const TIMEOUT: u64 = 300;
+
+    fn beat(detail: Option<&str>) -> CheckOutcome {
+        CheckOutcome::Beat {
+            detail: detail.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn it_beats_on_exit_zero() {
+        let (_, status) = apply_check(BeatState::default(), beat(None), NOW, TIMEOUT);
+        assert!(status.beating);
+    }
+
+    #[test]
+    fn it_misses_on_nonzero_exit() {
+        let (_, status) = apply_check(BeatState::default(), CheckOutcome::Miss, NOW, TIMEOUT);
+        assert!(!status.beating);
+    }
+
+    #[test]
+    fn it_starts_the_duration_at_zero_on_the_first_beat() {
+        let (_, status) = apply_check(BeatState::default(), beat(None), NOW, TIMEOUT);
+        assert_eq!(status.duration_secs, 0, "first beat: duration starts at 0");
+    }
+
+    #[test]
+    fn it_counts_duration_from_the_first_beat_of_an_unbroken_run() {
+        let (state, _) = apply_check(BeatState::default(), beat(None), NOW, TIMEOUT);
+        let (_, status) = apply_check(state, beat(None), NOW + 30, TIMEOUT);
+        assert_eq!(status.duration_secs, 30);
+    }
+
+    #[test]
+    fn it_resets_the_duration_after_a_failed_check() {
+        let (state, _) = apply_check(BeatState::default(), beat(None), NOW, TIMEOUT);
+        let (state, _) = apply_check(state, CheckOutcome::Miss, NOW + 10, TIMEOUT);
+        let (_, status) = apply_check(state, beat(None), NOW + 20, TIMEOUT);
+        assert!(status.beating);
+        assert_eq!(status.duration_secs, 0, "fresh run: duration resets to 0");
+    }
+
+    #[test]
+    fn it_flags_a_heartbeat_past_its_own_timeout() {
+        let (state, _) = apply_check(BeatState::default(), beat(None), NOW, TIMEOUT);
+        let (_, status) = apply_check(state, beat(None), NOW + TIMEOUT, TIMEOUT);
+        assert!(status.is_late, "at the timeout boundary, is_late is set");
+    }
+
+    #[test]
+    fn it_is_not_late_below_the_timeout() {
+        let (state, _) = apply_check(BeatState::default(), beat(None), NOW, TIMEOUT);
+        let (_, status) = apply_check(state, beat(None), NOW + TIMEOUT - 1, TIMEOUT);
+        assert!(!status.is_late, "one second before the timeout: not late");
+    }
+
+    #[test]
+    fn it_carries_no_late_flag_on_a_miss() {
+        let (_, status) = apply_check(
+            BeatState::default(),
+            CheckOutcome::Miss,
+            NOW + 9999,
+            TIMEOUT,
+        );
+        assert!(!status.is_late, "a miss is never late");
+    }
+
+    #[test]
+    fn it_attaches_detail_narration_to_a_beat() {
+        let (_, status) = apply_check(BeatState::default(), beat(Some("42 units")), NOW, TIMEOUT);
+        assert_eq!(status.narration.as_deref(), Some("42 units"));
+    }
+
+    #[test]
+    fn it_carries_no_narration_on_a_miss() {
+        let (_, status) = apply_check(BeatState::default(), CheckOutcome::Miss, NOW, TIMEOUT);
+        assert!(status.narration.is_none());
+    }
+
+    #[test]
+    fn it_carries_no_narration_when_the_detail_body_did_not_run() {
+        let (_, status) = apply_check(BeatState::default(), beat(None), NOW, TIMEOUT);
+        assert!(status.narration.is_none());
     }
 }
