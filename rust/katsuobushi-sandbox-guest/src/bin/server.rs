@@ -1033,15 +1033,10 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // The project heartbeat runner: runs `.katsuobushi/heartbeats/*.yaml`
-    // checks on their own intervals. The workspace is taken from
-    // `KATSU_WORKSPACE`; it defaults to the process working directory, which
-    // is the workspace root when Claude Code launches the server.
-    let workspace = PathBuf::from(std::env::var("KATSU_WORKSPACE").unwrap_or_else(|_| {
-        std::env::current_dir()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned()
-    }));
+    // checks on their own intervals. The launcher starts the server in the
+    // workspace root, so current_dir() is the workspace.
+    let workspace = std::env::current_dir()
+        .expect("katsuobushi-heartbeat: cannot determine working directory; check that the process has a valid cwd");
     let hb_dir = workspace.join(".katsuobushi/heartbeats");
     tokio::spawn(run_heartbeat_set(hb_dir, workspace));
 
