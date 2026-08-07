@@ -68,7 +68,10 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
             .trim()
             .parse()
             .map_err(|_| format!("invalid duration {s:?}: expected a whole number before 'm'"))?;
-        return Ok(Duration::from_secs(mins * 60));
+        let secs = mins.checked_mul(60).ok_or_else(|| {
+            format!("invalid duration {s:?}: value overflows when converted to seconds")
+        })?;
+        return Ok(Duration::from_secs(secs));
     }
     Err(format!(
         "invalid duration {s:?}: expected a suffix of 's' (seconds) or 'm' (minutes)"
@@ -150,16 +153,24 @@ pub fn load_heartbeats(dir: &Path) -> (Vec<Heartbeat>, Vec<HeartbeatError>) {
         }
     };
 
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            matches!(
-                p.extension().and_then(|x| x.to_str()),
-                Some("yaml") | Some("yml")
-            )
-        })
-        .collect();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(e) => {
+                let p = e.path();
+                if matches!(
+                    p.extension().and_then(|x| x.to_str()),
+                    Some("yaml") | Some("yml")
+                ) {
+                    paths.push(p);
+                }
+            }
+            Err(e) => errs.push(HeartbeatError {
+                file: dir.to_owned(),
+                reason: format!("cannot enumerate directory entry: {e}"),
+            }),
+        }
+    }
     paths.sort();
 
     for path in paths {
@@ -239,6 +250,7 @@ detail: |
         let yaml = "label: X\ncheck: true\n";
         let err = parse(yaml).unwrap_err();
         assert!(err.reason.contains("timeout"), "{}", err.reason);
+        assert_eq!(err.file, path());
     }
 
     #[test]
@@ -246,6 +258,7 @@ detail: |
         let yaml = "label: X\ntimeout: 10s\n";
         let err = parse(yaml).unwrap_err();
         assert!(err.reason.contains("check"), "{}", err.reason);
+        assert_eq!(err.file, path());
     }
 
     #[test]
@@ -277,6 +290,18 @@ detail: |
     }
 
     #[test]
+    fn it_rejects_an_empty_or_whitespace_only_duration() {
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("   ").is_err());
+    }
+
+    #[test]
+    fn it_rejects_a_duration_that_overflows_on_conversion_to_seconds() {
+        // 307_445_734_561_825_861 * 60 overflows u64; must error, not panic.
+        assert!(parse_duration("307445734561825861m").is_err());
+    }
+
+    #[test]
     fn it_names_the_file_in_every_error() {
         let p = Path::new("some/dir/mine.yaml");
         let err = parse_heartbeat("not: yaml: here: [", p).unwrap_err();
@@ -289,12 +314,10 @@ detail: |
 label: Test
 timeout: 5m
 check: |
-  pgrep -f rustc >/dev/null
-  echo done
+  pgrep -f 'rustc|cargo' >/dev/null
 ";
         let hb = parse(yaml).unwrap();
-        assert!(hb.check.contains("pgrep -f rustc"));
-        assert!(hb.check.contains("echo done"));
+        assert_eq!(hb.check, "pgrep -f 'rustc|cargo' >/dev/null\n");
     }
 
     #[test]
@@ -310,5 +333,70 @@ detail: |
         let disp = hb.to_string();
         assert!(disp.starts_with("Building"), "{disp}");
         assert!(disp.contains("echo 42 units"), "{disp}");
+    }
+
+    // ── load_heartbeats tests ─────────────────────────────────────────────────
+
+    /// RAII temp directory backed by std only (no external dep).
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let p =
+                std::env::temp_dir().join(format!("katsuobushi-hb-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn it_loads_valid_files_and_collects_errors_for_invalid_ones() {
+        let dir = TempDir::new("partial");
+        std::fs::write(
+            dir.path().join("good.yaml"),
+            "label: Running\ntimeout: 10s\ncheck: true\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("bad.yaml"), "label: [\nnot closed").unwrap();
+
+        let (heartbeats, errors) = load_heartbeats(dir.path());
+        assert_eq!(heartbeats.len(), 1, "expected one valid heartbeat");
+        assert_eq!(errors.len(), 1, "expected one error for the bad file");
+        assert_eq!(heartbeats[0].label, "Running");
+        assert!(errors[0].file.ends_with("bad.yaml"), "{:?}", errors[0].file);
+    }
+
+    #[test]
+    fn it_returns_an_error_when_the_directory_does_not_exist() {
+        let (heartbeats, errors) = load_heartbeats(Path::new("/nonexistent/path/for/test"));
+        assert!(heartbeats.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].reason.contains("cannot read directory"),
+            "{}",
+            errors[0].reason
+        );
+    }
+
+    #[test]
+    fn it_ignores_non_yaml_files_in_the_heartbeat_directory() {
+        let dir = TempDir::new("filter");
+        std::fs::write(dir.path().join("config.json"), r#"{"key": "val"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("hb.yaml"),
+            "label: OK\ntimeout: 5s\ncheck: true\n",
+        )
+        .unwrap();
+
+        let (heartbeats, errors) = load_heartbeats(dir.path());
+        assert_eq!(heartbeats.len(), 1);
+        assert!(errors.is_empty());
     }
 }
