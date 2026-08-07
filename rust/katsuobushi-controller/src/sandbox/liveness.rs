@@ -129,34 +129,31 @@ pub const SUPPORTED_TURN_STATE_VERSION: u32 = 1;
 
 /// The lifecycle phase persisted to `turn-state.json`, mirroring the
 /// guest's authoritative state machine: `in-flight` on inject, `ended-ok` on a
-/// terminal report, `ended-unreported` when the grace window closes with no
-/// terminal report (the verdict), `idle` between turns.
+/// terminal report, `idle` between turns or when the grace window closes without
+/// a terminal report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Phase {
     Idle,
     InFlight,
     EndedOk,
-    EndedUnreported,
 }
 
 impl Phase {
     /// The wire/render token for this phase (`status`'s liveness line shows it
-    /// verbatim, so it doubles as the operator-facing surfacing of 's
-    /// "stopped without reporting").
+    /// verbatim).
     pub fn label(self) -> &'static str {
         match self {
             Phase::Idle => "idle",
             Phase::InFlight => "in-flight",
             Phase::EndedOk => "ended-ok",
-            Phase::EndedUnreported => "ended-unreported",
         }
     }
 
-    /// Whether the turn has finished (clean or unreported) — its age is measured
+    /// Whether the turn completed with a terminal report — its age is measured
     /// from `endedAt`.
     pub fn is_ended(self) -> bool {
-        matches!(self, Phase::EndedOk | Phase::EndedUnreported)
+        matches!(self, Phase::EndedOk)
     }
 
     /// Whether a turn is still in flight — its age is measured from
@@ -601,14 +598,14 @@ mod tests {
     }
 
     #[test]
-    fn it_reads_the_ended_unreported_phase() {
+    fn it_reads_the_ended_ok_phase() {
         let mut host = FakeHost::new();
         host.push_read(Ok(turn_state_bytes(
-            "ended-unreported",
+            "ended-ok",
             r#""acceptedAt":"2026-06-28T11:50:00Z","endedAt":"2026-06-28T11:55:00Z","#,
         )));
         let ts = TurnState::read(&host, &turn_state_path()).expect("reads");
-        assert_eq!(ts.phase, Phase::EndedUnreported);
+        assert_eq!(ts.phase, Phase::EndedOk);
         assert_eq!(ts.ended_at.as_deref(), Some("2026-06-28T11:55:00Z"));
     }
 

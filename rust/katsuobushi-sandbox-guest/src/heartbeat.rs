@@ -326,6 +326,55 @@ pub fn apply_check(
     }
 }
 
+// ── Work-state combiner ───────────────────────────────────────────────────────
+
+/// The work state derived by combining all heartbeat statuses with the turn's
+/// terminal-report flag.
+///
+/// Precedence (high → low):
+/// - `Finished` — the agent ran a terminal report; outranks every beat observation.
+/// - `Active` — one or more heartbeats are beating; `is_late` is raised when any
+///   beating heartbeat has exceeded its declared timeout.
+/// - `Idle` — nothing beats and no terminal report was filed.
+///
+/// `late` is not a separate state; it is a flag on `Active`. A heartbeat past
+/// its timeout is by definition still beating; one that stops is absent, not late.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkState {
+    /// The agent filed a terminal report (`done` / `blocked`) for this turn.
+    Finished,
+    /// At least one heartbeat is beating.
+    Active {
+        /// `true` when any of the currently-beating heartbeats has exceeded its
+        /// own declared timeout (duration ≥ timeout).
+        is_late: bool,
+    },
+    /// No heartbeat beats and no terminal report was filed.
+    Idle,
+}
+
+/// Combine a slice of [`BeatStatus`] values into one [`WorkState`].
+///
+/// `finished` is `true` when the current turn has received a terminal report
+/// (`done` / `blocked`). `beats` holds the most-recent status from every active
+/// heartbeat (file heartbeats and the turn heartbeat).
+///
+/// The rule is a logical OR over the beat set, read in precedence order:
+/// `finished` outranks every beat observation; any beating entry wins over all
+/// misses; a late entry among beating ones raises the flag.
+pub fn combine_work_state(finished: bool, beats: &[BeatStatus]) -> WorkState {
+    if finished {
+        return WorkState::Finished;
+    }
+    let any_beating = beats.iter().any(|b| b.beating);
+    if any_beating {
+        let is_late = beats.iter().any(|b| b.beating && b.is_late);
+        WorkState::Active { is_late }
+    } else {
+        WorkState::Idle
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -591,6 +640,105 @@ mod turn_beat_tests {
         // A new turn arms fresh; duration starts at zero again.
         let status = beat.arm(T + 200);
         assert_eq!(status.duration_secs, 0, "rearm resets the turn clock");
+    }
+}
+
+// ── Work-state combiner tests ─────────────────────────────────────────────────
+
+#[cfg(test)]
+mod work_state_tests {
+    use super::*;
+
+    fn beating(is_late: bool) -> BeatStatus {
+        BeatStatus {
+            beating: true,
+            duration_secs: if is_late { 3_600 } else { 10 },
+            is_late,
+            narration: None,
+        }
+    }
+
+    fn miss() -> BeatStatus {
+        BeatStatus {
+            beating: false,
+            duration_secs: 0,
+            is_late: false,
+            narration: None,
+        }
+    }
+
+    #[test]
+    fn it_prefers_finished_over_a_beating_heartbeat() {
+        assert_eq!(
+            combine_work_state(true, &[beating(false)]),
+            WorkState::Finished
+        );
+    }
+
+    #[test]
+    fn it_prefers_finished_over_a_late_beating_heartbeat() {
+        assert_eq!(
+            combine_work_state(true, &[beating(true)]),
+            WorkState::Finished
+        );
+    }
+
+    #[test]
+    fn it_prefers_finished_with_no_beats_at_all() {
+        assert_eq!(combine_work_state(true, &[]), WorkState::Finished);
+    }
+
+    #[test]
+    fn it_is_active_when_a_heartbeat_beats() {
+        assert_eq!(
+            combine_work_state(false, &[beating(false)]),
+            WorkState::Active { is_late: false }
+        );
+    }
+
+    #[test]
+    fn it_flags_late_without_leaving_active() {
+        // `late` is a flag on `Active`, not a separate fourth state.
+        let state = combine_work_state(false, &[beating(true)]);
+        assert!(
+            matches!(state, WorkState::Active { is_late: true }),
+            "expected Active {{ is_late: true }}, got {state:?}"
+        );
+    }
+
+    #[test]
+    fn it_flags_late_when_any_beating_heartbeat_exceeds_its_timeout() {
+        // One late + one healthy = active, late flag raised.
+        let state = combine_work_state(false, &[beating(false), beating(true)]);
+        assert_eq!(state, WorkState::Active { is_late: true });
+    }
+
+    #[test]
+    fn it_does_not_raise_the_late_flag_for_a_healthy_beating_heartbeat() {
+        assert_eq!(
+            combine_work_state(false, &[beating(false)]),
+            WorkState::Active { is_late: false }
+        );
+    }
+
+    #[test]
+    fn it_is_active_when_at_least_one_heartbeat_beats_among_misses() {
+        // OR semantics: one beating entry is enough.
+        let state = combine_work_state(false, &[miss(), beating(false), miss()]);
+        assert_eq!(state, WorkState::Active { is_late: false });
+    }
+
+    #[test]
+    fn it_falls_back_to_idle() {
+        assert_eq!(combine_work_state(false, &[]), WorkState::Idle);
+    }
+
+    #[test]
+    fn it_falls_back_to_idle_when_all_heartbeats_miss() {
+        assert_eq!(
+            combine_work_state(false, &[miss(), miss()]),
+            WorkState::Idle
+        );
     }
 }
 

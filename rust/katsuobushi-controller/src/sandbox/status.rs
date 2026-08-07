@@ -184,7 +184,7 @@ fn age_ago(now: Option<i64>, then: Option<&str>) -> Option<String> {
 ///   driver dies, so liveness derives from cadence, not the flag.
 ///
 /// Examples:
-/// - `turn 3 ended-unreported 14m ago · no active stream` (unattended verdict)
+/// - `turn 3 ended-ok 3m ago · no active stream` (clean turn)
 /// - `turn 3 in-flight · last activity 9m ago · heartbeat 4s ago` (attached)
 fn render_liveness(
     ts: Option<&TurnState>,
@@ -1569,16 +1569,18 @@ mod tests {
     }
 
     #[test]
-    fn it_surfaces_an_unattended_ended_unreported_turn() {
-        // The unattended verdict, persisted: ended 14m ago with nobody driving.
+    fn it_surfaces_an_idle_turn_that_ended_without_a_report() {
+        // Grace expired with no terminal report: phase is idle. The turn id is
+        // still present in the record (set when the turn started), but idle
+        // carries no age — it is the floor, not a verdict.
         let state = turn_state(
-            Phase::EndedUnreported,
+            Phase::Idle,
             Some(3),
             Some("2026-06-28T11:46:00Z"),
             "2026-06-28T11:46:00Z",
         );
         let line = render_liveness(Some(&state), None, now(), true, 30).expect("a line");
-        assert_eq!(line, "turn 3 ended-unreported 14m ago · no active stream");
+        assert_eq!(line, "turn 3 idle · no active stream");
     }
 
     #[test]
@@ -1691,14 +1693,15 @@ mod tests {
     #[test]
     fn it_renders_phases_without_ages_when_the_clock_is_unavailable() {
         // No `now` (clock seam failed) ⇒ the phase still surfaces, just no ages.
+        // Idle carries no age in any case (it is the floor, not a verdict).
         let state = turn_state(
-            Phase::EndedUnreported,
+            Phase::Idle,
             Some(3),
             Some("2026-06-28T11:46:00Z"),
             "2026-06-28T11:46:00Z",
         );
         let line = render_liveness(Some(&state), None, None, true, 30).expect("a line");
-        assert_eq!(line, "turn 3 ended-unreported · no active stream");
+        assert_eq!(line, "turn 3 idle · no active stream");
     }
 
     #[test]
@@ -1708,15 +1711,15 @@ mod tests {
             render_liveness_brief(Some(&in_flight), now()).unwrap(),
             "in-flight 9m"
         );
-        let unreported = turn_state(
-            Phase::EndedUnreported,
+        let ended_ok = turn_state(
+            Phase::EndedOk,
             Some(3),
             Some("2026-06-28T11:46:00Z"),
             "2026-06-28T11:46:00Z",
         );
         assert_eq!(
-            render_liveness_brief(Some(&unreported), now()).unwrap(),
-            "ended-unreported 14m"
+            render_liveness_brief(Some(&ended_ok), now()).unwrap(),
+            "ended-ok 14m"
         );
         // Idle has no age edge → just the phase token.
         let idle = turn_state(Phase::Idle, None, None, "");
@@ -1727,25 +1730,22 @@ mod tests {
     fn it_renders_the_liveness_brief_as_a_list_column() {
         let r = Renderer::new(false, false);
         let mut v = view("inst-a", State::Running, Some(Mode::Agent), true);
-        v.liveness_brief = Some("ended-unreported 14m".to_string());
+        v.liveness_brief = Some("ended-ok 3m".to_string());
         let table = render_list(&[v], &r);
         assert!(table.contains("LIVENESS"), "header present: {table}");
-        assert!(
-            table.contains("ended-unreported 14m"),
-            "cell present: {table}"
-        );
+        assert!(table.contains("ended-ok 3m"), "cell present: {table}");
     }
 
     #[test]
     fn it_renders_the_liveness_line_in_the_detail_view() {
         let r = Renderer::new(false, false);
         let v = InstanceView {
-            liveness: Some("turn 3 ended-unreported 14m ago · no active stream".to_string()),
+            liveness: Some("turn 3 ended-ok 3m ago · no active stream".to_string()),
             ..view("inst-x", State::Running, Some(Mode::Agent), true)
         };
         let text = render_detail(&v, None, "/state/inst-x/console.log", &r);
         assert!(
-            text.contains("liveness:   turn 3 ended-unreported 14m ago · no active stream"),
+            text.contains("liveness:   turn 3 ended-ok 3m ago · no active stream"),
             "{text}"
         );
     }
