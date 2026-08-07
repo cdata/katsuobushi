@@ -38,8 +38,8 @@
 //! A turn that ends without a terminal report is not resolved immediately.
 //! After a short grace (a late report may still land), the server re-prompts the
 //! agent — "you stopped without reporting; report your real state" — up to
-//! `max_nudges` times, `nudge_interval` apart, before finally resolving it as
-//! `ended-unreported`. This recovers the two common ways a turn ends silently:
+//! `max_nudges` times, `nudge_interval` apart, before finally returning the phase
+//! to `idle`. This recovers the two common ways a turn ends silently:
 //! the agent forgot to report, or it backgrounded work and yielded the turn.
 //! The nudge decision lives in the pure core; only the injection + timer are
 //! async ([`spawn_grace`]).
@@ -85,16 +85,15 @@ contract); this channel is one-way and expects no tool reply.";
 
 // ── Turn-state machine ────────────────────────────────────────────────
 
-/// The phase persisted to `turn-state.json`. Mirrors the
-/// transitions: `in-flight` on inject, `ended-ok` on a terminal report,
-/// `ended-unreported` when the grace window closes with no terminal report.
+/// The phase persisted to `turn-state.json`. Mirrors the transitions:
+/// `in-flight` on inject, `ended-ok` on a terminal report, `idle` when the
+/// grace window closes without a terminal report (or between turns).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum Phase {
     Idle,
     InFlight,
     EndedOk,
-    EndedUnreported,
 }
 
 /// The on-disk turn-state record. Guest-authored, authoritative for
@@ -137,7 +136,7 @@ struct Turn {
     ended: bool,
     /// How many auto-nudges have been sent for this turn since it first ended
     /// without a terminal report. Bounded by [`Session::max_nudges`]; once it is
-    /// reached the turn resolves as `ended-unreported`.
+    /// reached the turn clears and the phase returns to `idle`.
     nudges: u32,
     /// How many times this turn has been *re*-injected after a successful first
     /// injection that the harness never began. Bounded by
@@ -182,7 +181,7 @@ struct Session {
 
 /// An ordered event the state machine consumes. The grace window is modeled as
 /// an explicit [`GraceExpired`] event so the whole machine — including the
-/// `ended-unreported` resolution — is a pure function testable without timers.
+/// unreported-turn resolution — is a pure function testable without timers.
 ///
 /// [`GraceExpired`]: Event::GraceExpired
 #[derive(Debug, Clone)]
@@ -476,9 +475,11 @@ impl Session {
                         out.schedule_grace = Some((turn_id, GraceKind::Nudge));
                         out.persist = Some(PersistMode::Force);
                     } else {
-                        // Nudges exhausted: resolve as ended-unreported, the same
-                        // verdict the single-grace path produced before nudging.
-                        self.state.phase = Phase::EndedUnreported;
+                        // Nudges exhausted: resolve as idle — the turn ended
+                        // without a terminal report. The work state (active vs.
+                        // idle) is now derived from the heartbeat set rather than
+                        // from a separate phase for unreported turns.
+                        self.state.phase = Phase::Idle;
                         if self.state.ended_at.is_none() {
                             self.state.ended_at = Some(now.to_string());
                         }
@@ -562,8 +563,8 @@ async fn execute_outcome(ctl: &Arc<Control>, outcome: Outcome) {
 /// The grace-timer loop for one turn. Sleeps the delay for `kind`, drives the
 /// [`Event::GraceExpired`] check, and applies the result. A nudge re-arms the
 /// loop *inline* (the machine returns another `schedule_grace`), so the whole
-/// bounded nudge sequence — up to `max_nudges` re-prompts, then the
-/// `ended-unreported` resolution — runs in this one task without recursion.
+/// bounded nudge sequence — up to `max_nudges` re-prompts, then the idle
+/// resolution — runs in this one task without recursion.
 /// A terminal report arriving mid-loop clears the turn, so the next
 /// `GraceExpired` is a no-op and the loop exits.
 fn spawn_grace(ctl: Arc<Control>, turn_id: u64, mut kind: GraceKind) {
@@ -1553,9 +1554,10 @@ mod tests {
     }
 
     #[test]
-    fn it_resolves_ended_unreported_when_the_grace_window_closes() {
+    fn it_resolves_to_idle_when_the_grace_window_closes_without_a_report() {
         // Default session ⇒ max_nudges 0 ⇒ nudging disabled: a grace expiry
-        // resolves immediately, the pre-nudge behavior.
+        // resolves immediately. The turn is cleared and phase returns to idle —
+        // the work state (active vs. idle) is now derived from the heartbeat set.
         let mut s = Session::default();
         step(&mut s, Event::Prompt { turn_id: 9 });
         step(&mut s, Event::Hook(HookEvent::TurnEnded));
@@ -1567,7 +1569,7 @@ mod tests {
                 reported: false
             })
         ));
-        assert_eq!(s.state.phase, Phase::EndedUnreported);
+        assert_eq!(s.state.phase, Phase::Idle);
         assert!(s.turn.is_none());
     }
 
@@ -1580,7 +1582,7 @@ mod tests {
     }
 
     #[test]
-    fn it_nudges_up_to_the_cap_then_resolves_ended_unreported() {
+    fn it_nudges_up_to_the_cap_then_resolves_to_idle() {
         let mut s = nudging_session(2);
         step(&mut s, Event::Prompt { turn_id: 9 });
         // First Stop arms the initial grace; no nudge yet.
@@ -1603,18 +1605,19 @@ mod tests {
         assert_eq!(n2.inject_nudge, Some((9, 2)));
         assert_eq!(n2.schedule_grace, Some((9, GraceKind::Nudge)));
 
-        // Grace #3 → cap reached: resolve ended-unreported, no further nudge.
-        let done = step(&mut s, Event::GraceExpired { turn_id: 9 });
-        assert!(done.inject_nudge.is_none());
-        assert!(done.schedule_grace.is_none());
+        // Grace #3 → cap reached: resolve to idle (no terminal report filed),
+        // no further nudge. Work state is now derived from heartbeats, not phase.
+        let resolved = step(&mut s, Event::GraceExpired { turn_id: 9 });
+        assert!(resolved.inject_nudge.is_none());
+        assert!(resolved.schedule_grace.is_none());
         assert!(matches!(
-            done.messages.first(),
+            resolved.messages.first(),
             Some(GuestMessage::TurnCompleted {
                 turn_id: 9,
                 reported: false
             })
         ));
-        assert_eq!(s.state.phase, Phase::EndedUnreported);
+        assert_eq!(s.state.phase, Phase::Idle);
         assert!(s.turn.is_none());
     }
 
@@ -1774,7 +1777,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn it_persists_ended_unreported_after_grace_with_no_host_attached() {
+    async fn it_persists_idle_after_grace_expires_with_no_terminal_report() {
         let dir = unique_tmp();
         let ctl = test_control(dir.clone(), Duration::from_millis(30));
 
@@ -1782,15 +1785,15 @@ mod tests {
         execute_outcome(&ctl, out).await;
         assert_eq!(read_state(&dir).phase, Phase::InFlight);
 
-        // Stop with no terminal report and no host writer installed (case).
+        // Stop with no terminal report and no host writer installed.
         let out = drive_event(&ctl, Event::Hook(HookEvent::TurnEnded)).await;
         execute_outcome(&ctl, out).await;
 
-        // The grace-window task is server-side; it runs and persists even though
-        // nothing is delivered live.
+        // The grace-window task runs and persists idle — the turn is cleared and
+        // phase returns to idle; the work state is derived from the heartbeat set.
         tokio::time::sleep(Duration::from_millis(150)).await;
         let state = read_state(&dir);
-        assert_eq!(state.phase, Phase::EndedUnreported);
+        assert_eq!(state.phase, Phase::Idle);
         assert_eq!(state.turn_id, Some(7));
         assert!(state.ended_at.is_some());
 

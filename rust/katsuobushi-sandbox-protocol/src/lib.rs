@@ -147,8 +147,8 @@ pub const HEARTBEAT_SECS_DEFAULT: u64 = 10;
 pub const STOP_GRACE_MS_DEFAULT: u64 = 1500;
 
 /// Fallback cap on how many times the guest auto-nudges (re-prompts) an agent
-/// that ended a turn without a terminal report before resolving it as
-/// `ended-unreported`, when `KATSU_MAX_NUDGES` is unset. Authoritative knob is
+/// that ended a turn without a terminal report before returning the phase to
+/// `idle`, when `KATSU_MAX_NUDGES` is unset. Authoritative knob is
 /// Nix-driven. Zero disables nudging (resolve immediately, the pre-nudge
 /// behavior).
 pub const MAX_NUDGES_DEFAULT: u32 = 3;
