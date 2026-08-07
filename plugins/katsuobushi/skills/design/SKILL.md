@@ -49,7 +49,33 @@ read-through.
 7. **Read the draft with no context.** Read it as a person who was not in the
    interview. Each place you must remember an unwritten fact is a gap. Close
    each gap with an example, pseudocode, a diagram, or a link.
-8. **Write the file** to `project/design/` at the next free number.
+8. **Search the draft for board references.** Remove every card id, lane name,
+   and card title. See "A PDD never cites the board".
+9. **Write the file** to `project/design/` at the next free number.
+
+## A PDD never cites the board
+
+A PDD is durable. The board is not. A card moves, is renamed, is cancelled, or
+is archived, so a PDD that cites one decays into a dead reference. A reader who
+finds the PDD years later must not need the board to understand it.
+
+Never write a card id (`5d7555`), a lane name, a card title, or a count of open
+work into a PDD. This holds even when a card started the design.
+
+Write the fact, not the card:
+
+- Wrong — "Card 5d7555 proposed foreground blocking. That wording is
+  superseded."
+- Right — "A rewording toward foreground blocking does not work. One Bash call
+  caps at 600 seconds."
+
+The rule bans the **reference**, not the **vocabulary**. "One card is one unit
+of work" is the domain language of the board model, and a PDD uses it freely.
+"Card 5d7555" is a pointer into mutable state, and a PDD never uses that.
+
+The same rule covers every other mutable pointer: a branch name, a VM instance
+name, a run of a swarm, or an in-flight pull request. Cite source files, the
+accepted PDDs, and published documents. Those hold still.
 
 ## Voice has one priority
 
