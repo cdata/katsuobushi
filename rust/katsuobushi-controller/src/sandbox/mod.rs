@@ -14,6 +14,7 @@ pub mod host;
 pub mod instance;
 pub mod liveness;
 mod prompt;
+mod prune;
 pub mod qmp;
 pub mod report_log;
 pub mod resolve;
@@ -78,6 +79,7 @@ pub fn dispatch(args: SandboxArgs, global: Global) -> Result<()> {
         SandboxCommand::Screenshot { instance, path } => {
             screenshot::run(&config, &instance, path, global)
         }
+        SandboxCommand::Prune { board_dir } => prune::run(&config, &board_dir, global),
     }
 }
 
