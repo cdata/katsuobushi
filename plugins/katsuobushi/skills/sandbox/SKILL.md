@@ -524,7 +524,7 @@ label: Compiling
 timeout: 45m
 interval: 10s
 check: |
-  prev=/run/myproject/hb-build.prev
+  prev=/run/katsuobushi/control/hb-build.prev
   cur=$(stat -c %Y target/debug/my-binary 2>/dev/null) || exit 1
   if [ -f "$prev" ]; then
     old=$(cat "$prev")
