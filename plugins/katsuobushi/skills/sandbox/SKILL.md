@@ -141,15 +141,6 @@ sandbox = katsuobushi.lib.sandbox {
   scratchVolumeSize = 32768;           # workspace clone + cargo/rustup/XDG caches
   dbVolumeSize = 4096;                 # guest Nix database
 
-  # How long a turn may go without a *report* before the host prints its
-  # first "no reports" notice (default 300; a stronger one follows at 3x that).
-  # Only reports reset this clock, so it must clear the project's real
-  # first-build time. Before raising it far, ask why the guest is compiling that
-  # long at all: a project whose menu commands are Nix-backed hands its VM
-  # prebuilt artifacts, and a large value here is often a warm-start problem
-  # wearing a timeout as a disguise.
-  progressStallSecs = 1500;
-
   # Escape hatch: extra NixOS modules merged into the guest
   guestModules = [ ./guest-extra.nix ];
 };
@@ -410,7 +401,7 @@ still land on accumulated work and need a follow-up sandbox, exactly as above.)
 ## Observing & lifecycle
 
 ```sh
-sandbox status                  # list instances; numbered, running/stopped, graphics rung, branch
+sandbox status                  # list instances: #, state, mode, persist, graphics rung, liveness, work state
 sandbox status <name|#>         # detail, incl. the ssh command to watch live
 sandbox attach <name|#>         # ssh in + attach the agent's tmux session live
 sandbox screenshot <name|#> [path] # PNG of the headless-sway output (graphics opt-in; "-" = stdout)
@@ -450,6 +441,17 @@ database — every host-built path on the shared store is invalid inside the VM,
 so the agent will fail to run gates. Relaunch rather than burning a session on
 it.
 
+**Reading the work state.** The `WORK` column in `sandbox status` (and
+`work state:` in the detail view) tells you what the agent is doing without
+attaching:
+
+| Reading         | Meaning                                                       | What to do                                                                                              |
+| --------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `Active`        | At least one heartbeat is beating; the agent is working.      | Wait.                                                                                                   |
+| `Active (Late)` | Beating, but a heartbeat has exceeded its declared `timeout`. | Look at the heartbeat's label; decide whether to wait or attach and inspect.                            |
+| `Finished`      | The agent filed a terminal report (`done`/`blocked`).         | Collect the report from `sandbox status <name>` (`last report:`) or `reports.ndjson`.                   |
+| `Idle`          | No heartbeat beats and no terminal report was filed.          | The sandbox auto-nudges an idle agent. If `Idle` persists, attach and inspect, or stop and re-dispatch. |
+
 Unnamed instances are ephemeral (removed on stop). `--name` makes an instance
 persistent: it keeps its branch. A provided `--name` is suffixed with random
 entropy at launch (e.g. `--name build` → `build-a3f9c2d1`) so each launch is a
@@ -464,11 +466,58 @@ signed off — the instance is spent: remove it with
 `sandbox stop --remove <name>`. Don't leave accepted sandboxes lingering; the
 `sandbox/<name>` ref is the durable artifact, not the VM.
 
+## Authoring heartbeats
+
+Heartbeat files live at `.katsuobushi/heartbeats/` in the workspace repo —
+version-controlled and seeded to the VM through the ordinary git clone. Every
+heartbeat appears in the diff before dispatch; an agent can write the file, but
+it cannot do so quietly — a reviewer sees it.
+
+Each file is YAML with five fields:
+
+| Field      | Required | Description                                                             |
+| ---------- | -------- | ----------------------------------------------------------------------- |
+| `label`    | yes      | Short phrase shown in the `WORK` column (`Compiling`, `Running tests`)  |
+| `timeout`  | yes      | How long an unbroken beat run may last before `Active (Late)` is raised |
+| `check`    | yes      | Shell body — exits 0 to beat, anything else to miss                     |
+| `interval` | no       | Polling cadence; defaults to `10s` when absent                          |
+| `detail`   | no       | Optional shell body; first stdout line annotates the status line        |
+
+Duration values are `<n>s` (seconds) or `<n>m` (minutes) — no other units.
+
+Rules to write against:
+
+- **The check runs as the agent user, with the workspace as its working
+  directory.**
+- **A check that outlives its interval is killed — and does not beat.** The
+  entire process group is killed (shell plus any spawned children), so a slow
+  pipeline leaves no orphans. Write checks that finish well inside the interval.
+- **Duration counts from the first beat of an _unbroken_ run.** A single miss
+  resets the clock. Write a check that does not flicker — a momentary non-zero
+  exit during what should be continuous activity resets the duration and makes
+  `Active (Late)` fire prematurely.
+- **A check on a process group survives a single process exit; a check on one
+  process identifier does not.** Use `pgrep -f` or similar for work that may
+  span multiple processes or restart a child.
+
+A minimal example:
+
+```yaml
+label: Compiling
+timeout: 45m
+interval: 10s
+check: |
+  pgrep -f 'rustc|cargo' >/dev/null
+```
+
 ## Notes
 
 - One serial session per VM: reports answer prompts in order. `done`/`blocked`
   are the signals to act on; the pushed branch is the deliverable.
 - Agent mode relies on Claude Code's experimental "channels" feature; if a
-  launch never arms the channel, check `console.log` and `sandbox status`
-  (before boot, `provision.log` — see "Which log, and when" above).
+  launch never arms the channel, check `provision.log` (during provisioning) or
+  `console.log` (after boot) — see "Which log, and when" above. For a running
+  agent that looks stuck, check the `WORK` column of `sandbox status` rather
+  than the log; `console.log` stops at the login prompt and says nothing about
+  agent runtime.
 - Treat the OAuth token as a live credential; it stays on subscription billing.
