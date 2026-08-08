@@ -310,7 +310,8 @@ targeted fixes and you want the same reader to re-check them. Replace the
 reviewer when it should not be reused — for example when it has already rejected
 an earlier attempt and you want an uncontaminated read of a substantially
 revised implementation. In that case, stop and remove the existing instance,
-then start a fresh one with the **same name**:
+then start a fresh one with the **same name**. Accept the cold rebuild for the
+new reviewer — the warm caches of the removed instance are gone:
 
 ```sh
 sandbox stop --remove review-<card-id>   # discard the opinionated reviewer
@@ -339,6 +340,9 @@ Remove each VM only when its work is truly spent:
 - **implementor `card-<id>`** — when the card reaches `ready` (review passed).
 - **reviewer `review-<card-id>`** — same: it may be asked to re-review any
   number of times before then.
+- **reviewer `review-<card-id>`, deliberately replaced** — when replacing it to
+  get an uncontaminated read of a substantially revised implementation; see
+  "When to replace the reviewer instead of pausing".
 - **either one, early** — if the card is bounced to `todo`, cancelled, or the
   instance is stalled/unreported. A stalled VM is not warm, it's stuck; remove
   it and dispatch fresh.
@@ -429,6 +433,8 @@ number of Available cards:
   work is accepted — but at `needs-review` it isn't. Removing it throws away the
   warm build caches, so every round of reviewer feedback pays a full cold
   compile before it can change a line. Pause instead; see "Keep the pair warm".
+  Exception: deliberate reviewer replacement — see "When to replace the reviewer
+  instead of pausing".
 - **Trust the branch, not "the VM ran."** A dispatched agent can end its turn
   without committing or pushing — `sandbox status` shows `Idle` in the `WORK`
   column (no heartbeat beating, no terminal report filed), and `sandbox fetch`
