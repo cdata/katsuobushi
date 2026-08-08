@@ -1342,8 +1342,13 @@ async fn main() -> anyhow::Result<()> {
     let workspace = std::env::current_dir()
         .expect("katsuobushi-heartbeat: cannot determine working directory; check that the process has a valid cwd");
     let mut hb_dirs: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(shipped) = std::env::var("KATSU_SHIPPED_HEARTBEATS") {
-        hb_dirs.push(std::path::PathBuf::from(shipped));
+    match std::env::var("KATSU_SHIPPED_HEARTBEATS") {
+        Ok(shipped) => hb_dirs.push(std::path::PathBuf::from(shipped)),
+        Err(_) => eprintln!(
+            "katsuobushi-heartbeat: KATSU_SHIPPED_HEARTBEATS is not set; \
+             shipped heartbeats will not run (set this variable to point at \
+             the shipped heartbeat directory)"
+        ),
     }
     let project_dir = workspace.join(".katsuobushi/heartbeats");
     if project_dir.is_dir() {
