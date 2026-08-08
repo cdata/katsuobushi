@@ -221,6 +221,41 @@ fn kill_pgroup(pgid: i32) {
     unsafe { libc::kill(-pgid, libc::SIGKILL) };
 }
 
+/// RAII guard that kills the entire process group when dropped while armed.
+///
+/// Created right after `child.id()` is read and held across every await point
+/// in `spawn_check` / `spawn_detail`. If the enclosing future is aborted the
+/// guard's `Drop` fires and sends SIGKILL to the whole group, eliminating
+/// grandchildren that `kill_on_drop` (which targets only the shell pid) would
+/// leave as orphans.
+///
+/// Must be disarmed on every normal exit path (success, wait error, and the
+/// explicit timeout branch) before or immediately after the child is reaped,
+/// because once the kernel recycles the pgid a stray kill could hit an
+/// unrelated process group.
+struct PgroupGuard {
+    pgid: i32,
+    armed: bool,
+}
+
+impl PgroupGuard {
+    fn new(pgid: i32) -> Self {
+        Self { pgid, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PgroupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            kill_pgroup(self.pgid);
+        }
+    }
+}
+
 /// Run `check` as `sh -c <check>` in `cwd`, bounded by `budget`. Returns
 /// `true` iff the process exits zero within the budget. A process that
 /// outlives the budget has its entire process group killed; `false` is returned.
@@ -248,14 +283,21 @@ async fn spawn_check(check: &str, cwd: &Path, budget: Duration) -> bool {
         None => return matches!(child.wait().await, Ok(s) if s.success()),
     };
 
+    let mut guard = PgroupGuard::new(pgid);
+
     match timeout(budget, child.wait()).await {
-        Ok(Ok(status)) => status.success(),
+        Ok(Ok(status)) => {
+            guard.disarm();
+            status.success()
+        }
         Ok(Err(e)) => {
+            guard.disarm();
             eprintln!("katsuobushi-heartbeat: check wait failed: {e}");
             false
         }
         // Check outlived its interval: kill the whole process group and reap.
         Err(_elapsed) => {
+            guard.disarm();
             kill_pgroup(pgid);
             let _ = child.wait().await;
             false
@@ -291,8 +333,11 @@ async fn spawn_detail(body: &str, cwd: &Path, budget: Duration) -> Option<String
         buf
     });
 
+    let mut guard = PgroupGuard::new(pgid);
+
     match timeout(budget, child.wait()).await {
         Ok(Ok(status)) if status.success() => {
+            guard.disarm();
             let output = drain.await.unwrap_or_default();
             let text = String::from_utf8_lossy(&output);
             text.lines()
@@ -302,11 +347,13 @@ async fn spawn_detail(body: &str, cwd: &Path, budget: Duration) -> Option<String
                 .map(str::to_string)
         }
         Ok(_) => {
+            guard.disarm();
             drain.abort();
             None
         }
         // Detail body outlived its budget: kill the whole process group and reap.
         Err(_elapsed) => {
+            guard.disarm();
             kill_pgroup(pgid);
             let _ = child.wait().await;
             drain.abort();
@@ -431,38 +478,47 @@ mod tests {
         assert!(result.is_none(), "a failing detail body must yield None");
     }
 
-    /// A task aborted while its check is sleeping must leave no orphaned
-    /// process — `kill_on_drop(true)` ensures the `Child` is killed when the
-    /// future is dropped rather than reparented to PID 1.
+    /// A task aborted while its check is running must leave no orphaned
+    /// grandchild. `kill_on_drop(true)` only kills the shell; the RAII
+    /// `PgroupGuard` kills the entire process group, including grandchildren.
+    ///
+    /// Body uses `wait` (a shell builtin) so the shell does **not** exec into
+    /// the last command — confirming the recorded PID is a genuine grandchild
+    /// rather than the shell itself (which exec-into-last-command would make).
     #[tokio::test]
-    async fn it_kills_the_child_when_the_check_task_is_aborted() {
-        let dir = TempDir::new("abort-check");
-        let pid_file = dir.path().join("pid");
+    async fn it_kills_grandchildren_when_the_check_task_is_aborted() {
+        let dir = TempDir::new("abort-grandchild");
+        let pid_file = dir.path().join("grandchild_pid");
         let pid_path = pid_file.to_str().unwrap().to_owned();
         let cwd = dir.path().to_owned();
 
         let pid_path_task = pid_path.clone();
         let task = tokio::spawn(async move {
-            let check = format!("echo $$ > {pid_path_task}; sleep 60");
+            // `wait` is a shell builtin: the shell stays alive as a separate
+            // process so `sleep 60` is a genuine grandchild with its own PID.
+            let check = format!("sleep 60 & echo $! > {pid_path_task}; wait");
             spawn_check(&check, &cwd, Duration::from_secs(120)).await
         });
 
-        // Wait up to 1 s for the child to write its PID.
+        // Wait up to 1 s for the grandchild PID to appear.
         for _ in 0..100 {
             if pid_file.exists() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(pid_file.exists(), "child did not create pid file in time");
+        assert!(
+            pid_file.exists(),
+            "grandchild did not create pid file in time"
+        );
 
-        let pid: i32 = fs::read_to_string(&pid_file)
+        let grandchild_pid: i32 = fs::read_to_string(&pid_file)
             .unwrap()
             .trim()
             .parse()
             .unwrap();
 
-        // Abort the task; kill_on_drop(true) kills the Child on drop.
+        // Abort the task; PgroupGuard kills the entire process group on drop.
         task.abort();
         let _ = task.await;
 
@@ -470,10 +526,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // kill(pid, 0) returns 0 if the process still exists.
-        let still_alive = unsafe { libc::kill(pid, 0) == 0 };
+        let still_alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
         assert!(
             !still_alive,
-            "child process {pid} must be killed when its task is aborted"
+            "grandchild process {grandchild_pid} must be killed when its task is aborted"
         );
     }
 }
