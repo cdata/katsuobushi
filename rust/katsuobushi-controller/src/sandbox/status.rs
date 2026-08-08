@@ -20,7 +20,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::output::{render_table, CellStyle, Renderer, TableCell};
 use crate::sandbox::gfx::{self, Resolution};
@@ -96,6 +96,10 @@ struct InstanceView {
     /// — without it, losing the driving process's stdout lost the verdict.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_report: Option<report_log::Entry>,
+    /// The combined heartbeat work-state from `work-state.json`, formatted for
+    /// display. `None` when the guest has not yet written the record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    work_state: Option<String>,
 }
 
 impl InstanceView {
@@ -506,6 +510,11 @@ fn render_detail(v: &InstanceView, ssh: Option<&str>, console_log: &str, r: &Ren
     if let Some(liveness) = &v.liveness {
         lines.push(format!("liveness:   {liveness}"));
     }
+    // The combined heartbeat work-state, present once the guest's coordinator
+    // has written `work-state.json`.
+    if let Some(ws) = &v.work_state {
+        lines.push(format!("work state: {ws}"));
+    }
     // Whether the guest is running on the host's store DB or only its own — the
     // difference between an agent that can build and one that cannot.
     if let Some(store_db) = &v.store_db {
@@ -623,6 +632,7 @@ fn summarize(
         liveness,
         liveness_brief,
         phase,
+        work_state: read_work_state(host, &inst_dir.join("work-state.json")),
         store_db: store_db_label(host, &inst_dir.join("nixdb-status")),
         // Through the host seam, like every other read here — so a unit test
         // of `summarize` never touches the real filesystem.
@@ -681,6 +691,36 @@ fn store_db_label(host: &impl Host, p: &Path) -> Option<String> {
         }
         other => other.to_string(),
     })
+}
+
+/// Deserialization shape for `work-state.json`, written by the guest's
+/// work-state coordinator.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkStateRecord {
+    work_state: String,
+    is_late: bool,
+    #[serde(default)]
+    carrying_label: Option<String>,
+    #[serde(default)]
+    carrying_duration_secs: Option<u64>,
+}
+
+/// Read and format the work-state record for the detail view. Returns `None`
+/// when the file is missing, unreadable, or unparseable — all degrade silently.
+fn read_work_state(host: &impl Host, path: &Path) -> Option<String> {
+    let bytes = host.read(path).ok()?;
+    let record: WorkStateRecord = serde_json::from_slice(&bytes).ok()?;
+    let late = if record.is_late { ", late" } else { "" };
+    let detail = match (
+        record.carrying_label.as_deref(),
+        record.carrying_duration_secs,
+    ) {
+        (Some(l), Some(d)) => format!(" ({l}, {d}s)"),
+        (Some(l), None) => format!(" ({l})"),
+        _ => String::new(),
+    };
+    Some(format!("{}{late}{detail}", record.work_state))
 }
 
 /// Whether `refs/heads/sandbox/<name>` exists in the instance's bare mirror —
@@ -860,6 +900,7 @@ mod tests {
             phase: None,
             store_db: None,
             last_report: None,
+            work_state: None,
         }
     }
 
@@ -1747,6 +1788,106 @@ mod tests {
         assert!(
             text.contains("liveness:   turn 3 ended-ok 3m ago · no active stream"),
             "{text}"
+        );
+    }
+
+    // ---- work-state.json surfacing (AC3) ----
+
+    #[test]
+    fn it_surfaces_work_state_in_the_detail_view() {
+        // AC3: `sandbox status` surfaces the work state from `work-state.json`
+        // for an instance with no attached drive.
+        let r = Renderer::new(false, false);
+        let v = InstanceView {
+            work_state: Some("active (agent-work, 120s)".to_string()),
+            ..view("inst-a", State::Running, Some(Mode::Agent), true)
+        };
+        let text = render_detail(&v, None, "/state/inst-a/console.log", &r);
+        assert!(
+            text.contains("work state: active (agent-work, 120s)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn it_omits_work_state_when_the_record_is_absent() {
+        let r = Renderer::new(false, false);
+        let v = view("inst-a", State::Running, Some(Mode::Agent), true);
+        let text = render_detail(&v, None, "/state/inst-a/console.log", &r);
+        assert!(!text.contains("work state:"), "{text}");
+    }
+
+    #[test]
+    fn it_reads_work_state_from_work_state_json() {
+        // AC3: read_work_state deserializes `work-state.json` and formats it for
+        // the detail view, going through the host seam (no filesystem access).
+        let record = br#"{"workStateVersion":1,"workState":"active","isLate":false,"carryingLabel":"agent-work","carryingDurationSecs":42,"nudgeCount":0}"#;
+        let mut host = FakeHost::new();
+        host.push_read(Ok(record.to_vec()));
+        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"));
+        assert_eq!(ws.as_deref(), Some("active (agent-work, 42s)"));
+    }
+
+    #[test]
+    fn it_surfaces_late_flag_in_the_work_state() {
+        let record = br#"{"workStateVersion":1,"workState":"active","isLate":true,"carryingLabel":"agent-work","carryingDurationSecs":600,"nudgeCount":0}"#;
+        let mut host = FakeHost::new();
+        host.push_read(Ok(record.to_vec()));
+        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"));
+        assert_eq!(ws.as_deref(), Some("active, late (agent-work, 600s)"));
+    }
+
+    #[test]
+    fn it_surfaces_idle_work_state_without_label_or_duration() {
+        let record = br#"{"workStateVersion":1,"workState":"idle","isLate":false,"nudgeCount":0}"#;
+        let mut host = FakeHost::new();
+        host.push_read(Ok(record.to_vec()));
+        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"));
+        assert_eq!(ws.as_deref(), Some("idle"));
+    }
+
+    #[test]
+    fn it_degrades_to_none_when_work_state_json_is_absent() {
+        let mut host = FakeHost::new();
+        host.push_read(Err(std::io::Error::from(std::io::ErrorKind::NotFound)));
+        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"));
+        assert!(ws.is_none(), "missing file degrades to None");
+    }
+
+    #[test]
+    fn it_reads_work_state_through_the_seam_in_summarize() {
+        // AC3: `summarize` reads `work-state.json` through the FakeHost seam,
+        // so `sandbox status` surfaces it with no live connection.
+        use crate::sandbox::host::Call;
+        let mut host = FakeHost::new();
+        host.with_alive_sock(
+            PathBuf::from("/run")
+                .join("inst-a")
+                .join("katsuobushi.sock"),
+        )
+        // phase
+        .push_read(Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
+        // turn-state.json
+        .push_read(Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
+        // liveness.json
+        .push_read(Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
+        // work-state.json
+        .push_read(Ok(
+            br#"{"workStateVersion":1,"workState":"active","isLate":false,"carryingLabel":"agent-work","carryingDurationSecs":77,"nudgeCount":0}"#.to_vec(),
+        ));
+
+        let v = summarize(&host, &sample_spec(), &sample_roots(), "inst-a", now());
+        assert_eq!(
+            v.work_state.as_deref(),
+            Some("active (agent-work, 77s)"),
+            "work_state surfaces from work-state.json through the seam"
+        );
+        assert!(
+            host.calls()
+                .iter()
+                .any(|c| matches!(c, Call::Read(p) if p.ends_with("work-state.json"))),
+            "work-state.json read through the seam: {:?}",
+            host.calls()
         );
     }
 

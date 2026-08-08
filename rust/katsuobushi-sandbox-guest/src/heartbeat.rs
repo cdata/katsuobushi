@@ -265,7 +265,7 @@ pub enum CheckOutcome {
 
 /// The status returned by [`apply_check`] after one tick. A later card uses
 /// this to compute the aggregated work state.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeatStatus {
     /// Whether this heartbeat is currently beating.
     pub beating: bool,

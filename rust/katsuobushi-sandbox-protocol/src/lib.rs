@@ -74,6 +74,23 @@ pub enum GuestMessage {
     /// The turn ended (`Stop`). `reported = false` means it stopped *without* a
     /// terminal report — the case the host surfaces as a warning.
     TurnCompleted { turn_id: u64, reported: bool },
+    /// The combined heartbeat work-state changed. Emitted once per transition,
+    /// not once per heartbeat interval. `is_late`, `label`, and `duration_secs`
+    /// carry the primary (longest-running beating) heartbeat when
+    /// `work_state` is `"active"`; they are absent when idle or finished.
+    WorkStateTransition {
+        /// `"active"` | `"idle"` | `"finished"`.
+        work_state: String,
+        /// Raised when any beating heartbeat has exceeded its declared timeout.
+        is_late: bool,
+        /// The label of the primary heartbeat. Absent when idle or finished.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        /// Seconds the primary heartbeat has beaten without interruption.
+        /// Absent when idle or finished.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_secs: Option<u64>,
+    },
 }
 
 /// Everything the host can send to the guest server.
