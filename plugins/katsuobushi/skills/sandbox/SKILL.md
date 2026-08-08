@@ -368,7 +368,10 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
      bookmark always points only at guest history, so every future force-update
      is safe.
 
-   Two requirements apply to every duplicated commit before the work advances:
+   Two requirements apply to every duplicated commit — satisfy both at landing,
+   before the next sandbox dispatch. After that, the next dispatch seeds its
+   guest from the host's working tree, making these commits ancestors of an
+   immutable remote bookmark; jj will refuse to re-author them.
 
    **Attribution.** Re-author each landed commit to the repository owner's
    identity. The guest commits as its own agent identity inside the sandbox
@@ -382,10 +385,10 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
    itself.
    - git: after each `cherry-pick`, run
      `git commit --amend --reset-author --no-edit`.
-   - jj: after duplicating, run
-     `jj describe --author "Name <email>" -r <change-id>` for each duplicated
-     change, using the host's configured identity from `git config user.name` /
-     `git config user.email`.
+   - jj: after duplicating, run `jj metaedit --update-author -r <revset>` for
+     each duplicated change. This re-authors to the configured user (the
+     repository owner) rather than to an explicit name you pass in; it does not
+     modify the author timestamp.
 
    **Non-empty description.** Reject any duplicated commit whose commit message
    is empty (git: empty or whitespace-only subject line; jj:
