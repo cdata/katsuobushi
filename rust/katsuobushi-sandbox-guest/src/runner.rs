@@ -82,6 +82,11 @@ pub async fn run_heartbeat_set(
 /// reflecting the server's armed/silenced state via `armed`. Sends a
 /// [`BeatStatusUpdate`] on every tick so the work-state coordinator can
 /// aggregate it with the file heartbeats.
+///
+/// Transitions are routed through [`TurnBeat::arm`] and [`TurnBeat::silence`]
+/// so the runner exercises the same code path as the unit tests: `arm` on the
+/// first tick that sees the flag flip to `true`, `silence` on the first tick
+/// that sees it flip to `false`, and plain `tick` when the flag is unchanged.
 pub async fn run_turn_heartbeat(
     armed: Arc<AtomicBool>,
     beat_tx: tokio::sync::mpsc::UnboundedSender<BeatStatusUpdate>,
@@ -89,6 +94,7 @@ pub async fn run_turn_heartbeat(
     let mut ticker = tokio::time::interval(TurnBeat::INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut beat = TurnBeat::default();
+    let mut prev_armed = false;
 
     loop {
         ticker.tick().await;
@@ -96,9 +102,13 @@ pub async fn run_turn_heartbeat(
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        // Sync armed flag from the shared atomic, then tick.
-        beat.armed = armed.load(Ordering::Relaxed);
-        let status = beat.tick(now_secs);
+        let cur_armed = armed.load(Ordering::Relaxed);
+        let status = match (prev_armed, cur_armed) {
+            (false, true) => beat.arm(now_secs),
+            (true, false) => beat.silence(now_secs),
+            _ => beat.tick(now_secs),
+        };
+        prev_armed = cur_armed;
         let _ = beat_tx.send(BeatStatusUpdate {
             label: TURN_BEAT_LABEL.to_string(),
             status,

@@ -214,7 +214,7 @@ pub struct BeatState {
 pub struct TurnBeat {
     state: BeatState,
     /// Whether a turn is currently in flight.
-    pub armed: bool,
+    armed: bool,
 }
 
 impl TurnBeat {
@@ -223,14 +223,18 @@ impl TurnBeat {
     /// Timeout: a turn in flight longer than this is late.
     pub const TIMEOUT_SECS: u64 = 60 * 60;
 
-    /// Arm the heartbeat when a turn is accepted. Records the arm time as
-    /// `beat_started` so duration is measured from the turn's first activity.
+    /// Arm the heartbeat when the runner's poll detects the turn-armed flag
+    /// flipping `true`. Sets `beat_started` to `now_secs` so duration is
+    /// measured from the first interval that observed the arm — up to one
+    /// interval (10 s) after `TurnAccepted` fires.
     pub fn arm(&mut self, now_secs: u64) -> BeatStatus {
         self.armed = true;
         self.tick(now_secs)
     }
 
-    /// Silence the heartbeat when the stop hook fires — the turn ended.
+    /// Silence the heartbeat when the runner's poll detects the turn-armed
+    /// flag flipping `false` (set by the stop hook). Clears `beat_started`
+    /// and emits a `Miss`.
     pub fn silence(&mut self, now_secs: u64) -> BeatStatus {
         self.armed = false;
         self.tick(now_secs)

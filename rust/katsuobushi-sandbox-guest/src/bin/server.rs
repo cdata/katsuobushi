@@ -1402,6 +1402,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn it_silences_the_turn_beat_when_turn_ended_arrives_before_any_turn_accepted() {
+        // TurnEnded can arrive before TurnAccepted (e.g. a very short turn
+        // that ends before the first hook fires). The stop hook must still
+        // silence the beat — the agent has stopped regardless.
+        let mut s = Session::default();
+        step(&mut s, Event::Prompt { turn_id: 1 });
+        let out = step(&mut s, Event::Hook(HookEvent::TurnEnded));
+        assert!(
+            out.silence_turn_beat,
+            "TurnEnded must silence the beat even when the turn was never accepted"
+        );
+        assert!(!out.arm_turn_beat);
+    }
+
     // ── End turn heartbeat tests ────────────────────────────────────────────
 
     #[test]
@@ -1947,6 +1962,39 @@ mod tests {
     fn read_state(dir: &Path) -> TurnState {
         let raw = std::fs::read_to_string(dir.join("turn-state.json")).unwrap();
         serde_json::from_str(&raw).unwrap()
+    }
+
+    #[tokio::test]
+    async fn it_stores_true_then_false_on_the_shared_flag_via_execute_outcome() {
+        // Verify that `execute_outcome` calls `store(true)` and `store(false)`
+        // on the shared AtomicBool — not merely that `Outcome` carries the flags.
+        let dir = unique_tmp();
+        let ctl = test_control(dir.clone(), Duration::from_millis(10));
+
+        // TurnAccepted → arm_turn_beat → store(true).
+        let out = drive_event(&ctl, Event::Prompt { turn_id: 1 }).await;
+        execute_outcome(&ctl, out).await;
+        let out = drive_event(&ctl, Event::Hook(HookEvent::TurnAccepted)).await;
+        assert!(out.arm_turn_beat, "sanity: outcome must request arm");
+        execute_outcome(&ctl, out).await;
+        assert!(
+            ctl.turn_armed.load(Ordering::Relaxed),
+            "execute_outcome must store(true) when arm_turn_beat is set"
+        );
+
+        // TurnEnded → silence_turn_beat → store(false).
+        let out = drive_event(&ctl, Event::Hook(HookEvent::TurnEnded)).await;
+        assert!(
+            out.silence_turn_beat,
+            "sanity: outcome must request silence"
+        );
+        execute_outcome(&ctl, out).await;
+        assert!(
+            !ctl.turn_armed.load(Ordering::Relaxed),
+            "execute_outcome must store(false) when silence_turn_beat is set"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
