@@ -157,9 +157,6 @@ fn guard_against_local_descendants(
             "refusing fetch: local branch(es) {} have commits on top of the \
              current refs/remotes/{SANDBOX_GUEST_REMOTE}/{inst} tip — \
              force-updating would orphan that host work.\n\n\
-             If refs/heads/sandbox/{inst} is listed and its tip is pure guest \
-             history (left by an older sandbox fetch with no host commits on \
-             top), delete it: `git branch -D sandbox/{inst}`\n\n\
              If any listed branch carries host work rebased onto the guest tip \
              (from the old landing workflow), cherry-pick those commits to a \
              new branch before re-fetching.",
@@ -620,6 +617,37 @@ mod tests {
         assert!(
             second.is_ok(),
             "bounce fetch must succeed without orphaning: {second:?}"
+        );
+    }
+
+    #[test]
+    fn it_refuses_with_cherry_pick_guidance_only() {
+        // The refusal message must advise cherry-picking host work to a new
+        // branch. It must NOT offer the stale "delete refs/heads/sandbox/<inst>"
+        // advice: strict-descent filtering removes any ref whose tip equals
+        // old_tip before the message is built, so every listed ref already has
+        // commits on top — pure-guest-history refs never reach this message.
+        let state = "/state";
+        let spec = fake_spec(state, "/bin/git");
+        let mut host = FakeHost::new();
+        host.with_existing(PathBuf::from(state).join("inst-g"));
+        host.push_run(Ok(output_stdout(b"abc123\n"))); // old tip found
+        host.push_run(Ok(output_stdout(b"refs/heads/main def456\n"))); // genuine descendant
+
+        let err = fetch_with(&host, &spec, "inst-g", false)
+            .expect_err("should refuse when local descendants exist");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("cherry-pick"),
+            "message should advise cherry-pick: {msg}"
+        );
+        assert!(
+            !msg.contains("git branch -D"),
+            "message must not advise deleting the branch (stale clause): {msg}"
+        );
+        assert!(
+            !msg.contains("pure guest history"),
+            "message must not mention pure guest history (stale clause): {msg}"
         );
     }
 
