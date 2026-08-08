@@ -225,6 +225,7 @@ async fn spawn_check(check: &str, cwd: &Path, budget: Duration) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .process_group(0)
+        .kill_on_drop(true)
         .spawn()
     {
         Ok(c) => c,
@@ -267,6 +268,7 @@ async fn spawn_detail(body: &str, cwd: &Path, budget: Duration) -> Option<String
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .process_group(0)
+        .kill_on_drop(true)
         .spawn()
         .ok()?;
 
@@ -374,5 +376,51 @@ mod tests {
     async fn it_returns_none_when_the_detail_body_exits_nonzero() {
         let result = spawn_detail("exit 1", Path::new("/tmp"), Duration::from_millis(500)).await;
         assert!(result.is_none(), "a failing detail body must yield None");
+    }
+
+    /// A task aborted while its check is sleeping must leave no orphaned
+    /// process — `kill_on_drop(true)` ensures the `Child` is killed when the
+    /// future is dropped rather than reparented to PID 1.
+    #[tokio::test]
+    async fn it_kills_the_child_when_the_check_task_is_aborted() {
+        let dir = TempDir::new("abort-check");
+        let pid_file = dir.path().join("pid");
+        let pid_path = pid_file.to_str().unwrap().to_owned();
+        let cwd = dir.path().to_owned();
+
+        let pid_path_task = pid_path.clone();
+        let task = tokio::spawn(async move {
+            let check = format!("echo $$ > {pid_path_task}; sleep 60");
+            spawn_check(&check, &cwd, Duration::from_secs(120)).await
+        });
+
+        // Wait up to 1 s for the child to write its PID.
+        for _ in 0..100 {
+            if pid_file.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(pid_file.exists(), "child did not create pid file in time");
+
+        let pid: i32 = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        // Abort the task; kill_on_drop(true) kills the Child on drop.
+        task.abort();
+        let _ = task.await;
+
+        // Brief pause for signal delivery.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // kill(pid, 0) returns 0 if the process still exists.
+        let still_alive = unsafe { libc::kill(pid, 0) == 0 };
+        assert!(
+            !still_alive,
+            "child process {pid} must be killed when its task is aborted"
+        );
     }
 }
