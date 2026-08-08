@@ -107,10 +107,18 @@ sandbox start --agent --name review-<card-id> --prompt "<review directive>"
 ```
 
 The `--name` argument **must use the card-id as the slug** (e.g.
-`review-a3f7b2`). `sandbox prune` uses this convention to map a reviewer
-instance back to its card so it can reap the state dir and ref after the card is
-accepted or cancelled. An arbitrary slug would make the reviewer's state
-unclaimable by prune.
+`review-a3f7b2`). `sandbox prune` maps instance names back to cards by this
+exact convention — `review-<card-id>` — so it can reap the state dir and ref
+when the card is accepted or cancelled. Any name that does not follow the
+pattern is **off-contract**: `prune` cannot map it to a card and will silently
+skip it. Off-contract instances accumulate forever and must be removed by hand:
+
+```sh
+sandbox stop --remove <off-contract-name>
+```
+
+To spot them, run `sandbox status` and look for names that don't match
+`review-<card-id>` or `card-<card-id>` for any active card on the board.
 
 A good review directive:
 
@@ -295,6 +303,23 @@ than discarding them:
 sandbox stop card-<id>          # pause the implementor — no --remove
 sandbox stop review-<card-id>   # pause the reviewer   — no --remove
 ```
+
+**When to replace the reviewer instead of pausing.** Pausing is right when the
+same reviewer can give a valid re-review — for example when the implementor made
+targeted fixes and you want the same reader to re-check them. Replace the
+reviewer when it should not be reused — for example when it has already rejected
+an earlier attempt and you want an uncontaminated read of a substantially
+revised implementation. In that case, stop and remove the existing instance,
+then start a fresh one with the **same name**:
+
+```sh
+sandbox stop --remove review-<card-id>   # discard the opinionated reviewer
+sandbox start --agent --name review-<card-id> --prompt "<fresh review directive>"
+```
+
+Using the same name keeps the instance under the `prune`-reapable contract. A
+different slug (for example `review-<card-id>-2`) would create an off-contract
+instance that `prune` skips — see the naming note above.
 
 `stop` on a named instance powers the VM off but keeps its state dir, branch,
 and **scratch volume** — the cargo / rustup / nix caches and the built target
