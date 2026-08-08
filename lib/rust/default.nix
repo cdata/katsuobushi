@@ -863,6 +863,43 @@ let
       '';
     };
   };
+
+  # Dev-shell menu commands for day-to-day Rust development. Merge into
+  # makeMenu's `commands` table alongside the project's other library groups.
+  # Each command runs against the whole workspace so a new crate is picked up
+  # automatically — no edits required here.
+  menuCommands = {
+    rust = {
+      description = "Build, test, lint and format the Rust workspace";
+      subcommands = {
+        build = {
+          description = "Build all crates in the workspace";
+          command = "cargo build --workspace";
+        };
+        test = {
+          description = "Run all tests in the workspace";
+          command = "cargo test --workspace";
+        };
+        lint = {
+          description = "Lint the workspace — fails on any clippy warning";
+          command = "cargo clippy --workspace --all-targets --all-features -- -D warnings";
+        };
+        fmt = {
+          description = "Format or check the workspace source";
+          subcommands = {
+            format = {
+              description = "Format all workspace sources with rustfmt";
+              command = "cargo fmt --all";
+            };
+            check = {
+              description = "Check formatting without writing (usable in CI)";
+              command = "cargo fmt --all --check";
+            };
+          };
+        };
+      };
+    };
+  };
 in
 {
   inherit
@@ -874,6 +911,7 @@ in
     rustToolchain
     cargoChecks
     checkArtifactAlignment
+    menuCommands
     wasm-bindgen-cli
     ;
 }
