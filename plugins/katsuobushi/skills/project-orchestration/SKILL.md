@@ -403,11 +403,11 @@ number of Available cards:
   column (no heartbeat beating, no terminal report filed), and `sandbox fetch`
   then shows only the `git stash` seed commits (`WIP on …` / `index on …`), i.e.
   nothing landed. The sandbox auto-nudges an idle agent; `sandbox status` shows
-  the count as `N/M`. Once the nudge counter reads `M/M` and the reading is
-  still `Idle`, that is the decision boundary: the agent ignored every nudge and
-  is stalled. Always fetch and inspect the branch for a **real** commit before
-  advancing the card. To recover, `sandbox prompt` the instance to commit → push
-  → report; if it stalls again, it's stuck — remove it, note the attempt in the
-  card's `## Dispatch log`, reset the card to `todo`, and either re-dispatch a
-  **fresh** instance or do the work directly. A dispatch launching cleanly does
-  **not** guarantee a delivered branch.
+  the count as `Idle — nudged N/M`. Once the counter reads `Idle — nudged M/M`
+  and the reading is still `Idle`, that is the decision boundary: the agent
+  ignored every nudge and is stalled. Always fetch and inspect the branch for a
+  **real** commit before advancing the card. To recover, `sandbox prompt` the
+  instance to commit → push → report; if it stalls again, it's stuck — remove
+  it, note the attempt in the card's `## Dispatch log`, reset the card to
+  `todo`, and either re-dispatch a **fresh** instance or do the work directly. A
+  dispatch launching cleanly does **not** guarantee a delivered branch.
