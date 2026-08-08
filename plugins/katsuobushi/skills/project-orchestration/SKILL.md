@@ -108,9 +108,9 @@ sandbox start --agent --name review-<card-id> --prompt "<review directive>"
 
 The `--name` argument **must use the card-id as the slug** (e.g.
 `review-a3f7b2`). `sandbox prune` uses this convention to map a reviewer
-instance back to its card so it can reap the state dir and ref after the card
-is accepted or cancelled. An arbitrary slug would make the reviewer's
-state unclaimable by prune.
+instance back to its card so it can reap the state dir and ref after the card is
+accepted or cancelled. An arbitrary slug would make the reviewer's state
+unclaimable by prune.
 
 A good review directive:
 
@@ -312,8 +312,8 @@ sandbox prompt review-<card-id> "<re-review directive pointing at the new commit
 Remove each VM only when its work is truly spent:
 
 - **implementor `card-<id>`** — when the card reaches `ready` (review passed).
-- **reviewer `review-<card-id>`** — same: it may be asked to re-review any number
-  of times before then.
+- **reviewer `review-<card-id>`** — same: it may be asked to re-review any
+  number of times before then.
 - **either one, early** — if the card is bounced to `todo`, cancelled, or the
   instance is stalled/unreported. A stalled VM is not warm, it's stuck; remove
   it and dispatch fresh.
