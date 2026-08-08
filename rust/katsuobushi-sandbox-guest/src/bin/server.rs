@@ -145,6 +145,7 @@ struct WorkStateRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_report_at: Option<String>,
     nudge_count: u32,
+    nudge_budget: u32,
 }
 
 /// The in-flight turn the machine tracks (`None` between turns).
@@ -1195,6 +1196,7 @@ async fn run_work_state_coordinator(
                 last_report_text,
                 last_report_at,
                 nudge_count,
+                nudge_budget: ctl.max_nudges,
             };
             let share = ctl.share.clone();
             match tokio::task::spawn_blocking(move || write_work_state(&share, &record)).await {
