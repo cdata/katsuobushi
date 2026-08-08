@@ -8,6 +8,20 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## 0.4.2
+
+**`progressStallSecs` is removed — delete it from your `lib.sandbox` call.**
+Leaving it in place is a hard Nix evaluation error
+(`called with unexpected argument`), not a silent no-op.
+
+The argument drove a host-side "no reports" notice that no longer fires. Watch
+the **WORK** column of `sandbox status` instead: `Active` means the guest
+heartbeat is current; `Active (Late)` means heartbeats have stopped and the
+guest may be stuck; `Idle` means the agent stopped without reporting.
+
+No spec or instance-state change (`specVersion 4` / `instanceVersion 2`
+unchanged).
+
 ## 0.4.1
 
 **`sandbox fetch` moves back to `refs/heads/sandbox/<inst>` — this reverses the

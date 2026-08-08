@@ -5,6 +5,21 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [0.4.2] — 2026-08-08
+
+Removes `progressStallSecs` from `lib.sandbox` and the host-side stall notice it
+drove. Watch the **WORK** column of `sandbox status` for turn activity. See
+[`MIGRATING.md`](MIGRATING.md#042).
+
+### Removed
+
+- **`progressStallSecs` is removed from `lib.sandbox`.** The argument controlled
+  a host-side "no reports for Ns" notice; both the knob and the notice are gone.
+  Use the **WORK** column of `sandbox status` to tell a working guest from a
+  stuck one: `Active` means the heartbeat is current, `Active (Late)` means
+  heartbeats stopped, and `Idle` means the agent stopped without reporting. See
+  [`MIGRATING.md`](MIGRATING.md#042).
+
 ## [0.4.1] — 2026-08-06
 
 A fix for one 0.4.0 regression: `sandbox fetch`'s new ref layout was invisible
