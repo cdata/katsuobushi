@@ -5,6 +5,48 @@ format follows [Keep a Changelog]; the project is versioned with Git tags
 following [SemVer]. While in `0.x`, any release may break — consumer-facing
 breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
+## [Unreleased]
+
+Fixes `sandbox fetch` to use strict descent in its local-branch guard, which
+previously false-positived on migrated instances and permanently blocked
+re-fetching. Moves the fetch destination from `refs/heads/sandbox/<inst>` to
+`refs/remotes/sandbox-guest/<inst>`. See
+[`MIGRATING.md`](MIGRATING.md#unreleased).
+
+### Fixed
+
+- **`sandbox fetch` guard uses strict descent instead of containment.** The
+  guard previously called `git for-each-ref --contains=<old-tip>` without
+  comparing objectnames, so any `refs/heads/sandbox/<inst>` left by the prior
+  fetch scheme (whose tip IS the old tip, not a descendant of it) was treated as
+  evidence of a rebased host commit and the fetch was refused. Every instance
+  that existed before this change migrated successfully on the first
+  post-upgrade fetch and was then permanently un-refetchable from the second
+  onward. The guard now fetches `%(refname) %(objectname)` and filters out refs
+  whose objectname equals the old tip — migration debris — keeping only refs
+  that strictly descend from it.
+- **`sandbox fetch` error message names the actual recovery.** The previous
+  message said to use `jj duplicate`/`git cherry-pick` "rather than
+  re-fetching", but re-fetching is the only way to obtain new guest commits. The
+  message now names the offending refs, explains that a stale
+  `refs/heads/sandbox/<inst>` pointing at pure guest history is safe to delete,
+  and retains guidance for the genuine bad-rebase case.
+- **`git cherry-pick` command in the `sandbox` skill corrected.** The landing
+  instructions used `git cherry-pick <name>@sandbox-guest`, which is jj notation
+  and is rejected by `git rev-parse`. The correct git form is
+  `git cherry-pick sandbox-guest/<name>`, which git resolves via disambiguation
+  to `refs/remotes/sandbox-guest/<name>`.
+
+### Changed
+
+- **`sandbox fetch` writes to `refs/remotes/sandbox-guest/<inst>`.** The
+  destination moved from `refs/heads/sandbox/<inst>` (written by 0.4.1) to
+  `refs/remotes/sandbox-guest/<inst>`. Writing to `refs/remotes/` means jj
+  imports the ref as a remote bookmark, so a force-update can never rewrite
+  local history regardless of what the host has built on top. Old
+  `refs/heads/sandbox/*` refs are left behind and are safe to delete; see
+  [`MIGRATING.md`](MIGRATING.md#unreleased).
+
 ## [0.4.2] — 2026-08-08
 
 Removes `progressStallSecs` from `lib.sandbox` and the host-side stall notice it

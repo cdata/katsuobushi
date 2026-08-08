@@ -105,9 +105,17 @@ fn read_remote_ref_tip(host: &impl Host, git: &Path, inst: &str) -> Option<Strin
     }
 }
 
-/// Refuses if any local `refs/heads/` branch descends from `old_tip` — evidence
-/// that the host has rebased the guest commit into local history. Force-updating
-/// the remote bookmark past that tip would orphan those host commits.
+/// Refuses if any local `refs/heads/` branch **strictly descends** from
+/// `old_tip` — evidence that the host has rebased the guest commit into local
+/// history. Force-updating the remote bookmark past that tip would orphan those
+/// host commits.
+///
+/// "Strictly descends" means the ref's tip is NOT old_tip itself. A ref that
+/// points exactly at old_tip is migration debris — `refs/heads/sandbox/<inst>`
+/// left by an older fetch scheme that wrote to `refs/heads/` instead of
+/// `refs/remotes/` — not evidence of a rebased host commit. `--contains`
+/// reports such a ref (a commit contains itself), so we must filter it out by
+/// comparing the objectname to old_tip.
 ///
 /// Silently passes through when the probe command fails (e.g., an older git
 /// that does not support `--contains`): never block a legitimate fetch based on
@@ -121,7 +129,7 @@ fn guard_against_local_descendants(
     let mut cmd = Command::new(git);
     cmd.args([
         "for-each-ref",
-        "--format=%(refname)",
+        "--format=%(refname) %(objectname)",
         &format!("--contains={old_tip}"),
         "refs/heads/",
     ]);
@@ -132,14 +140,29 @@ fn guard_against_local_descendants(
         return Ok(());
     }
     let output = String::from_utf8_lossy(&out.stdout);
-    let refs: Vec<&str> = output.lines().filter(|l| !l.is_empty()).collect();
+    let refs: Vec<&str> = output
+        .lines()
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| match l.split_once(' ') {
+            // Strict descent: keep only refs whose tip differs from old_tip.
+            Some((refname, obj)) if obj.trim() != old_tip => Some(refname),
+            // Objectname equals old_tip: migration debris — not a descendant.
+            Some(_) => None,
+            // Unparseable line (no space): be conservative and treat as descendant.
+            None => Some(l),
+        })
+        .collect();
     if !refs.is_empty() {
         anyhow::bail!(
-            "refusing fetch: local branches {} descend from the current \
-             {SANDBOX_GUEST_REMOTE}/{inst} tip — force-updating would orphan \
-             host work. Use `jj duplicate`/`git cherry-pick` to copy the new \
-             guest commits rather than re-fetching, or ensure no local branch \
-             descends from the old tip before proceeding.",
+            "refusing fetch: local branch(es) {} have commits on top of the \
+             current refs/remotes/{SANDBOX_GUEST_REMOTE}/{inst} tip — \
+             force-updating would orphan that host work.\n\n\
+             If refs/heads/sandbox/{inst} is listed and its tip is pure guest \
+             history (left by an older sandbox fetch with no host commits on \
+             top), delete it: `git branch -D sandbox/{inst}`\n\n\
+             If any listed branch carries host work rebased onto the guest tip \
+             (from the old landing workflow), cherry-pick those commits to a \
+             new branch before re-fetching.",
             refs.join(", ")
         );
     }
@@ -508,14 +531,19 @@ mod tests {
         // branch (old landing workflow), then the guest pushes guest-B onto the
         // original guest-A. The guard detects a local descendant and refuses
         // rather than silently orphaning host work.
+        //
+        // The for-each-ref output carries "%(refname) %(objectname)"; the
+        // objectname def456 differs from the old tip abc123, so it is a genuine
+        // descendant (not migration debris).
         let state = "/state";
         let spec = fake_spec(state, "/bin/git");
         let mut host = FakeHost::new();
         host.with_existing(PathBuf::from(state).join("inst-g"));
         // Old tip probe succeeds: the ref exists from a prior fetch.
         host.push_run(Ok(output_stdout(b"abc123\n")));
-        // for-each-ref finds a local branch that contains the old tip.
-        host.push_run(Ok(output_stdout(b"refs/heads/main\n")));
+        // for-each-ref: refs/heads/main whose tip (def456) ≠ old tip (abc123)
+        // — a genuine descendant with host commits on top.
+        host.push_run(Ok(output_stdout(b"refs/heads/main def456\n")));
         // The fetch is never reached.
 
         let err = fetch_with(&host, &spec, "inst-g", false)
@@ -528,6 +556,35 @@ mod tests {
         assert!(
             msg.contains("refs/heads/main"),
             "error should name the offending branch: {msg}"
+        );
+    }
+
+    #[test]
+    fn it_proceeds_when_for_each_ref_returns_only_migration_debris() {
+        // After upgrading from the previous fetch scheme (which wrote to
+        // refs/heads/sandbox/<inst>), a refs/heads/sandbox/<inst> ref is left
+        // pointing at the same commit that refs/remotes/sandbox-guest/<inst>
+        // now holds. --contains returns it because a commit contains itself,
+        // but its objectname equals old_tip, so strict-descent filtering
+        // removes it and the fetch proceeds.
+        let state = "/state";
+        let spec = fake_spec(state, "/bin/git");
+        let mut host = FakeHost::new();
+        host.with_existing(PathBuf::from(state).join("inst-g"));
+        // Old tip probe: the new-scheme ref exists from the first post-upgrade fetch.
+        host.push_run(Ok(output_stdout(b"abc123\n")));
+        // for-each-ref: refs/heads/sandbox/inst-g whose objectname IS abc123
+        // (equal to old tip) — migration debris, not a genuine descendant.
+        host.push_run(Ok(output_stdout(b"refs/heads/sandbox/inst-g abc123\n")));
+        // The fetch proceeds past the guard.
+        host.push_run(Ok(output(0, b"")));
+        host.push_read(Ok(instance_json("seedsha")));
+        host.push_run(Ok(output_stdout(b"def456\n")));
+
+        let result = fetch_with(&host, &spec, "inst-g", false);
+        assert!(
+            result.is_ok(),
+            "fetch must proceed when for-each-ref returns only migration debris: {result:?}"
         );
     }
 
