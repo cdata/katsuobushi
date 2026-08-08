@@ -187,6 +187,24 @@ The directory is version-controlled and reaches the VM through the ordinary git
 seed. A person reviews every heartbeat, and a forged one appears in the diff. An
 agent can write the file, but it cannot do so quietly.
 
+#### Re-reading the heartbeat set
+
+The guest re-reads the heartbeat directories on a slow timer (once per minute).
+The rule is **once per error state**: a broken file's error is reported once and
+suppressed on every subsequent scan while the file remains broken. A file that
+is corrected, or a file that is newly added to a directory, is picked up on the
+next scan without a guest restart.
+
+This is the intended reading of "once" in the design. "Once ever" would leave a
+corrected file invisible and give its author no signal explaining why. "Once per
+interval" would fill the log. "Once per error state" is silent while a file
+stays broken, loud when it first breaks, and self-healing when it is fixed.
+
+A filesystem watcher is not used. Re-reading on a slow timer is sufficient: the
+I/O cost of scanning a small directory of YAML files once per minute is
+negligible, and the one-minute lag before a corrected file takes effect is
+acceptable for a development-time authoring workflow.
+
 ### The library ships heartbeats of its own
 
 A repo with no `.katsuobushi/heartbeats/` directory is still covered. The
