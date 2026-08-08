@@ -311,15 +311,24 @@ directive that tells an agent to record a finding into the board; the host
 writes it down.
 
 ```sh
-sandbox fetch <name>            # git fetch <mirror> +sandbox/<name>:refs/heads/sandbox/<name>
+sandbox fetch <name>            # git fetch <mirror> +sandbox/<name>:refs/remotes/sandbox-guest/<name>
 ```
 
-The fetch force-updates the local `sandbox/<name>` branch to the guest's tip.
-The leading `+` (force) is what makes it idempotent: refetching an instance you
-already landed once — every review bounce — updates the branch instead of
-failing non-fast-forward. The branch stays under `refs/heads/`, so a colocated
-Jujutsu repo imports it (jj reads `refs/heads/*`, `refs/tags/*`, and
-`refs/remotes/*`; it never imports a custom namespace).
+The fetch force-updates the `sandbox-guest/<name>` remote bookmark to the
+guest's tip. Writing to `refs/remotes/` rather than `refs/heads/` means jj
+imports it as a _remote_ bookmark: a remote bookmark moving never rewrites local
+history, so force-updating it cannot orphan host commits regardless of what the
+host has built on top. The leading `+` (force) keeps refetching idempotent at
+the ref level — a second fetch of the same instance updates the pointer rather
+than failing non-fast-forward — and that idempotency now also holds at the
+repository level (no abandoned commits, no rebase surprises on a review bounce).
+A colocated jj repo imports the ref automatically: jj reads `refs/remotes/*`
+alongside `refs/heads/*` and `refs/tags/*`.
+
+`sandbox fetch` also guards against the off-script case: if any local
+`refs/heads/` branch descends from the current ref tip (evidence that the host
+used an old rebase-based landing workflow), the fetch refuses rather than
+silently orphaning host work.
 
 `sandbox fetch` brings the branch into your repo but **never merges**.
 Integration is yours to drive, and the goal is to land the work as automatically
@@ -338,27 +347,51 @@ Speak the user's VCS tool: `.jj/` present → use `jj`; else `.git` → `git`; i
 neither or it's ambiguous, ask. The sync layer is always git (the mirror +
 `sandbox fetch`), but the host-side landing is done in their tool.
 
-**Land a single branch via rebase workflow:**
+**Land a single branch:**
 
 1. `sandbox fetch <name>`.
 2. **Snapshot the host first.** If the working copy is dirty, capture it as a
    `wip: …` commit (jj: the working copy already _is_ a commit; git: commit the
    dirty tree) — never a stash. Concurrent host edits must survive the landing.
-3. **Rebase** the sandbox commits onto the current tip of your work (`jj rebase`
-   / `git rebase`).
+3. **Duplicate** the guest commits onto the current tip of your work. Do **not**
+   rebase: the guest branch is a remote bookmark, and jj refuses `jj rebase` on
+   an immutable remote bookmark by default. Instead:
+   - jj: `jj duplicate <name>@sandbox-guest -d @` — copies the guest commits
+     with new identities, leaving the remote bookmark untouched.
+   - git: `git cherry-pick <name>@sandbox-guest` — copies the diff without
+     moving any ref. Duplicating (never rebasing) guarantees the remote bookmark
+     always points only at guest history, so every future force-update is safe.
 4. **Clean → land it, then remove the sandbox.** In `jj`, advance the
-   working-copy pointer `@` onto the rebased commits (`jj new <tip>`) and leave
-   bookmark placement to the user — anchoring accepted work on `@` keeps it
-   durable across the git imports the sandbox commands trigger. In `git`,
-   fast-forward your branch onto the landed commits. Either way, confirm the
-   files materialize in the working copy, then run
-   `sandbox stop --remove <name>` — the instance's unit of work is accepted, so
-   it's spent (a plain `sandbox stop` removes an ephemeral instance; `--remove`
-   also tears down a named one). Keep the `sandbox/<name>` branch as the revert
+   working-copy pointer `@` onto the duplicated commits and leave bookmark
+   placement to the user — anchoring accepted work on `@` keeps it durable
+   across the git imports the sandbox commands trigger. In `git`, fast-forward
+   your branch onto the cherry-picked commits. Either way, confirm the files
+   materialize in the working copy, then run `sandbox stop --remove <name>` —
+   the instance's unit of work is accepted, so it's spent (a plain
+   `sandbox stop` removes an ephemeral instance; `--remove` also tears down a
+   named one). Keep the `sandbox-guest/<name>` remote bookmark as the revert
    artifact, and surface the agent's `done` summary plus a diffstat of what
    landed — that digest is the orchestrator's "return value".
 5. **Doesn't land cleanly →** treat the reconciliation as ordinary delegated
    work, not a special case (below).
+
+**Bounce (review turn 2+):** When you send the agent back for changes after
+landing its first commit, the agent pushes its follow-up onto the _original_
+guest commit — its mirror is frozen at launch and doesn't see the host's rebased
+copy. On `sandbox fetch <name>` a second time the remote bookmark simply
+advances to the new tip; nothing is orphaned because the host never built on
+that bookmark. To land _only_ the new commits (since your last landing),
+identify the boundary and duplicate from there:
+
+- jj: `jj duplicate <new-tip>@sandbox-guest~<n>..<new-tip>@sandbox-guest -d @`
+  (where `<n>` is the count of new commits since the last landing, so the range
+  excludes the ones you already duplicated).
+- git: `git cherry-pick <last-landed-guest-sha>..<new-tip>` (the `..` range
+  excludes the left boundary, skipping previously-landed commits).
+
+Never `jj rebase` the `sandbox-guest/<name>` bookmark. jj's immutability default
+refuses it on a remote bookmark, and even if overridden it would move the
+bookmark and break the idempotency the design relies on.
 
 ### Conflict reconciliation
 
