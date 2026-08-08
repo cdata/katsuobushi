@@ -186,6 +186,10 @@
           packages = [
             pkgs.mesa-demos
             llm-agents.packages.${system}.claude-code
+            # Available for reviewers to test jj-dependent behaviour in a scratch
+            # repo (e.g. colocated-repo reproductions). The workspace clone is a
+            # plain git repo; agents do their own work with git, not jj.
+            pkgs.jujutsu
           ];
         };
 

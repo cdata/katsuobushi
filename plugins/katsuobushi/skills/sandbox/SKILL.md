@@ -656,3 +656,11 @@ are unaffected.
   than the log; `console.log` stops at the login prompt and says nothing about
   agent runtime.
 - Treat the OAuth token as a live credential; it stays on subscription billing.
+- **`jj` is available on the guest PATH.** A dispatched agent can create a
+  scratch colocated repo and run jj-dependent reproductions — e.g. verifying
+  that a `refs/remotes/` refspec does not orphan host commits, or walking
+  through a `jj duplicate` landing flow. The agent's own project work still uses
+  `git` (the workspace clone is a plain git repo with no `.jj/`); `jj` is
+  present for peer review of jj-shaped behaviour, not for workspace VCS. Future
+  cards that need a jj-behaviour reproduction can include the steps directly in
+  the directive without the workaround of escalating to host verification.
