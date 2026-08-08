@@ -107,22 +107,6 @@ defaults:
   scratchVolumeSize ? 32768,
   dbVolumeSize ? 4096, # guest Nix database (importHostStoreDb)
 
-  # How long a driven turn may go without a *report* before the host prints a
-  # first "no reports for Ns" notice (a second, stronger one follows at 3x this
-  # if the silence continues). The turn is never broken or killed —
-  # the notice is purely informational.
-  #
-  # Only `working`/`info` reports reset this clock; heartbeats are deliberately
-  # silent and do not count. An agent inside one long foreground tool call
-  # therefore looks idle no matter how hard it is working, and a cold workspace
-  # compile is routinely 15-25 minutes — so on a project like that the default
-  # fires on essentially every launch and is benign every time. A watchdog that
-  # always barks trains operators toward alarm, and the one alarmed response is
-  # usually the destructive one. Raise this to comfortably exceed the project's
-  # cold-build time (e.g. 1500 for a ~20-minute build) and the notice starts
-  # meaning something again.
-  progressStallSecs ? 300,
-
   # Packages to put on the guest's PATH. This is where the agent harness goes —
   # it is just another package, not a built-in concept, so the consumer supplies
   # it (and any extra tooling) here. For Claude Code, pass nixpkgs' `claude-code`
@@ -250,18 +234,15 @@ let
   # into the agent env. Inert knobs until a consumer reads them.
   heartbeatSecs = 10; # heartbeat cadence (H)
   heartbeatMiss = 3; # dead after N·H = 30 s of silence (N)
-  # NB: `progressStallSecs` is NOT bound here — it is a consumer-facing argument
-  # (see the arg list above), because it is the one tunable whose right value
-  # depends on the project's cold-build time rather than on the protocol.
   deliveryDeadlineSecs = 20; # resend if no TurnAccepted
   deliveryRetries = 3; # max resends, then fail (K)
   readyGateSecs = 60; # wait for SessionReady, then send anyway (G)
   stopGraceMs = 1500; # absorb a late terminal report after Stop
   # A turn that ends without a terminal report is re-prompted ("auto-nudged")
   # once the work state transitions to idle (all heartbeats stop), up to
-  # maxNudges times, nudgeIntervalMs apart, before it resolves as
-  # ended-unreported. Nudges fire on the idle transition — not on a build timer
-  # — so every second of the budget is real silence, not build time.
+  # maxNudges times, nudgeIntervalMs apart, before it resolves as idle.
+  # Nudges fire on the idle transition — not on a build timer — so every
+  # second of the budget is real silence, not build time.
   maxNudges = 5; # re-prompt an unreported idle agent this many times
   nudgeIntervalMs = 60000; # spacing between auto-nudges (one minute)
 
@@ -1761,7 +1742,6 @@ let
         inherit
           heartbeatSecs
           heartbeatMiss
-          progressStallSecs
           deliveryDeadlineSecs
           deliveryRetries
           readyGateSecs

@@ -84,9 +84,6 @@ pub enum ReportKind {
     /// `TurnCompleted{reported:false}`: the agent stopped without a
     /// terminal report — a warning (⚠), not a faked success.
     Stopped,
-    /// The progress-stall notice: no progress for the stall window. Surfaced
-    /// once per episode, dim ⚠ — awareness, never a kill.
-    Stalled,
     /// Transport dead / resend exhausted: the turn could not be driven
     /// at all — an error (✗).
     Lost,
@@ -287,7 +284,6 @@ impl Renderer {
             ReportKind::Blocked => self.yellow(&format!("⚠ {text}")),
             ReportKind::Info => self.blue(text),
             ReportKind::Stopped => self.yellow(&format!("⚠ {text}")),
-            ReportKind::Stalled => self.dim(&format!("⚠ {text}")),
             ReportKind::Lost => self.red(&format!("✗ {text}")),
         }
     }
@@ -561,22 +557,17 @@ mod tests {
 
     #[test]
     fn it_renders_watchdog_kinds_with_glyphs_without_ansi_when_color_off() {
-        // The three liveness verdicts: Stopped
-        // and Stalled warn (⚠), Lost errors (✗); glyphs survive gating.
+        // Stopped warns (⚠), Lost errors (✗); glyphs survive gating.
         let r = Renderer::new(false, false);
         assert_eq!(
             r.report(ReportKind::Stopped, "agent stopped without reporting"),
             "⚠ agent stopped without reporting"
         );
         assert_eq!(
-            r.report(ReportKind::Stalled, "no progress"),
-            "⚠ no progress"
-        );
-        assert_eq!(
             r.report(ReportKind::Lost, "transport dead"),
             "✗ transport dead"
         );
-        for kind in [ReportKind::Stopped, ReportKind::Stalled, ReportKind::Lost] {
+        for kind in [ReportKind::Stopped, ReportKind::Lost] {
             assert!(!has_ansi(&r.report(kind, "x")), "report {kind:?} plain");
         }
     }

@@ -61,8 +61,6 @@ pub struct Spec {
     pub heartbeat_secs: u64,
     /// Missed heartbeats tolerated before "dead" (N): silence ≥ N·H is dead.
     pub heartbeat_miss: u32,
-    /// Seconds of no progress before surfacing a "no progress" note (no break).
-    pub progress_stall_secs: u64,
     /// Seconds to wait for `TurnAccepted` before resending a prompt.
     pub delivery_deadline_secs: u64,
     /// Max prompt resends before failing the delivery (K).
@@ -309,26 +307,11 @@ mod tests {
       "hostCid": 2,
       "heartbeatSecs": 10,
       "heartbeatMiss": 3,
-      "progressStallSecs": 300,
       "deliveryDeadlineSecs": 20,
       "deliveryRetries": 3,
       "readyGateSecs": 60,
       "stopGraceMs": 1500
     }"#;
-
-    /// The knob is only useful if a consumer's override actually reaches the
-    /// host watchdog, so pin a NON-default value end-to-end through the parser
-    /// — the default alone would pass even if the plumbing dropped it.
-    #[test]
-    fn it_parses_a_non_default_progress_stall_window() {
-        let json =
-            EXAMPLE_SPEC_JSON.replace("\"progressStallSecs\": 300", "\"progressStallSecs\": 1500");
-        let spec = from_json_bytes(json.as_bytes()).expect("should parse");
-        assert_eq!(spec.progress_stall_secs, 1500);
-        // The other liveness tunables must not shift with it.
-        assert_eq!(spec.heartbeat_secs, 10);
-        assert_eq!(spec.delivery_deadline_secs, 20);
-    }
 
     #[test]
     fn it_parses_the_design_example_spec() {
@@ -366,7 +349,6 @@ mod tests {
         // Liveness tunables parse with the defaults (inert knob plumbing).
         assert_eq!(spec.heartbeat_secs, 10);
         assert_eq!(spec.heartbeat_miss, 3);
-        assert_eq!(spec.progress_stall_secs, 300);
         assert_eq!(spec.delivery_deadline_secs, 20);
         assert_eq!(spec.delivery_retries, 3);
         assert_eq!(spec.ready_gate_secs, 60);
