@@ -498,6 +498,10 @@ Rules to write against:
 - **A check on a process group survives a single process exit; a check on one
   process identifier does not.** Use `pgrep -f` or similar for work that may
   span multiple processes or restart a child.
+- **Project heartbeats add to the shipped set; they do not replace it.** A
+  project heartbeat with the same label as a shipped heartbeat does not override
+  it — both run and both appear in the work state. Use a distinct label when you
+  want a single entry in the output.
 
 **Block-scalar syntax.** The `check` and `detail` bodies use YAML block-scalar
 style: a pipe (`|`) on the field line and every shell line indented two spaces
