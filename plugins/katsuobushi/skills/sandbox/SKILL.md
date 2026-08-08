@@ -500,8 +500,9 @@ Rules to write against:
   span multiple processes or restart a child.
 - **Project heartbeats add to the shipped set; they do not replace it.** A
   project heartbeat with the same label as a shipped heartbeat does not override
-  it — both run and both appear in the work state. Use a distinct label when you
-  want a single entry in the output.
+  it — both run, but the work state holds one slot per label, so whichever
+  update arrives last masks the other. Use a distinct label so both results are
+  visible.
 
 **Block-scalar syntax.** The `check` and `detail` bodies use YAML block-scalar
 style: a pipe (`|`) on the field line and every shell line indented two spaces

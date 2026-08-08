@@ -37,8 +37,9 @@ pub const TURN_BEAT_LABEL: &str = "$turn";
 /// **Label collision:** when a heartbeat in a later directory carries the same
 /// label as one in an earlier directory, both are included — neither replaces
 /// the other. In practice this means a project heartbeat with the same label
-/// as a shipped heartbeat runs *alongside* the shipped one; both appear in the
-/// work state.
+/// as a shipped heartbeat runs *alongside* the shipped one, but the
+/// work-state coordinator holds one slot per label, so whichever update
+/// arrives last masks the other.
 pub fn collect_heartbeats(dirs: &[PathBuf]) -> (Vec<Heartbeat>, Vec<HeartbeatError>) {
     let mut heartbeats = Vec::new();
     let mut errors = Vec::new();
