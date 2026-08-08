@@ -399,14 +399,14 @@ number of Available cards:
   warm build caches, so every round of reviewer feedback pays a full cold
   compile before it can change a line. Pause instead; see "Keep the pair warm".
 - **Trust the branch, not "the VM ran."** A dispatched agent can end its turn
-  **unreported** (`sandbox status` shows `ended-unreported`) having done the
-  work in-VM but never committing/pushing — `sandbox fetch` then shows only the
-  `git stash` seed commits (`WIP on …` / `index on …`), i.e. nothing landed. The
-  guest auto-nudges an unreported stop a few times first, so `ended-unreported`
-  means the agent ignored those re-prompts too — a strong signal of a real
-  stall, not just a missed report. Always fetch and inspect the branch for a
-  **real** commit before advancing the card. To recover, `sandbox prompt` the
-  instance to commit → push → report; if it stalls again, it's stuck — remove
-  it, note the attempt in the card's `## Dispatch log`, reset the card to
-  `todo`, and either re-dispatch a **fresh** instance or do the work directly. A
-  dispatch launching cleanly does **not** guarantee a delivered branch.
+  without committing or pushing — `sandbox status` shows `Idle` in the `WORK`
+  column (no heartbeat beating, no terminal report filed), and `sandbox fetch`
+  then shows only the `git stash` seed commits (`WIP on …` / `index on …`), i.e.
+  nothing landed. The sandbox auto-nudges an idle agent a few times, so a
+  persistent `Idle` reading after those nudges is a strong signal of a real
+  stall. Always fetch and inspect the branch for a **real** commit before
+  advancing the card. To recover, `sandbox prompt` the instance to commit → push
+  → report; if it stalls again, it's stuck — remove it, note the attempt in the
+  card's `## Dispatch log`, reset the card to `todo`, and either re-dispatch a
+  **fresh** instance or do the work directly. A dispatch launching cleanly does
+  **not** guarantee a delivered branch.
