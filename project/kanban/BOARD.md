@@ -27,10 +27,11 @@ kanban-plugin: basic
 
 ## In Progress
 
-- [ ] [[c72eb6]]
 - [ ] [[4e542e]]
 
 ## Needs Review
+
+- [ ] [[c72eb6]]
 
 ## Ready
 
