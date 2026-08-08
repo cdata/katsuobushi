@@ -4,12 +4,15 @@
 //!
 //! 1. **Guard** — refuse a card that isn't Available (To-do with every blocker
 //!    at ready/accepted) unless `--force`.
-//! 2. **Claim** — move it `todo -> in-progress` via the shared state-machine
+//! 2. **Guard** — refuse if the host working tree contains commits authored by
+//!    the agent identity that would be frozen by this dispatch, unless `--force`.
+//!    See [`guard_against_agent_commits`].
+//! 3. **Claim** — move it `todo -> in-progress` via the shared state-machine
 //!    writer, so the board reflects that it's being worked.
-//! 3. **Compose** — the directive is `[optional .dispatch-instructions.md] +
+//! 4. **Compose** — the directive is `[optional .dispatch-instructions.md] +
 //!    the card body`. Generic sandbox working-rules come from the guest + the
 //!    sandbox skill and are deliberately not restated here.
-//! 4. **Launch** — hand off to the agent-start path (`start --agent --name
+//! 5. **Launch** — hand off to the agent-start path (`start --agent --name
 //!    card-<id> --prompt <directive>`), which boots the VM and streams reports.
 //!
 //! The report bridge (done -> fetch + needs-review, blocked -> annotate + todo)
@@ -17,6 +20,7 @@
 //! hardcoded into the launch (design/project.md §8.1).
 
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
@@ -24,10 +28,17 @@ use crate::project::fs::{Fs, RealFs};
 use crate::project::layout::{self, NoteEntry, Paths};
 use crate::project::model::{CardId, Status};
 use crate::project::{board::Board, select, set_status};
+use crate::sandbox::host::{Host, HostImpl};
+use crate::sandbox::spec::load_spec;
 use crate::Global;
 
 /// Optional per-project prelude, prepended to every dispatched directive.
 const INSTRUCTIONS_FILE: &str = ".dispatch-instructions.md";
+
+/// Author email used by the in-guest agent. Commits carrying this identity
+/// that appear in the host working tree are copies landed from sandbox work
+/// that haven't been re-attributed yet — dispatching again would freeze them.
+const AGENT_EMAIL: &str = "agent@katsuobushi.local";
 
 pub fn run(
     config: &Path,
@@ -39,6 +50,14 @@ pub fn run(
 ) -> Result<()> {
     let fs = RealFs;
     let paths = Paths::new(board_dir.to_path_buf());
+
+    // Guard: refuse if agent-authored commits would be frozen by this dispatch.
+    // Runs before prepare/claim so a refused dispatch never advances the card.
+    if !force {
+        let spec = load_spec(config).context("loading spec for agent-commit check")?;
+        let host = HostImpl::new().context("initializing host seam for agent-commit check")?;
+        guard_against_agent_commits(&host, &spec.tools.git)?;
+    }
 
     // Everything up to the launch is the testable `prepare`; the launch itself
     // emit-execs and cannot be unit-tested.
@@ -54,6 +73,105 @@ pub fn run(
         until_report,
         global,
     )
+}
+
+/// Return all `refs/remotes/sandbox-guest/` refnames present in the host repo.
+/// Commits reachable from these refs are original guest commits already frozen
+/// by a previous dispatch — we cannot re-author them anyway, so the check for
+/// un-attributed agent commits excludes them.
+///
+/// Fails with an error (not a silent pass-through) so the caller can report
+/// that the range check could not run.
+fn list_sandbox_guest_refs(host: &impl Host, git: &Path) -> Result<Vec<String>> {
+    let mut cmd = Command::new(git);
+    cmd.args([
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/remotes/sandbox-guest/",
+    ]);
+    let out = host
+        .run(&cmd)
+        .map_err(|e| anyhow::anyhow!("agent-commit check could not run: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "agent-commit check could not run (git for-each-ref): {}",
+            stderr.trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Refuse dispatch if the host working tree contains commits authored by
+/// [`AGENT_EMAIL`] that have not yet been re-attributed to the repository owner.
+///
+/// When the host lands sandbox work via `jj duplicate` / `git cherry-pick`, the
+/// duplicated commits inherit the agent's author identity. The host must re-author
+/// them (step 3 of the landing procedure) **before** calling dispatch again.
+/// After dispatch, those commits become ancestors of an immutable remote bookmark
+/// and `jj` refuses to rewrite their author.
+///
+/// The check bounds the range to commits reachable from `HEAD` but **not** from
+/// any existing `refs/remotes/sandbox-guest/` bookmark. That set is exactly the
+/// host-side copies landed since the last dispatch — the originals in the guest
+/// bookmark are excluded because they were already frozen and cannot be re-authored
+/// regardless.
+///
+/// Fails closed: if either git probe cannot run or exits non-zero, the function
+/// returns an error rather than silently claiming the range is clean.
+fn guard_against_agent_commits(host: &impl Host, git: &Path) -> Result<()> {
+    let refs = list_sandbox_guest_refs(host, git)?;
+
+    let mut cmd = Command::new(git);
+    cmd.arg("log")
+        .arg(format!("--author={AGENT_EMAIL}"))
+        .arg("--oneline")
+        .arg("HEAD");
+    for r in &refs {
+        cmd.arg(format!("^{r}"));
+    }
+
+    let out = host
+        .run(&cmd)
+        .map_err(|e| anyhow::anyhow!("agent-commit check could not run: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "agent-commit check could not run (git log): {}",
+            stderr.trim()
+        );
+    }
+
+    let output = String::from_utf8_lossy(&out.stdout);
+    let commits: Vec<&str> = output.lines().filter(|l| !l.is_empty()).collect();
+    if commits.is_empty() {
+        return Ok(());
+    }
+
+    let list = commits
+        .iter()
+        .map(|l| format!("  {l}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    bail!(
+        "refusing dispatch: {n} commit(s) authored by {AGENT_EMAIL} would be frozen \
+         by this dispatch:\n\n\
+         {list}\n\n\
+         These commits were landed from a sandbox but not yet re-attributed to the \
+         repository owner. Once this dispatch seeds the guest, they become ancestors \
+         of an immutable remote bookmark; jj then refuses to rewrite their author.\n\n\
+         Fix before dispatching:\n\
+         - jj: `jj metaedit --update-author -r <revset-covering-listed-commits>`\n\
+         - git: for each commit (oldest first), \
+           `git commit --amend --reset-author --no-edit`\n\n\
+         Override: re-run with --force if you have a specific reason to proceed.",
+        n = commits.len()
+    );
 }
 
 /// Guard → compose → claim, returning `(resolved id, directive)`. Compose runs
@@ -324,5 +442,174 @@ mod tests {
             &CardId::parse("ffffff").unwrap()
         )
         .is_err());
+    }
+
+    // --- guard_against_agent_commits tests ---
+
+    use crate::sandbox::host::{Call, FakeHost};
+    use std::io;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
+
+    fn cmd_output(code: i32, stdout: &[u8], stderr: &[u8]) -> io::Result<Output> {
+        Ok(Output {
+            status: ExitStatus::from_raw(code << 8),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        })
+    }
+
+    #[test]
+    fn it_proceeds_when_no_agent_commits_exist() {
+        let mut host = FakeHost::new();
+        // for-each-ref: no sandbox-guest refs
+        host.push_run(cmd_output(0, b"", b""));
+        // git log: no agent-authored commits in range
+        host.push_run(cmd_output(0, b"", b""));
+        assert!(guard_against_agent_commits(&host, Path::new("/bin/git")).is_ok());
+    }
+
+    #[test]
+    fn it_refuses_when_agent_commits_are_in_range() {
+        let mut host = FakeHost::new();
+        host.push_run(cmd_output(0, b"", b"")); // for-each-ref: no exclusion refs
+        host.push_run(cmd_output(0, b"abc1234 land the thing\n", b"")); // git log: one found
+        let err = guard_against_agent_commits(&host, Path::new("/bin/git")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("refusing dispatch"), "should refuse: {msg}");
+    }
+
+    #[test]
+    fn it_names_the_offending_commits_in_the_refusal() {
+        let mut host = FakeHost::new();
+        host.push_run(cmd_output(0, b"", b""));
+        host.push_run(cmd_output(
+            0,
+            b"abc1234 land the thing\ndef5678 another unlanded commit\n",
+            b"",
+        ));
+        let err = guard_against_agent_commits(&host, Path::new("/bin/git")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("abc1234 land the thing"),
+            "should name first commit: {msg}"
+        );
+        assert!(
+            msg.contains("def5678 another unlanded commit"),
+            "should name second commit: {msg}"
+        );
+    }
+
+    #[test]
+    fn it_mentions_the_fix_commands_and_override_in_the_refusal() {
+        let mut host = FakeHost::new();
+        host.push_run(cmd_output(0, b"", b""));
+        host.push_run(cmd_output(0, b"abc1234 some work\n", b""));
+        let err = guard_against_agent_commits(&host, Path::new("/bin/git")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("jj metaedit --update-author"),
+            "should mention jj fix: {msg}"
+        );
+        assert!(
+            msg.contains("--reset-author"),
+            "should mention git amend fix: {msg}"
+        );
+        assert!(
+            msg.contains("--force"),
+            "should mention --force override: {msg}"
+        );
+    }
+
+    #[test]
+    fn it_fails_closed_when_for_each_ref_fails_to_run() {
+        let mut host = FakeHost::new();
+        host.push_run(Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "git not found",
+        )));
+        let err = guard_against_agent_commits(&host, Path::new("/bin/git")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("could not run"),
+            "should report inability to check, not a clean pass: {msg}"
+        );
+    }
+
+    #[test]
+    fn it_fails_closed_when_for_each_ref_exits_nonzero() {
+        let mut host = FakeHost::new();
+        host.push_run(cmd_output(128, b"", b"fatal: not a git repository"));
+        let err = guard_against_agent_commits(&host, Path::new("/bin/git")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("could not run"), "should fail closed: {msg}");
+    }
+
+    #[test]
+    fn it_fails_closed_when_git_log_fails_to_run() {
+        let mut host = FakeHost::new();
+        host.push_run(cmd_output(0, b"", b"")); // for-each-ref: ok
+        host.push_run(Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "denied",
+        )));
+        let err = guard_against_agent_commits(&host, Path::new("/bin/git")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("could not run"), "should fail closed: {msg}");
+    }
+
+    #[test]
+    fn it_fails_closed_when_git_log_exits_nonzero() {
+        let mut host = FakeHost::new();
+        host.push_run(cmd_output(0, b"", b"")); // for-each-ref: ok, no refs
+        host.push_run(cmd_output(128, b"", b"fatal: not a git repository")); // git log: fails
+        let err = guard_against_agent_commits(&host, Path::new("/bin/git")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("could not run"), "should fail closed: {msg}");
+    }
+
+    #[test]
+    fn it_passes_sandbox_guest_refs_as_exclusions_in_git_log() {
+        let mut host = FakeHost::new();
+        // for-each-ref returns two refs
+        host.push_run(cmd_output(
+            0,
+            b"refs/remotes/sandbox-guest/card-abc\nrefs/remotes/sandbox-guest/card-def\n",
+            b"",
+        ));
+        host.push_run(cmd_output(0, b"", b"")); // git log: clean
+        guard_against_agent_commits(&host, Path::new("/bin/git")).unwrap();
+
+        let log_args = host.calls().into_iter().find_map(|c| match c {
+            Call::Run(v) if v.iter().any(|a| a == "log") => Some(v),
+            _ => None,
+        });
+        let args = log_args.expect("git log should have been called");
+        assert!(
+            args.contains(&"^refs/remotes/sandbox-guest/card-abc".to_string()),
+            "should exclude first ref: {args:?}"
+        );
+        assert!(
+            args.contains(&"^refs/remotes/sandbox-guest/card-def".to_string()),
+            "should exclude second ref: {args:?}"
+        );
+    }
+
+    #[test]
+    fn it_runs_git_log_with_the_agent_email_author_filter() {
+        let mut host = FakeHost::new();
+        host.push_run(cmd_output(0, b"", b"")); // for-each-ref: no refs
+        host.push_run(cmd_output(0, b"", b"")); // git log: clean
+        guard_against_agent_commits(&host, Path::new("/bin/git")).unwrap();
+
+        let log_args = host.calls().into_iter().find_map(|c| match c {
+            Call::Run(v) if v.iter().any(|a| a == "log") => Some(v),
+            _ => None,
+        });
+        let args = log_args.expect("git log should have been called");
+        let has_author_filter = args
+            .iter()
+            .any(|a| a.contains("--author=") && a.contains(AGENT_EMAIL));
+        assert!(has_author_filter, "should filter by agent email: {args:?}");
     }
 }
