@@ -471,6 +471,33 @@ pub fn combine_work_state(finished: bool, beats: &[BeatStatus]) -> WorkState {
     }
 }
 
+// ── Staleness bound ───────────────────────────────────────────────────────────
+
+/// Multiplier applied to a heartbeat's own interval to derive the staleness
+/// bound. Three intervals clears the worst-case late tick (a slow check fills
+/// the full budget, so consecutive ticks can be up to two intervals apart) while
+/// still catching a dead sender well within the first user-visible status check.
+pub const STALE_BEAT_MULTIPLIER: u64 = 3;
+
+/// Returns the staleness bound in seconds for a heartbeat whose polling interval
+/// is `interval_secs`.
+///
+/// An entry not refreshed within this many seconds is treated as absent by the
+/// work-state coordinator — its `beating` flag is no longer counted toward
+/// [`WorkState::Active`].
+pub fn staleness_bound_secs(interval_secs: u64) -> u64 {
+    STALE_BEAT_MULTIPLIER.saturating_mul(interval_secs)
+}
+
+/// Returns `true` when a beat entry is stale at `now_secs`.
+///
+/// Staleness is declared when the silence since `received_at_secs` exceeds
+/// [`staleness_bound_secs`] for `interval_secs`. The bound uses strict `>`
+/// so an entry refreshed exactly at the boundary edge is still live.
+pub fn is_stale(interval_secs: u64, received_at_secs: u64, now_secs: u64) -> bool {
+    now_secs.saturating_sub(received_at_secs) > staleness_bound_secs(interval_secs)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1066,5 +1093,87 @@ mod heartbeat_set_tests {
         let diff = eval_scan(&mut state, vec![good("ok.yaml")], vec![broken("bad.yaml")]);
         assert_eq!(diff.to_start.len(), 1);
         assert_eq!(diff.new_errors.len(), 1);
+    }
+}
+
+// ── Staleness bound tests ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod staleness_tests {
+    use super::*;
+
+    const INTERVAL: u64 = 10; // seconds — the default heartbeat cadence
+
+    #[test]
+    fn it_is_not_stale_immediately_after_a_beat_arrives() {
+        // received_at == now_secs: zero silence; must never be stale.
+        let now = 1_000_000u64;
+        assert!(!is_stale(INTERVAL, now, now));
+    }
+
+    #[test]
+    fn it_is_not_stale_within_the_bound() {
+        // Silence of exactly `staleness_bound_secs` is still live (strict >).
+        let now = 1_000_000u64;
+        let received_at = now - staleness_bound_secs(INTERVAL);
+        assert!(
+            !is_stale(INTERVAL, received_at, now),
+            "silence == bound is still live"
+        );
+    }
+
+    #[test]
+    fn it_becomes_stale_when_silence_exceeds_the_bound() {
+        let now = 1_000_000u64;
+        let received_at = now - staleness_bound_secs(INTERVAL) - 1;
+        assert!(
+            is_stale(INTERVAL, received_at, now),
+            "silence > bound must be stale"
+        );
+    }
+
+    #[test]
+    fn it_derives_the_bound_from_the_heartbeats_own_interval_not_a_global() {
+        // A slow heartbeat (60 s interval) has a proportionally wider bound than
+        // a fast one (10 s), so a slow-but-alive sender is never falsely evicted.
+        let slow_interval = 60u64;
+        let fast_interval = 10u64;
+        assert!(
+            staleness_bound_secs(slow_interval) > staleness_bound_secs(fast_interval),
+            "a slower heartbeat gets a wider staleness window"
+        );
+        // Concretely: 30 s of silence is stale for the 10 s heartbeat but not
+        // for the 60 s one.
+        let now = 1_000_000u64;
+        let received_at = now - 31; // 31 s ago
+        assert!(
+            is_stale(fast_interval, received_at, now),
+            "31 s is stale for 10 s interval"
+        );
+        assert!(
+            !is_stale(slow_interval, received_at, now),
+            "31 s is not stale for 60 s interval"
+        );
+    }
+
+    #[test]
+    fn it_never_treats_a_slow_but_alive_heartbeat_as_stale() {
+        // Worst-case late tick: the check fills the full interval budget, so
+        // two consecutive ticks are up to two intervals apart. With multiplier 3
+        // the entry must still be live at `2 * interval - 1` seconds of silence.
+        let now = 1_000_000u64;
+        let worst_case_gap = 2 * INTERVAL - 1;
+        let received_at = now - worst_case_gap;
+        assert!(
+            !is_stale(INTERVAL, received_at, now),
+            "worst-case late tick must not be treated as stale"
+        );
+    }
+
+    #[test]
+    fn it_handles_clock_skew_without_panicking() {
+        // received_at > now_secs: saturating_sub prevents underflow; the entry
+        // looks zero-seconds-old, which is never stale.
+        assert!(!is_stale(INTERVAL, 1_000_100, 1_000_000));
     }
 }

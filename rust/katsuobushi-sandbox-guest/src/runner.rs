@@ -23,6 +23,9 @@ pub struct BeatStatusUpdate {
     pub label: String,
     /// The status produced by this tick.
     pub status: BeatStatus,
+    /// The heartbeat's polling interval in seconds — the coordinator uses this
+    /// to derive the per-entry staleness bound.
+    pub interval_secs: u64,
 }
 
 /// Label used by the turn heartbeat in [`BeatStatusUpdate`] messages.
@@ -143,6 +146,7 @@ pub async fn run_turn_heartbeat(
         let _ = beat_tx.send(BeatStatusUpdate {
             label: TURN_BEAT_LABEL.to_string(),
             status,
+            interval_secs: TurnBeat::INTERVAL.as_secs(),
         });
     }
 }
@@ -193,6 +197,7 @@ async fn run_one(
         let _ = beat_tx.send(BeatStatusUpdate {
             label: hb.label.clone(),
             status,
+            interval_secs: hb.interval.as_secs(),
         });
         state = new_state;
     }
