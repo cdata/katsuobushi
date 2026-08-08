@@ -95,3 +95,48 @@ success and did nothing (filed as `6d77aa`). So the guard's first real act was t
 catch commits that the prose-level fix had silently failed to correct — which is
 precisely the argument the `9344ec` reviewer made for checking the **outcome**
 rather than trusting the step.
+
+## Review notes
+
+### Round 1 — `review-e7fd2b-1b74dd9c` — VERDICT: accept
+
+Gates: 617 tests, `rust lint` clean, `markdown lint` clean.
+
+**Ordering is correct — a refusal leaves no dirty board.** This was the host's
+main worry. The agent-commit guard runs **before** `prepare()`, and `prepare()`
+does its own state guard, compose, then claim in that order. So a refusal from
+either guard returns before any board mutation; no path leaves a card marked
+`in-progress` with no VM. The module comment documents the ordering and an inline
+comment restates it.
+
+**Fail-closed verified, not assumed.** Both probes (`for-each-ref`, `git log`)
+× both failure kinds (spawn error, non-zero exit) = four paths, all returning
+`Err` and surfacing "could not run". All four are tested by name.
+
+**The fixed author literal is right, and the reviewer rebutted the alternative.**
+The host suggested "any author that is not the configured user" might be more
+robust; the reviewer argued it would generate mass false positives from imported
+history, co-authored commits and legitimate third-party contributors in any
+shared repo, whereas the guest identity is a system constant, not user
+configurable. It is documented in both places a reader would look — a four-line
+doc comment on `AGENT_EMAIL` (`:38-41`) and the Attribution section of
+`SKILL.md`. Accepted as the better choice.
+
+**First-ever dispatch is benign.** With no `sandbox-guest` refs, `git log` runs
+unbounded from `HEAD` to root. A false positive needs agent-authored commits in
+host history with **no** bookmark covering them — only reachable by an
+out-of-procedure path (cherry-picked but never fetched) or a hand-made commit
+using the agent identity. So no realistic path to habitual `--force`.
+
+**Ten tests, not the nine claimed**, and the two argument-inspection tests verify
+what the implementation actually sent to the fake rather than what the test
+constructed.
+
+**Known gaps, recorded not filed:**
+
+- No test asserts that on a first-ever dispatch `git log` receives **zero** `^ref`
+  arguments — the clean-path test covers the outcome but not the range boundary.
+- `--force` leaves no structured audit trail. The frozen agent-authored commit is
+  its own evidence, but there is no record that the guard was bypassed. Fine
+  while force is rare; a concern if it becomes common enough to be noticed only
+  in post-mortems.
