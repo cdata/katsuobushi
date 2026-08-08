@@ -30,10 +30,11 @@ kanban-plugin: basic
 
 ## In Progress
 
-- [ ] [[5e545d]]
 - [ ] [[859e35]]
 
 ## Needs Review
+
+- [ ] [[5e545d]]
 
 ## Ready
 
