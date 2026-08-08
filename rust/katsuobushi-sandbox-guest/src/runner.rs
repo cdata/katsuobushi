@@ -12,8 +12,20 @@ use tokio::process::Command;
 use tokio::time::{timeout, MissedTickBehavior};
 
 use crate::heartbeat::{
-    apply_check, load_heartbeats, BeatState, CheckOutcome, Heartbeat, HeartbeatError, TurnBeat,
+    apply_check, load_heartbeats, BeatState, BeatStatus, CheckOutcome, Heartbeat, HeartbeatError,
+    TurnBeat,
 };
+
+/// A single beat-status update sent from a heartbeat task to the coordinator.
+pub struct BeatStatusUpdate {
+    /// The heartbeat's label; `TURN_BEAT_LABEL` for the turn heartbeat.
+    pub label: String,
+    /// The status produced by this tick.
+    pub status: BeatStatus,
+}
+
+/// Label used by the turn heartbeat in [`BeatStatusUpdate`] messages.
+pub const TURN_BEAT_LABEL: &str = "$turn";
 
 /// Merge heartbeats from all directories in `dirs`. Errors are collected
 /// without stopping remaining directories from loading.
@@ -34,9 +46,20 @@ pub fn collect_heartbeats(dirs: &[PathBuf]) -> (Vec<Heartbeat>, Vec<HeartbeatErr
 /// turn heartbeat, which beats for the life of the current turn. Never returns
 /// normally.
 ///
+/// Each heartbeat task sends [`BeatStatusUpdate`] values to `beat_tx` on every
+/// tick so the server can aggregate them into a [`WorkState`] and detect
+/// transitions.
+///
 /// Heartbeats run concurrently — one tokio task per heartbeat — so a slow
 /// check on one heartbeat does not delay another.
-pub async fn run_heartbeat_set(hb_dirs: Vec<PathBuf>, cwd: PathBuf, turn_armed: Arc<AtomicBool>) {
+///
+/// [`WorkState`]: crate::heartbeat::WorkState
+pub async fn run_heartbeat_set(
+    hb_dirs: Vec<PathBuf>,
+    cwd: PathBuf,
+    turn_armed: Arc<AtomicBool>,
+    beat_tx: tokio::sync::mpsc::UnboundedSender<BeatStatusUpdate>,
+) {
     let (heartbeats, errors) = collect_heartbeats(&hb_dirs);
     for err in &errors {
         eprintln!("katsuobushi-heartbeat: parse error: {err}");
@@ -44,20 +67,25 @@ pub async fn run_heartbeat_set(hb_dirs: Vec<PathBuf>, cwd: PathBuf, turn_armed: 
 
     for heartbeat in heartbeats {
         let cwd = cwd.clone();
+        let tx = beat_tx.clone();
         tokio::spawn(async move {
-            run_one(heartbeat, cwd).await;
+            run_one(heartbeat, cwd, tx).await;
         });
     }
 
     // The turn heartbeat joins the same set: one task, armed/silenced by the
     // server via `turn_armed`.
-    tokio::spawn(run_turn_heartbeat(turn_armed));
+    tokio::spawn(run_turn_heartbeat(turn_armed, beat_tx));
 }
 
 /// Run the turn heartbeat indefinitely: ticks every [`TurnBeat::INTERVAL`],
-/// reflecting the server's armed/silenced state via `armed`. The resulting
-/// [`BeatStatus`] is consumed by a later card for work-state reporting.
-pub async fn run_turn_heartbeat(armed: Arc<AtomicBool>) {
+/// reflecting the server's armed/silenced state via `armed`. Sends a
+/// [`BeatStatusUpdate`] on every tick so the work-state coordinator can
+/// aggregate it with the file heartbeats.
+pub async fn run_turn_heartbeat(
+    armed: Arc<AtomicBool>,
+    beat_tx: tokio::sync::mpsc::UnboundedSender<BeatStatusUpdate>,
+) {
     let mut ticker = tokio::time::interval(TurnBeat::INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut beat = TurnBeat::default();
@@ -70,14 +98,22 @@ pub async fn run_turn_heartbeat(armed: Arc<AtomicBool>) {
             .as_secs();
         // Sync armed flag from the shared atomic, then tick.
         beat.armed = armed.load(Ordering::Relaxed);
-        let _status = beat.tick(now_secs);
-        // _status: a later card consumes this for work-state reporting.
+        let status = beat.tick(now_secs);
+        let _ = beat_tx.send(BeatStatusUpdate {
+            label: TURN_BEAT_LABEL.to_string(),
+            status,
+        });
     }
 }
 
 /// Run one heartbeat indefinitely: tick every `hb.interval`, run the check,
-/// optionally run the detail body, and update the beat state via [`apply_check`].
-async fn run_one(hb: Heartbeat, cwd: PathBuf) {
+/// optionally run the detail body, update the beat state via [`apply_check`],
+/// and send the resulting [`BeatStatusUpdate`] to the coordinator.
+async fn run_one(
+    hb: Heartbeat,
+    cwd: PathBuf,
+    beat_tx: tokio::sync::mpsc::UnboundedSender<BeatStatusUpdate>,
+) {
     let mut ticker = tokio::time::interval(hb.interval);
     // If a check + detail pair takes longer than the interval, skip the
     // missed ticks and wait a full interval before trying again — this keeps
@@ -112,8 +148,11 @@ async fn run_one(hb: Heartbeat, cwd: PathBuf) {
             CheckOutcome::Miss
         };
 
-        let (new_state, _status) = apply_check(state, outcome, now_secs, timeout_secs);
-        // _status is consumed by a later card for work-state reporting.
+        let (new_state, status) = apply_check(state, outcome, now_secs, timeout_secs);
+        let _ = beat_tx.send(BeatStatusUpdate {
+            label: hb.label.clone(),
+            status,
+        });
         state = new_state;
     }
 }

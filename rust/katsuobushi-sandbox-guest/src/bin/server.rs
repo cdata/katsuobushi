@@ -44,13 +44,14 @@
 //! The nudge decision lives in the pure core; only the injection + timer are
 //! async ([`spawn_grace`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use katsuobushi_sandbox_guest::runner::run_heartbeat_set;
+use katsuobushi_sandbox_guest::heartbeat::{BeatStatus, WorkState, combine_work_state};
+use katsuobushi_sandbox_guest::runner::{run_heartbeat_set, BeatStatusUpdate};
 
 use anyhow::Context as _;
 use katsuobushi_sandbox_protocol::{
@@ -66,7 +67,7 @@ use rmcp::{ServerHandler, ServiceExt};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
 /// Boxed, shared write half of the live control connection to the host. The
 /// report-socket task writes relayed `Report`s here; the control task installs
@@ -120,6 +121,27 @@ impl Default for TurnState {
             last_activity_at: String::new(),
         }
     }
+}
+
+/// The on-disk work-state record (`work-state.json`). Written by the
+/// work-state coordinator on every tick (throttled) and on every transition
+/// (forced). Read out-of-band by `sandbox status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkStateRecord {
+    work_state_version: u32,
+    /// `"active"` | `"idle"` | `"finished"`.
+    work_state: String,
+    is_late: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    carrying_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    carrying_duration_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_report_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_report_at: Option<String>,
+    nudge_count: u32,
 }
 
 /// The in-flight turn the machine tracks (`None` between turns).
@@ -177,6 +199,10 @@ struct Session {
     /// immediately, the pre-nudge behavior — which keeps the many tests that
     /// build `Session::default()` on the old single-grace path.
     max_nudges: u32,
+    /// The most recent voluntary agent report text, for the work-state record.
+    last_report_text: Option<String>,
+    /// The timestamp of the most recent voluntary agent report.
+    last_report_at: Option<String>,
 }
 
 /// An ordered event the state machine consumes. The grace window is modeled as
@@ -328,6 +354,9 @@ impl Session {
             Event::Report(report) => {
                 let terminal = matches!(report.status, Status::Done | Status::Blocked);
                 self.state.last_activity_at = now.to_string();
+                // Track for the work-state record so `sandbox status` can surface it.
+                self.last_report_at = Some(now.to_string());
+                self.last_report_text = Some(report.text.clone());
                 let mut force = false;
                 let mut clear_turn = false;
                 // A report that names a *different* turn is stale (a late
@@ -657,6 +686,17 @@ fn write_turn_state(share: &Path, snapshot: &TurnState) -> anyhow::Result<()> {
     bytes.push(b'\n');
     let tmp = share.join(".turn-state.json.tmp");
     let path = share.join("turn-state.json");
+    std::fs::write(&tmp, &bytes).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("rename into {}", path.display()))?;
+    Ok(())
+}
+
+/// Atomically write `work-state.json` (temp + rename), factored out for testability.
+fn write_work_state(share: &Path, record: &WorkStateRecord) -> anyhow::Result<()> {
+    let mut bytes = serde_json::to_vec(record).context("encode work-state")?;
+    bytes.push(b'\n');
+    let tmp = share.join(".work-state.json.tmp");
+    let path = share.join("work-state.json");
     std::fs::write(&tmp, &bytes).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path).with_context(|| format!("rename into {}", path.display()))?;
     Ok(())
@@ -1004,6 +1044,112 @@ async fn relay_report(stream: UnixStream, ctl: Arc<Control>) -> anyhow::Result<(
     Ok(())
 }
 
+/// Aggregate [`BeatStatusUpdate`]s from all heartbeat tasks, compute the
+/// combined [`WorkState`], and — on each transition — emit a
+/// [`GuestMessage::WorkStateTransition`] to the attached drive. Also writes
+/// `work-state.json` (throttled) so `sandbox status` can read it out of band.
+///
+/// A transition is emitted exactly once per state change, not once per
+/// heartbeat interval.
+async fn run_work_state_coordinator(
+    ctl: Arc<Control>,
+    mut rx: mpsc::UnboundedReceiver<BeatStatusUpdate>,
+) {
+    let mut beats: HashMap<String, BeatStatus> = HashMap::new();
+    let mut prev: Option<WorkState> = None;
+    let mut last_ws_write: Option<Instant> = None;
+
+    while let Some(update) = rx.recv().await {
+        beats.insert(update.label, update.status);
+
+        // Snapshot the latest per-beat statuses for the combiner.
+        let all_beats: Vec<BeatStatus> = beats.values().cloned().collect();
+
+        // Read the session fields needed for the record without holding the
+        // lock across async I/O.
+        let (finished, nudge_count, last_report_text, last_report_at) = {
+            let session = ctl.session.lock().await;
+            let finished = session
+                .turn
+                .as_ref()
+                .map_or(false, |t| t.terminal_reported);
+            let nudge_count = session.turn.as_ref().map_or(0, |t| t.nudges);
+            (
+                finished,
+                nudge_count,
+                session.last_report_text.clone(),
+                session.last_report_at.clone(),
+            )
+        };
+
+        let new_state = combine_work_state(finished, &all_beats);
+        let is_transition = Some(new_state) != prev;
+        prev = Some(new_state);
+
+        let is_late = matches!(new_state, WorkState::Active { is_late: true });
+
+        // The primary heartbeat: the beating one with the longest unbroken run.
+        let primary = if matches!(new_state, WorkState::Active { .. }) {
+            beats
+                .iter()
+                .filter(|(_, s)| s.beating)
+                .max_by_key(|(_, s)| s.duration_secs)
+                .map(|(l, s)| (l.clone(), s.duration_secs))
+        } else {
+            None
+        };
+        let (carrying_label, carrying_duration_secs) = match primary {
+            Some((l, d)) => (Some(l), Some(d)),
+            None => (None, None),
+        };
+
+        let work_state_str = match new_state {
+            WorkState::Active { .. } => "active",
+            WorkState::Finished => "finished",
+            WorkState::Idle => "idle",
+        };
+
+        // Emit to the attached drive — once per transition, not per tick.
+        if is_transition {
+            let msg = GuestMessage::WorkStateTransition {
+                work_state: work_state_str.to_string(),
+                is_late,
+                label: carrying_label.clone(),
+                duration_secs: carrying_duration_secs,
+            };
+            if let Err(e) = send_to_host(&ctl.host, &msg).await {
+                eprintln!("katsuobushi-heartbeat: work-state to host failed: {e:#}");
+            }
+        }
+
+        // Write work-state.json: forced on transitions, throttled otherwise.
+        let due = is_transition
+            || last_ws_write.map_or(true, |t| t.elapsed() >= Duration::from_secs(1));
+        if due {
+            let record = WorkStateRecord {
+                work_state_version: 1,
+                work_state: work_state_str.to_string(),
+                is_late,
+                carrying_label,
+                carrying_duration_secs,
+                last_report_text,
+                last_report_at,
+                nudge_count,
+            };
+            let share = ctl.share.clone();
+            match tokio::task::spawn_blocking(move || write_work_state(&share, &record)).await {
+                Ok(Ok(())) => last_ws_write = Some(Instant::now()),
+                Ok(Err(e)) => {
+                    eprintln!("katsuobushi-heartbeat: work-state.json write failed: {e:#}")
+                }
+                Err(e) => {
+                    eprintln!("katsuobushi-heartbeat: work-state.json write task failed: {e}")
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Serve the MCP side over stdio; Claude Code is the client. The running
@@ -1076,7 +1222,9 @@ async fn main() -> anyhow::Result<()> {
     if project_dir.is_dir() {
         hb_dirs.push(project_dir);
     }
-    tokio::spawn(run_heartbeat_set(hb_dirs, workspace, turn_armed));
+    let (beat_tx, beat_rx) = mpsc::unbounded_channel::<BeatStatusUpdate>();
+    tokio::spawn(run_heartbeat_set(hb_dirs, workspace, turn_armed, beat_tx));
+    tokio::spawn(run_work_state_coordinator(ctl.clone(), beat_rx));
 
     // The control/report listeners are auxiliary: if they fail to bind (e.g. an
     // interactive guest launched with no vsock device, or a missing socket dir)

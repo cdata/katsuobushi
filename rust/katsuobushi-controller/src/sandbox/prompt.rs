@@ -550,6 +550,20 @@ where
         // a late `SessionReady`, lifecycle for a stale `turn_id`, an unknown newer
         // variant, or undecodable bytes.
         Ok(GuestMessage::Ready) => eprintln!("· guest ready"),
+        Ok(GuestMessage::WorkStateTransition {
+            work_state,
+            is_late,
+            label,
+            duration_secs,
+        }) => {
+            let detail = match (label.as_deref(), duration_secs) {
+                (Some(l), Some(d)) => format!(" ({l}, {d}s)"),
+                (Some(l), None) => format!(" ({l})"),
+                _ => String::new(),
+            };
+            let late = if is_late { ", late" } else { "" };
+            eprintln!("· work state: {work_state}{late}{detail}");
+        }
         Ok(_) => {}
         Err(e) => eprintln!("· undecodable guest line: {e}"),
     }
@@ -1317,6 +1331,26 @@ mod tests {
         assert_eq!(
             events,
             vec![Ev::Report(Status::Info), Ev::Report(Status::Done)]
+        );
+    }
+
+    #[test]
+    fn a_work_state_transition_produces_no_orchestrator_event() {
+        // AC1 + AC4: a `WorkStateTransition` is a diagnostic printed to stderr;
+        // it must NOT reach the sink (not journaled, not rendered).
+        let (result, events, _, _) = drive_over_canned(
+            "go",
+            1,
+            &[
+                r#"{"type":"workstatetransition","work_state":"active","is_late":false,"label":"agent-work","duration_secs":42}"#,
+                r#"{"type":"report","status":"done","text":"ok"}"#,
+            ],
+        );
+        result.expect("a WorkStateTransition followed by done is not an error");
+        assert_eq!(
+            events,
+            vec![Ev::Report(Status::Done)],
+            "WorkStateTransition must not surface an orchestrator event"
         );
     }
 
