@@ -117,3 +117,47 @@ parse — one error, then silence for that path, with other files unaffected.
 `console.log` genuinely stops at the login prompt, and the surrounding
 troubleshooting sequence (provision.log → console.log → WORK column) remains
 coherent.
+
+### Round 2 — implementor revision
+
+Added a "Block-scalar syntax" paragraph explaining that `|` is required (not
+`>`), that the two-space indent is YAML structure stripped before `sh(1)` sees
+the body, and that a folded `>` body silently exits 0 every tick. Added a
+"Comparison-type checks and the first-beat problem" paragraph with the
+baseline-and-`exit 1` pattern and a concrete `stat` mtime example beside the
+retained `pgrep` one, so an author sees both shapes. Collapsed `Active (Late)`
+from its own table row into a parenthetical on the `Active` row, matching
+`WorkState`'s three-variant model. Replaced the vague "persistent `Idle`"
+guidance with a pointer to the `N/M` nudge counter. Added a one-sentence
+parse-error isolation note.
+
+`markdown format` and `markdown lint` clean. No Rust changed, and the
+implementor said so rather than skipping the Rust gates silently.
+
+### Round 2 — `review-4c1acb-08f5e022` — VERDICT: needs-changes
+
+`markdown lint` passes; no `project/kanban/` changes; and the reviewer judged the
+section **not** overcorrected — the additions are "tight and on-point", which was
+the risk in asking for two new paragraphs.
+
+**Resolved:**
+
+- **Finding 1 (block-scalar trap).** Explains the rule, the mechanism *and* the
+  consequence, which is what the original omission lacked.
+- **Finding 3 (`Active (Late)` collapse).** The three-state table is correct and
+  the per-reading late guidance survived the collapse.
+- **Finding 4 (nudge counter).** The counter is real — source renders
+  `Idle — nudged N/M` and a test asserts `Idle — nudged 3/5` — and the core
+  branch-inspection warning is intact. Minor: the docs say `N/M` where the
+  display is `Idle — nudged N/M`. Non-blocking.
+
+**BLOCKING — the new worked example is broken, in the way the section warns
+about.** The prose on the first-beat problem is correct, but the `stat` mtime
+example writes its baseline to `prev=/run/myproject/hb-build.prev`. That
+directory is root-owned and the agent user cannot create it, so the redirect
+fails **silently**, the baseline is never written, and the heartbeat never beats.
+
+That is precisely the class of silent failure the section exists to teach people
+to avoid — a check that runs, reports nothing useful, and gives the author no
+signal. An incorrect worked example here is worse than the original omission,
+because a reader will copy it.
