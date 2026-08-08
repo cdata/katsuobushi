@@ -150,7 +150,8 @@ to get it reviewed. When it reports:
 
 Only once the card reaches `ready` is the reviewer spent — then remove it:
 `sandbox stop --remove review-<card-id>`. Until then **pause** it
-(`sandbox stop review-<card-id>`, no `--remove`) so the re-review starts warm.
+(`sandbox stop review-<card-id>`, no `--remove`) so the re-review starts warm;
+see "When to replace the reviewer instead of pausing" for the exception.
 
 ## Implement in a sandbox by default
 
