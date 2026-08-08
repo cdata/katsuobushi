@@ -320,9 +320,12 @@ imports it as a _remote_ bookmark: a remote bookmark moving never rewrites local
 history, so force-updating it cannot orphan host commits regardless of what the
 host has built on top. The leading `+` (force) keeps refetching idempotent at
 the ref level — a second fetch of the same instance updates the pointer rather
-than failing non-fast-forward — and that idempotency now also holds at the
-repository level (no abandoned commits, no rebase surprises on a review bounce).
-A colocated jj repo imports the ref automatically: jj reads `refs/remotes/*`
+than failing non-fast-forward. For instances first fetched with this version,
+that idempotency also holds at the repository level (no abandoned commits, no
+rebase surprises on a review bounce). Instances migrated from an older fetch
+scheme may have a stale `refs/heads/sandbox/<name>` ref left behind; the guard
+below handles it correctly and it is safe to delete (see Bounce, below). A
+colocated jj repo imports the ref automatically: jj reads `refs/remotes/*`
 alongside `refs/heads/*` and `refs/tags/*`.
 
 `sandbox fetch` also guards against the off-script case: if any local
@@ -358,9 +361,12 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
    an immutable remote bookmark by default. Instead:
    - jj: `jj duplicate <name>@sandbox-guest -d @` — copies the guest commits
      with new identities, leaving the remote bookmark untouched.
-   - git: `git cherry-pick <name>@sandbox-guest` — copies the diff without
-     moving any ref. Duplicating (never rebasing) guarantees the remote bookmark
-     always points only at guest history, so every future force-update is safe.
+   - git: `git cherry-pick sandbox-guest/<name>` — copies the diff without
+     moving any ref. (`sandbox-guest/<name>` is git's disambiguation form for
+     `refs/remotes/sandbox-guest/<name>`; `<name>@sandbox-guest` is jj notation
+     and is rejected by git.) Duplicating (never rebasing) guarantees the remote
+     bookmark always points only at guest history, so every future force-update
+     is safe.
 4. **Clean → land it, then remove the sandbox.** In `jj`, advance the
    working-copy pointer `@` onto the duplicated commits and leave bookmark
    placement to the user — anchoring accepted work on `@` keeps it durable
@@ -380,8 +386,12 @@ landing its first commit, the agent pushes its follow-up onto the _original_
 guest commit — its mirror is frozen at launch and doesn't see the host's rebased
 copy. On `sandbox fetch <name>` a second time the remote bookmark simply
 advances to the new tip; nothing is orphaned because the host never built on
-that bookmark. To land _only_ the new commits (since your last landing),
-identify the boundary and duplicate from there:
+that bookmark. For instances migrated from an older fetch scheme, the first
+post-upgrade fetch creates `refs/remotes/sandbox-guest/<name>` while leaving a
+stale `refs/heads/sandbox/<name>` behind — that debris ref is filtered out by
+the strict-descent guard and does not block re-fetching; delete it when
+convenient: `git branch -D sandbox/<name>`. To land _only_ the new commits
+(since your last landing), identify the boundary and duplicate from there:
 
 - jj: `jj duplicate <new-tip>@sandbox-guest~<n>..<new-tip>@sandbox-guest -d @`
   (where `<n>` is the count of new commits since the last landing, so the range

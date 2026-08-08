@@ -8,6 +8,32 @@ beneath it up to that version**. The top heading is the current release. `0.1.0`
 is the first tagged release, so it covers everything up to the first tag — i.e.
 the changes anyone tracking untagged `main` should know about.
 
+## Unreleased
+
+**`sandbox fetch` now writes to `refs/remotes/sandbox-guest/<inst>` — read that
+ref instead of `sandbox/<inst>` if you scripted against the old location.**
+
+The fetch command moved from `+sandbox/<inst>:refs/heads/sandbox/<inst>` (the
+0.4.1 scheme) to `+sandbox/<inst>:refs/remotes/sandbox-guest/<inst>`. On a
+colocated jj repo, `jj log -r '<inst>@sandbox-guest'` resolves the ref as
+before.
+
+**Old `refs/heads/sandbox/*` refs are left behind — they are harmless and safe
+to delete.**
+
+The first fetch after upgrading creates the new ref but does not remove the old
+one. The `sandbox fetch` guard now uses strict descent (not containment) when
+checking for local branches that descend from the guest tip, so a stale
+`refs/heads/sandbox/<inst>` pointing at pure guest history no longer blocks
+subsequent fetches. Delete it at any time:
+
+```sh
+git branch -D sandbox/<inst>
+```
+
+No spec or instance-state change (`specVersion 4` / `instanceVersion 2`
+unchanged).
+
 ## 0.4.2
 
 **`progressStallSecs` is removed — delete it from your `lib.sandbox` call.**
