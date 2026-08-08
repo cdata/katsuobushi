@@ -233,6 +233,7 @@
           commands =
             markdown.menuCommands
             // project.menuCommands
+            // rust.menuCommands
             // (pkgs.lib.optionalAttrs isLinux sandbox.menuCommands);
         };
       in
