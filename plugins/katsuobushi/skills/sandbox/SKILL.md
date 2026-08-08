@@ -367,6 +367,32 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
      and is rejected by git.) Duplicating (never rebasing) guarantees the remote
      bookmark always points only at guest history, so every future force-update
      is safe.
+
+   Two requirements apply to every duplicated commit before the work advances:
+
+   **Attribution.** Re-author each landed commit to the repository owner's
+   identity. The guest commits as its own agent identity inside the sandbox
+   (`agent@katsuobushi.local`); work in the owner's history must be attributed
+   to the owner instead. The duplicate step is the seam: it creates a copy in
+   the owner's repo, so the host sets authorship there. The guest branch keeps
+   its own identity — honest about who ran the code — while only what enters the
+   owner's history is re-attributed. **Design decision: re-author on landing,
+   not identity at launch** — handing the guest the owner's identity at launch
+   would make agent commits indistinguishable from a person's inside the sandbox
+   itself.
+   - git: after each `cherry-pick`, run
+     `git commit --amend --reset-author --no-edit`.
+   - jj: after duplicating, run
+     `jj describe --author "Name <email>" -r <change-id>` for each duplicated
+     change, using the host's configured identity from `git config user.name` /
+     `git config user.email`.
+
+   **Non-empty description.** Reject any duplicated commit whose commit message
+   is empty (git: empty or whitespace-only subject line; jj:
+   `(no description set)`) — fill it in before proceeding. Use the card title or
+   the agent's `done` summary as a starting point. A commit with no message is
+   not reviewable and not bisectable.
+
 4. **Clean → land it, then remove the sandbox.** In `jj`, advance the
    working-copy pointer `@` onto the duplicated commits and leave bookmark
    placement to the user — anchoring accepted work on `@` keeps it durable
@@ -376,8 +402,19 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
    the instance's unit of work is accepted, so it's spent (a plain
    `sandbox stop` removes an ephemeral instance; `--remove` also tears down a
    named one). Keep the `sandbox-guest/<name>` remote bookmark as the revert
-   artifact, and surface the agent's `done` summary plus a diffstat of what
-   landed — that digest is the orchestrator's "return value".
+   artifact while the card is in review. Once the card reaches `accepted`,
+   delete it — the work is no longer pending and the revert artifact is spent.
+   Deleting it also clears the dispatch-seeding stash commits
+   (`WIP on (no branch): …`, `index on (no branch): …`) that `git stash create`
+   left in the host's object store at dispatch time:
+   - git: `git update-ref -d refs/remotes/sandbox-guest/<name>`, then
+     `git gc --prune=now`.
+   - jj: after the `git update-ref` deletion, run `jj git import` to drop the
+     now-gone remote bookmark, then `jj util gc`.
+
+   Surface the agent's `done` summary plus a diffstat of what landed — that
+   digest is the orchestrator's "return value".
+
 5. **Doesn't land cleanly →** treat the reconciliation as ordinary delegated
    work, not a special case (below).
 
@@ -402,6 +439,13 @@ convenient: `git branch -D sandbox/<name>`. To land _only_ the new commits
 Never `jj rebase` the `sandbox-guest/<name>` bookmark. jj's immutability default
 refuses it on a remote bookmark, and even if overridden it would move the
 bookmark and break the idempotency the design relies on.
+
+**Superseded guest commits** on the old guest branch (commits the bounced guest
+built on top of the seed but that are no longer reachable from the new tip after
+you duplicated the accepted work) are pruned by reaping the sandbox refs and
+state dirs at acceptance. That reaping is tracked in card `c72eb6`; the guidance
+above (delete the remote bookmark at acceptance + `gc`) covers the stash-seed
+commits; `c72eb6` covers the superseded work commits.
 
 ### Conflict reconciliation
 
