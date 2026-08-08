@@ -161,3 +161,41 @@ That is precisely the class of silent failure the section exists to teach people
 to avoid — a check that runs, reports nothing useful, and gives the author no
 signal. An incorrect worked example here is worse than the original omission,
 because a reader will copy it.
+
+### Round 3 — implementor revision
+
+Changed the example's baseline path from `/run/myproject/hb-build.prev` to
+`/run/katsuobushi/control/hb-build.prev` — the directory the guest creates 0700
+agent-owned for exactly this purpose, and where both shipped heartbeats keep
+their own state. The implementor chose that over `/tmp` to match what ships,
+which was the preference given.
+
+**It ran the example rather than reasoning about it**, and reported three exit
+codes: first run wrote the baseline and exited 1; second run with the mtime
+unchanged exited 1; third run after a `touch` advanced the mtime exited 0. That
+is the first-beat pattern behaving exactly as the section describes. The `pgrep`
+example was run too and exited 0 with matching processes present.
+
+Nit fixed: the nudge-counter text now reads `Idle — nudged N/M`, matching the
+rendered form rather than a bare `N/M`.
+
+Host verified the path at `SKILL.md:527` and the counter wording in the
+`project-orchestration` skill.
+
+### Round 3 — `review-4c1acb-08f5e022` — VERDICT: accept
+
+**The reviewer executed the example itself rather than trusting the reported
+exit codes** — the whole point, since this example shipped broken once precisely
+because nobody ran it.
+
+- Observed exit codes: **1, 1, 0** — matching the implementor's claim exactly.
+- `/run/katsuobushi/control/` confirmed writable: `drwx------ agent:users`, and
+  the baseline file was created.
+- The path matches the directory convention both shipped heartbeats use.
+- The nudge wording `Idle — nudged N/M` matches the format string at
+  `status.rs:816` and the test assertion at `:1976` — checked against the code,
+  not guessed a second time.
+
+No regressions in the block-scalar coverage, the `Active (Late)` collapse or the
+branch-inspection warning. No prose was added this round, so the section stays
+tight. `markdown lint` clean, `project/kanban/` untouched.
