@@ -100,6 +100,19 @@ struct InstanceView {
     /// display. `None` when the guest has not yet written the record.
     #[serde(skip_serializing_if = "Option::is_none")]
     work_state: Option<String>,
+    /// Raw nudge count from `work-state.json` (machine-readable complement to
+    /// the nudge portion of `work_state`). `None` when the record is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nudge_count: Option<u32>,
+    /// Raw nudge budget (max_nudges) from `work-state.json`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nudge_budget: Option<u32>,
+    /// Text of the last incremental (voluntary) report from `work-state.json`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_note: Option<String>,
+    /// Formatted age of [`InstanceView::last_note`] (e.g. `"5m ago"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_note_age: Option<String>,
 }
 
 impl InstanceView {
@@ -449,7 +462,7 @@ fn render_list(views: &[InstanceView], r: &Renderer) -> String {
     // GRAPHICS is the GPU rung the instance launched with (`none` when graphics
     // is off), so a graphics-enabled swarm is scannable at a glance.
     let headers = [
-        "#", "INSTANCE", "STATE", "MODE", "PERSIST", "GRAPHICS", "LIVENESS",
+        "#", "INSTANCE", "STATE", "MODE", "PERSIST", "GRAPHICS", "LIVENESS", "WORK",
     ];
     let rows: Vec<Vec<TableCell>> = views
         .iter()
@@ -472,6 +485,7 @@ fn render_list(views: &[InstanceView], r: &Renderer) -> String {
                 TableCell::styled(v.persist_label(), CellStyle::Dim),
                 TableCell::styled(v.graphics_label(), CellStyle::Dim),
                 TableCell::styled(v.liveness_brief.as_deref().unwrap_or("-"), CellStyle::Dim),
+                TableCell::styled(v.work_state.as_deref().unwrap_or("-"), CellStyle::Dim),
             ]
         })
         .collect();
@@ -514,6 +528,16 @@ fn render_detail(v: &InstanceView, ssh: Option<&str>, console_log: &str, r: &Ren
     // has written `work-state.json`.
     if let Some(ws) = &v.work_state {
         lines.push(format!("work state: {ws}"));
+    }
+    // The last voluntary (working) report from the agent, with its age. Present
+    // only when the agent has sent at least one `report working` mid-turn.
+    if let Some(note) = &v.last_note {
+        let age = v
+            .last_note_age
+            .as_deref()
+            .map(|a| format!(" ({a})"))
+            .unwrap_or_default();
+        lines.push(format!("note:       {}{age}", first_line(note)));
     }
     // Whether the guest is running on the host's store DB or only its own — the
     // difference between an agent that can build and one that cannot.
@@ -620,6 +644,8 @@ fn summarize(
     );
     let liveness_brief = render_liveness_brief(turn_state.as_ref(), now);
 
+    let ws = read_work_state(host, &inst_dir.join("work-state.json"), now);
+
     InstanceView {
         name: name.to_string(),
         state,
@@ -632,7 +658,11 @@ fn summarize(
         liveness,
         liveness_brief,
         phase,
-        work_state: read_work_state(host, &inst_dir.join("work-state.json")),
+        work_state: ws.as_ref().map(|w| w.display.clone()),
+        nudge_count: ws.as_ref().map(|w| w.nudge_count),
+        nudge_budget: ws.as_ref().and_then(|w| w.nudge_budget),
+        last_note: ws.as_ref().and_then(|w| w.last_note.clone()),
+        last_note_age: ws.as_ref().and_then(|w| w.last_note_age.clone()),
         store_db: store_db_label(host, &inst_dir.join("nixdb-status")),
         // Through the host seam, like every other read here — so a unit test
         // of `summarize` never touches the real filesystem.
@@ -704,23 +734,92 @@ struct WorkStateRecord {
     carrying_label: Option<String>,
     #[serde(default)]
     carrying_duration_secs: Option<u64>,
+    #[serde(default)]
+    last_report_text: Option<String>,
+    #[serde(default)]
+    last_report_at: Option<String>,
+    #[serde(default)]
+    nudge_count: u32,
+    #[serde(default)]
+    nudge_budget: Option<u32>,
 }
 
-/// Read and format the work-state record for the detail view. Returns `None`
+/// Human-readable duration: under 60 s → seconds; under 1 h → minutes; else h+m.
+fn humanize_duration_secs(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        let mins = secs / 60;
+        if mins < 60 {
+            format!("{mins}m")
+        } else {
+            let hours = mins / 60;
+            let rem = mins % 60;
+            if rem == 0 {
+                format!("{hours}h")
+            } else {
+                format!("{hours}h{rem}m")
+            }
+        }
+    }
+}
+
+/// The parsed and rendered work-state, returned by [`read_work_state`].
+struct WorkStateSummary {
+    /// Human-formatted work-state string for the detail view and list column.
+    display: String,
+    /// Raw nudge count for the `--json` output.
+    nudge_count: u32,
+    /// Raw nudge budget (max_nudges) for the `--json` output.
+    nudge_budget: Option<u32>,
+    /// Text of the last incremental (voluntary working) report.
+    last_note: Option<String>,
+    /// Formatted age of [`WorkStateSummary::last_note`] (e.g. `"5m ago"`).
+    last_note_age: Option<String>,
+}
+
+/// Read and format the work-state record from `work-state.json`. Returns `None`
 /// when the file is missing, unreadable, or unparseable — all degrade silently.
-fn read_work_state(host: &impl Host, path: &Path) -> Option<String> {
+fn read_work_state(host: &impl Host, path: &Path, now: Option<i64>) -> Option<WorkStateSummary> {
     let bytes = host.read(path).ok()?;
     let record: WorkStateRecord = serde_json::from_slice(&bytes).ok()?;
-    let late = if record.is_late { ", late" } else { "" };
-    let detail = match (
-        record.carrying_label.as_deref(),
-        record.carrying_duration_secs,
-    ) {
-        (Some(l), Some(d)) => format!(" ({l}, {d}s)"),
-        (Some(l), None) => format!(" ({l})"),
+
+    // Capitalize the state and fold is_late into the label as `(Late)`.
+    let state_label = match record.work_state.as_str() {
+        "active" if record.is_late => "Active (Late)",
+        "active" => "Active",
+        "idle" => "Idle",
+        "finished" => "Finished",
+        other => other,
+    };
+
+    // Detail suffix: label + duration for active; nudge count for idle.
+    let detail = match record.work_state.as_str() {
+        "active" => match (
+            record.carrying_label.as_deref(),
+            record.carrying_duration_secs,
+        ) {
+            (Some(l), Some(d)) => format!(" — {l}, {}", humanize_duration_secs(d)),
+            (Some(l), None) => format!(" — {l}"),
+            _ => String::new(),
+        },
+        "idle" if record.nudge_count > 0 => match record.nudge_budget {
+            Some(b) => format!(" — nudged {}/{b}", record.nudge_count),
+            None => format!(" — nudged {}", record.nudge_count),
+        },
         _ => String::new(),
     };
-    Some(format!("{}{late}{detail}", record.work_state))
+
+    let display = format!("{state_label}{detail}");
+    let last_note_age = age_ago(now, record.last_report_at.as_deref());
+
+    Some(WorkStateSummary {
+        display,
+        nudge_count: record.nudge_count,
+        nudge_budget: record.nudge_budget,
+        last_note: record.last_report_text,
+        last_note_age,
+    })
 }
 
 /// Whether `refs/heads/sandbox/<name>` exists in the instance's bare mirror —
@@ -901,6 +1000,10 @@ mod tests {
             store_db: None,
             last_report: None,
             work_state: None,
+            nudge_count: None,
+            nudge_budget: None,
+            last_note: None,
+            last_note_age: None,
         }
     }
 
@@ -1795,16 +1898,15 @@ mod tests {
 
     #[test]
     fn it_surfaces_work_state_in_the_detail_view() {
-        // AC3: `sandbox status` surfaces the work state from `work-state.json`
-        // for an instance with no attached drive.
+        // The work state from `work-state.json` appears in the detail view.
         let r = Renderer::new(false, false);
         let v = InstanceView {
-            work_state: Some("active (agent-work, 120s)".to_string()),
+            work_state: Some("Active — agent-work, 2m".to_string()),
             ..view("inst-a", State::Running, Some(Mode::Agent), true)
         };
         let text = render_detail(&v, None, "/state/inst-a/console.log", &r);
         assert!(
-            text.contains("work state: active (agent-work, 120s)"),
+            text.contains("work state: Active — agent-work, 2m"),
             "{text}"
         );
     }
@@ -1819,22 +1921,29 @@ mod tests {
 
     #[test]
     fn it_reads_work_state_from_work_state_json() {
-        // AC3: read_work_state deserializes `work-state.json` and formats it for
+        // read_work_state deserializes `work-state.json` and formats it for
         // the detail view, going through the host seam (no filesystem access).
         let record = br#"{"workStateVersion":1,"workState":"active","isLate":false,"carryingLabel":"agent-work","carryingDurationSecs":42,"nudgeCount":0}"#;
         let mut host = FakeHost::new();
         host.push_read(Ok(record.to_vec()));
-        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"));
-        assert_eq!(ws.as_deref(), Some("active (agent-work, 42s)"));
+        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"), None);
+        assert_eq!(
+            ws.as_ref().map(|w| w.display.as_str()),
+            Some("Active — agent-work, 42s")
+        );
     }
 
     #[test]
-    fn it_surfaces_late_flag_in_the_work_state() {
+    fn it_surfaces_late_flag_as_active_late_not_a_fourth_state() {
+        // A late heartbeat renders as `Active (Late)`, not as a separate state.
         let record = br#"{"workStateVersion":1,"workState":"active","isLate":true,"carryingLabel":"agent-work","carryingDurationSecs":600,"nudgeCount":0}"#;
         let mut host = FakeHost::new();
         host.push_read(Ok(record.to_vec()));
-        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"));
-        assert_eq!(ws.as_deref(), Some("active, late (agent-work, 600s)"));
+        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"), None);
+        assert_eq!(
+            ws.as_ref().map(|w| w.display.as_str()),
+            Some("Active (Late) — agent-work, 10m")
+        );
     }
 
     #[test]
@@ -1842,21 +1951,88 @@ mod tests {
         let record = br#"{"workStateVersion":1,"workState":"idle","isLate":false,"nudgeCount":0}"#;
         let mut host = FakeHost::new();
         host.push_read(Ok(record.to_vec()));
-        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"));
-        assert_eq!(ws.as_deref(), Some("idle"));
+        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"), None);
+        assert_eq!(ws.as_ref().map(|w| w.display.as_str()), Some("Idle"));
+    }
+
+    #[test]
+    fn it_surfaces_nudge_count_in_idle_work_state() {
+        // Idle with nudges: fold count/budget into the work-state display.
+        let record = br#"{"workStateVersion":1,"workState":"idle","isLate":false,"nudgeCount":3,"nudgeBudget":5}"#;
+        let mut host = FakeHost::new();
+        host.push_read(Ok(record.to_vec()));
+        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"), None)
+            .expect("record present");
+        assert_eq!(ws.display, "Idle — nudged 3/5");
+        assert_eq!(ws.nudge_count, 3);
+        assert_eq!(ws.nudge_budget, Some(5));
+    }
+
+    #[test]
+    fn it_surfaces_nudge_count_without_budget_when_budget_absent() {
+        // Without nudgeBudget in the record, show count only.
+        let record = br#"{"workStateVersion":1,"workState":"idle","isLate":false,"nudgeCount":2}"#;
+        let mut host = FakeHost::new();
+        host.push_read(Ok(record.to_vec()));
+        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"), None)
+            .expect("record present");
+        assert_eq!(ws.display, "Idle — nudged 2");
+        assert_eq!(ws.nudge_count, 2);
+        assert!(ws.nudge_budget.is_none());
+    }
+
+    #[test]
+    fn it_surfaces_last_note_in_the_detail_view() {
+        // The last voluntary working report and its age appear as a `note:` line.
+        let r = Renderer::new(false, false);
+        let v = InstanceView {
+            work_state: Some("Active — agent-work, 5m".to_string()),
+            last_note: Some("building the feature".to_string()),
+            last_note_age: Some("3m ago".to_string()),
+            ..view("inst-a", State::Running, Some(Mode::Agent), true)
+        };
+        let text = render_detail(&v, None, "/state/inst-a/console.log", &r);
+        assert!(
+            text.contains("note:       building the feature (3m ago)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn it_omits_note_when_no_voluntary_report_has_been_sent() {
+        // An instance that has sent no voluntary report must not render an empty field.
+        let r = Renderer::new(false, false);
+        let v = view("inst-a", State::Running, Some(Mode::Agent), true);
+        let text = render_detail(&v, None, "/state/inst-a/console.log", &r);
+        assert!(!text.contains("note:"), "{text}");
+    }
+
+    #[test]
+    fn it_reads_last_note_and_nudge_count_from_work_state_json() {
+        // The three new fields (last_report_text, last_report_at, nudge_count) are
+        // deserialized from work-state.json; last_report_at is converted to an age.
+        let record = br#"{"workStateVersion":1,"workState":"idle","isLate":false,"lastReportText":"running tests","lastReportAt":"2026-06-28T11:57:00Z","nudgeCount":2,"nudgeBudget":5}"#;
+        let mut host = FakeHost::new();
+        host.push_read(Ok(record.to_vec()));
+        let ws =
+            read_work_state(&host, Path::new("/x/work-state.json"), now()).expect("record present");
+        assert_eq!(ws.last_note.as_deref(), Some("running tests"));
+        assert_eq!(ws.last_note_age.as_deref(), Some("3m ago"));
+        assert_eq!(ws.nudge_count, 2);
+        assert_eq!(ws.nudge_budget, Some(5));
     }
 
     #[test]
     fn it_degrades_to_none_when_work_state_json_is_absent() {
         let mut host = FakeHost::new();
         host.push_read(Err(std::io::Error::from(std::io::ErrorKind::NotFound)));
-        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"));
+        let ws = read_work_state(&host, Path::new("/state/inst-a/work-state.json"), None);
         assert!(ws.is_none(), "missing file degrades to None");
     }
 
     #[test]
     fn it_reads_work_state_through_the_seam_in_summarize() {
-        // AC3: `summarize` reads `work-state.json` through the FakeHost seam,
+        // `summarize` reads `work-state.json` through the FakeHost seam,
         // so `sandbox status` surfaces it with no live connection.
         use crate::sandbox::host::Call;
         let mut host = FakeHost::new();
@@ -1871,7 +2047,7 @@ mod tests {
         .push_read(Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
         // liveness.json
         .push_read(Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
-        // work-state.json
+        // work-state.json — active with label, 77s duration, no nudges yet
         .push_read(Ok(
             br#"{"workStateVersion":1,"workState":"active","isLate":false,"carryingLabel":"agent-work","carryingDurationSecs":77,"nudgeCount":0}"#.to_vec(),
         ));
@@ -1879,15 +2055,76 @@ mod tests {
         let v = summarize(&host, &sample_spec(), &sample_roots(), "inst-a", now());
         assert_eq!(
             v.work_state.as_deref(),
-            Some("active (agent-work, 77s)"),
+            Some("Active — agent-work, 1m"),
             "work_state surfaces from work-state.json through the seam"
         );
+        assert_eq!(v.nudge_count, Some(0), "nudge_count deserialized");
         assert!(
             host.calls()
                 .iter()
                 .any(|c| matches!(c, Call::Read(p) if p.ends_with("work-state.json"))),
             "work-state.json read through the seam: {:?}",
             host.calls()
+        );
+    }
+
+    #[test]
+    fn it_surfaces_all_three_facts_in_the_detail_view() {
+        // One reading of `sandbox status <name>` shows: work state with label and
+        // duration, the newest voluntary report with age, and nudge count.
+        let r = Renderer::new(false, false);
+        let v = InstanceView {
+            work_state: Some("Idle — nudged 3/5".to_string()),
+            nudge_count: Some(3),
+            nudge_budget: Some(5),
+            last_note: Some("waiting for the build to finish".to_string()),
+            last_note_age: Some("7m ago".to_string()),
+            ..view("inst-a", State::Running, Some(Mode::Agent), true)
+        };
+        let text = render_detail(&v, None, "/state/inst-a/console.log", &r);
+        // Work state with folded nudge count.
+        assert!(text.contains("work state: Idle — nudged 3/5"), "{text}");
+        // Newest voluntary report with age.
+        assert!(
+            text.contains("note:       waiting for the build to finish (7m ago)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn it_includes_all_three_facts_in_json() {
+        // Every fact visible in the human detail must also be in `--json`.
+        let v = InstanceView {
+            work_state: Some("Idle — nudged 3/5".to_string()),
+            nudge_count: Some(3),
+            nudge_budget: Some(5),
+            last_note: Some("building".to_string()),
+            last_note_age: Some("2m ago".to_string()),
+            ..view("inst-a", State::Running, Some(Mode::Agent), false)
+        };
+        let json = serde_json::to_string(&v).expect("serialize");
+        assert!(
+            json.contains(r#""workState":"Idle — nudged 3/5""#),
+            "{json}"
+        );
+        assert!(json.contains(r#""nudgeCount":3"#), "{json}");
+        assert!(json.contains(r#""nudgeBudget":5"#), "{json}");
+        assert!(json.contains(r#""lastNote":"building""#), "{json}");
+        assert!(json.contains(r#""lastNoteAge":"2m ago""#), "{json}");
+    }
+
+    #[test]
+    fn it_shows_work_state_column_in_the_list_table() {
+        // The WORK column lets an orchestrator see the work state per instance
+        // without running the detail view.
+        let r = Renderer::new(false, false);
+        let mut v = view("inst-a", State::Running, Some(Mode::Agent), true);
+        v.work_state = Some("Active — compile, 5m".to_string());
+        let table = render_list(&[v], &r);
+        assert!(table.contains("WORK"), "WORK header: {table}");
+        assert!(
+            table.contains("Active — compile, 5m"),
+            "work state cell: {table}"
         );
     }
 
