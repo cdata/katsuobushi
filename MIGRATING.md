@@ -15,9 +15,9 @@ Leaving it in place is a hard Nix evaluation error
 (`called with unexpected argument`), not a silent no-op.
 
 The argument drove a host-side "no reports" notice that no longer fires. Watch
-the **WORK** column of `sandbox status` instead: `Active` means the guest
-heartbeat is current; `Active (Late)` means heartbeats have stopped and the
-guest may be stuck; `Idle` means the agent stopped without reporting.
+the **WORK** column of `sandbox status` instead: `Active` means work runs;
+`Active (Late)` means work runs past its own declared bound; `Idle` means
+nothing runs; `Finished` means the agent reported a terminal result.
 
 No spec or instance-state change (`specVersion 4` / `instanceVersion 2`
 unchanged).
