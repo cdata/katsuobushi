@@ -53,7 +53,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use katsuobushi_sandbox_guest::heartbeat::{combine_work_state, BeatStatus, WorkState};
+use katsuobushi_sandbox_guest::heartbeat::{combine_work_state, is_stale, BeatStatus, WorkState};
 use katsuobushi_sandbox_guest::runner::{run_heartbeat_set, BeatStatusUpdate};
 
 use anyhow::Context as _;
@@ -1095,6 +1095,34 @@ async fn relay_report(stream: UnixStream, ctl: Arc<Control>) -> anyhow::Result<(
     Ok(())
 }
 
+/// Per-label entry in the work-state coordinator's beat map.
+struct StoredBeat {
+    status: BeatStatus,
+    /// The heartbeat's own polling interval; used to derive the staleness bound.
+    interval_secs: u64,
+    /// Unix seconds when the most recent update was received. Stops advancing
+    /// when the sender dies, so the staleness check detects the silence.
+    received_at_secs: u64,
+}
+
+impl StoredBeat {
+    /// The effective beat status at `now_secs`. Returns a silent miss when the
+    /// entry has not been refreshed within `is_stale`'s bound — a dead heartbeat
+    /// task cannot hold [`WorkState::Active`] past its staleness window.
+    fn effective(&self, now_secs: u64) -> BeatStatus {
+        if is_stale(self.interval_secs, self.received_at_secs, now_secs) {
+            BeatStatus {
+                beating: false,
+                duration_secs: 0,
+                is_late: false,
+                narration: None,
+            }
+        } else {
+            self.status.clone()
+        }
+    }
+}
+
 /// Aggregate [`BeatStatusUpdate`]s from all heartbeat tasks, compute the
 /// combined [`WorkState`], and — on each transition — emit a
 /// [`GuestMessage::WorkStateTransition`] to the attached drive. Also writes
@@ -1102,19 +1130,55 @@ async fn relay_report(stream: UnixStream, ctl: Arc<Control>) -> anyhow::Result<(
 ///
 /// A transition is emitted exactly once per state change, not once per
 /// heartbeat interval.
+///
+/// A periodic ticker re-evaluates the combined state every second so that a
+/// heartbeat whose task has stopped sending is evicted from `Active` once its
+/// staleness bound expires — even when no new updates arrive to trigger a
+/// message-driven re-evaluation.
 async fn run_work_state_coordinator(
     ctl: Arc<Control>,
     mut rx: mpsc::UnboundedReceiver<BeatStatusUpdate>,
 ) {
-    let mut beats: HashMap<String, BeatStatus> = HashMap::new();
+    let mut beats: HashMap<String, StoredBeat> = HashMap::new();
     let mut prev: Option<WorkState> = None;
     let mut last_ws_write: Option<Instant> = None;
+    let mut staleness_tick = tokio::time::interval(Duration::from_secs(1));
+    staleness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    while let Some(update) = rx.recv().await {
-        beats.insert(update.label, update.status);
+    loop {
+        let now_secs = tokio::select! {
+            maybe = rx.recv() => {
+                match maybe {
+                    None => break, // all senders dropped; coordinator exits
+                    Some(update) => {
+                        let now_secs = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        beats.insert(update.label, StoredBeat {
+                            status: update.status,
+                            interval_secs: update.interval_secs,
+                            received_at_secs: now_secs,
+                        });
+                        now_secs
+                    }
+                }
+            }
+            _ = staleness_tick.tick() => {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            }
+        };
 
-        // Snapshot the latest per-beat statuses for the combiner.
-        let all_beats: Vec<BeatStatus> = beats.values().cloned().collect();
+        // Effective beat statuses: a stale entry contributes a silent miss so
+        // a dead heartbeat task cannot hold `Active` past its staleness bound.
+        let effective: Vec<(String, BeatStatus)> = beats
+            .iter()
+            .map(|(label, stored)| (label.clone(), stored.effective(now_secs)))
+            .collect();
+        let all_beats: Vec<BeatStatus> = effective.iter().map(|(_, s)| s.clone()).collect();
 
         // Read the session fields needed for the record without holding the
         // lock across async I/O.
@@ -1136,9 +1200,10 @@ async fn run_work_state_coordinator(
 
         let is_late = matches!(new_state, WorkState::Active { is_late: true });
 
-        // The primary heartbeat: the beating one with the longest unbroken run.
+        // The primary heartbeat: the effective-beating one with the longest
+        // unbroken run (stale entries excluded via `effective`).
         let primary = if matches!(new_state, WorkState::Active { .. }) {
-            beats
+            effective
                 .iter()
                 .filter(|(_, s)| s.beating)
                 .max_by(|(la, sa), (lb, sb)| {
