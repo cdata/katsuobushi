@@ -26,10 +26,11 @@ kanban-plugin: basic
 
 ## In Progress
 
-- [ ] [[850ce4]]
 - [ ] [[335714]]
 
 ## Needs Review
+
+- [ ] [[850ce4]]
 
 ## Ready
 
