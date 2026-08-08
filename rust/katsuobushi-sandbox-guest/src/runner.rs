@@ -12,8 +12,8 @@ use tokio::process::Command;
 use tokio::time::{timeout, MissedTickBehavior};
 
 use crate::heartbeat::{
-    apply_check, load_heartbeats, BeatState, BeatStatus, CheckOutcome, Heartbeat, HeartbeatError,
-    TurnBeat,
+    apply_check, eval_scan, load_heartbeats, BeatState, BeatStatus, CheckOutcome, Heartbeat,
+    HeartbeatError, HeartbeatSetState, TurnBeat,
 };
 
 /// A single beat-status update sent from a heartbeat task to the coordinator.
@@ -40,11 +40,22 @@ pub fn collect_heartbeats(dirs: &[PathBuf]) -> (Vec<Heartbeat>, Vec<HeartbeatErr
     (heartbeats, errors)
 }
 
-/// Load all heartbeats from every directory in `hb_dirs`, report any parse
-/// errors to stderr exactly once, then run each successfully-parsed heartbeat
-/// on its own interval with `cwd` as the working directory. Also spawns the
-/// turn heartbeat, which beats for the life of the current turn. Never returns
-/// normally.
+/// How often the runner re-scans the heartbeat directories to pick up fixed or
+/// newly added files. Chosen to be fast enough that a corrected typo takes
+/// effect within a minute, and slow enough to impose no perceptible I/O load.
+const RESCAN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Load heartbeats from every directory in `hb_dirs`, re-read periodically so
+/// that a file corrected or added after startup begins beating without a
+/// guest restart. Never returns normally.
+///
+/// **Re-read rule ("once per error state"):**
+/// - A parse error on a file is reported to stderr exactly once, the first
+///   time the error is seen. The file stays silent on every subsequent scan
+///   while it remains broken.
+/// - A broken file that is corrected, and a file newly added to a directory,
+///   are both picked up on the next scan without a restart.
+/// - An already-running heartbeat is never re-spawned.
 ///
 /// Each heartbeat task sends [`BeatStatusUpdate`] values to `beat_tx` on every
 /// tick so the server can aggregate them into a [`WorkState`] and detect
@@ -60,22 +71,30 @@ pub async fn run_heartbeat_set(
     turn_armed: Arc<AtomicBool>,
     beat_tx: tokio::sync::mpsc::UnboundedSender<BeatStatusUpdate>,
 ) {
-    let (heartbeats, errors) = collect_heartbeats(&hb_dirs);
-    for err in &errors {
-        eprintln!("katsuobushi-heartbeat: parse error: {err}");
-    }
+    // The turn heartbeat joins the set but is not a file; spawn it once.
+    tokio::spawn(run_turn_heartbeat(turn_armed, beat_tx.clone()));
 
-    for heartbeat in heartbeats {
-        let cwd = cwd.clone();
-        let tx = beat_tx.clone();
-        tokio::spawn(async move {
-            run_one(heartbeat, cwd, tx).await;
-        });
-    }
+    let mut hb_state = HeartbeatSetState::default();
+    let mut rescan = tokio::time::interval(RESCAN_INTERVAL);
+    rescan.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    // The turn heartbeat joins the same set: one task, armed/silenced by the
-    // server via `turn_armed`.
-    tokio::spawn(run_turn_heartbeat(turn_armed, beat_tx));
+    loop {
+        rescan.tick().await;
+
+        let (heartbeats, errors) = collect_heartbeats(&hb_dirs);
+        let diff = eval_scan(&mut hb_state, heartbeats, errors);
+
+        for err in &diff.new_errors {
+            eprintln!("katsuobushi-heartbeat: parse error: {err}");
+        }
+        for hb in diff.to_start {
+            let cwd = cwd.clone();
+            let tx = beat_tx.clone();
+            tokio::spawn(async move {
+                run_one(hb, cwd, tx).await;
+            });
+        }
+    }
 }
 
 /// Run the turn heartbeat indefinitely: ticks every [`TurnBeat::INTERVAL`],

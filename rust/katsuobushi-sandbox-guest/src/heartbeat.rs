@@ -5,6 +5,7 @@
 //! [`load_heartbeats`] handles the filesystem walk and collects both successes
 //! and errors without aborting on the first failure.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,6 +18,8 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(10);
 /// A successfully parsed heartbeat definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Heartbeat {
+    /// File this heartbeat was loaded from; used to track re-reads.
+    pub source: PathBuf,
     pub label: String,
     pub timeout: Duration,
     /// Polling cadence; defaults to [`DEFAULT_INTERVAL`] when absent in the file.
@@ -126,6 +129,7 @@ pub fn parse_heartbeat(text: &str, path: &Path) -> Result<Heartbeat, HeartbeatEr
     let detail = raw.detail.filter(|s| !s.is_empty());
 
     Ok(Heartbeat {
+        source: path.to_owned(),
         label,
         timeout,
         interval,
@@ -187,6 +191,68 @@ pub fn load_heartbeats(dir: &Path) -> (Vec<Heartbeat>, Vec<HeartbeatError>) {
     }
 
     (ok, errs)
+}
+
+// ── Heartbeat-set re-read state ───────────────────────────────────────────────
+
+/// Tracks which heartbeat files have been loaded or are known broken across
+/// periodic re-reads of the heartbeat directories.
+///
+/// The runner re-reads the directories on a slow timer. On each read it calls
+/// [`eval_scan`] to compute what changed: newly fixed or added files produce
+/// new tasks; error messages are suppressed for files that are still broken.
+#[derive(Debug, Default)]
+pub struct HeartbeatSetState {
+    /// Paths for which a running task has already been spawned.
+    loaded: HashSet<PathBuf>,
+    /// Paths that produced a parse error (error already reported once).
+    broken: HashSet<PathBuf>,
+}
+
+/// What changed on one re-read scan, as computed by [`eval_scan`].
+pub struct HeartbeatSetDiff {
+    /// Heartbeats that should have tasks spawned (newly added or fixed files).
+    pub to_start: Vec<Heartbeat>,
+    /// Errors that have not been reported before and should be printed once.
+    pub new_errors: Vec<HeartbeatError>,
+}
+
+/// Apply one scan result to `state` and return what changed.
+///
+/// Rules:
+/// - A heartbeat file that was not previously loaded gets a task spawned.
+///   If it was broken before, its error state is cleared.
+/// - A file that is still loaded (task already running) is skipped.
+/// - A parse error on a file not yet in the broken set is reported once and
+///   added to the set. A file already in the broken set stays silent.
+pub fn eval_scan(
+    state: &mut HeartbeatSetState,
+    heartbeats: Vec<Heartbeat>,
+    errors: Vec<HeartbeatError>,
+) -> HeartbeatSetDiff {
+    let mut to_start = Vec::new();
+    let mut new_errors = Vec::new();
+
+    for hb in heartbeats {
+        let path = hb.source.clone();
+        if !state.loaded.contains(&path) {
+            state.broken.remove(&path);
+            state.loaded.insert(path);
+            to_start.push(hb);
+        }
+    }
+
+    for err in errors {
+        if !state.broken.contains(&err.file) {
+            state.broken.insert(err.file.clone());
+            new_errors.push(err);
+        }
+    }
+
+    HeartbeatSetDiff {
+        to_start,
+        new_errors,
+    }
 }
 
 // ── Pure beat-state core ──────────────────────────────────────────────────────
@@ -836,5 +902,95 @@ mod beat_tests {
     fn it_carries_no_narration_when_the_detail_body_did_not_run() {
         let (_, status) = apply_check(BeatState::default(), beat(None), NOW, TIMEOUT);
         assert!(status.narration.is_none());
+    }
+}
+
+// ── HeartbeatSetState / eval_scan tests ───────────────────────────────────────
+
+#[cfg(test)]
+mod heartbeat_set_tests {
+    use super::*;
+
+    fn good(path: &str) -> Heartbeat {
+        Heartbeat {
+            source: PathBuf::from(path),
+            label: format!("hb-{path}"),
+            timeout: Duration::from_secs(300),
+            interval: DEFAULT_INTERVAL,
+            check: "true".into(),
+            detail: None,
+        }
+    }
+
+    fn broken(path: &str) -> HeartbeatError {
+        HeartbeatError {
+            file: PathBuf::from(path),
+            reason: "parse error".into(),
+        }
+    }
+
+    #[test]
+    fn it_starts_a_newly_added_valid_heartbeat() {
+        let mut state = HeartbeatSetState::default();
+        let diff = eval_scan(&mut state, vec![good("a.yaml")], vec![]);
+        assert_eq!(diff.to_start.len(), 1);
+        assert!(diff.new_errors.is_empty());
+    }
+
+    #[test]
+    fn it_reports_a_broken_file_exactly_once() {
+        let mut state = HeartbeatSetState::default();
+        let diff1 = eval_scan(&mut state, vec![], vec![broken("bad.yaml")]);
+        assert_eq!(diff1.new_errors.len(), 1, "first scan: error reported");
+        let diff2 = eval_scan(&mut state, vec![], vec![broken("bad.yaml")]);
+        assert!(diff2.new_errors.is_empty(), "second scan: error suppressed");
+    }
+
+    #[test]
+    fn it_starts_a_heartbeat_when_a_broken_file_is_corrected() {
+        let mut state = HeartbeatSetState::default();
+        eval_scan(&mut state, vec![], vec![broken("fixed.yaml")]);
+        let diff = eval_scan(&mut state, vec![good("fixed.yaml")], vec![]);
+        assert_eq!(diff.to_start.len(), 1, "corrected file must start a task");
+        assert!(diff.new_errors.is_empty());
+    }
+
+    #[test]
+    fn it_does_not_respawn_an_already_running_heartbeat() {
+        let mut state = HeartbeatSetState::default();
+        eval_scan(&mut state, vec![good("ok.yaml")], vec![]);
+        let diff = eval_scan(&mut state, vec![good("ok.yaml")], vec![]);
+        assert!(
+            diff.to_start.is_empty(),
+            "already-running file must not be re-spawned"
+        );
+    }
+
+    #[test]
+    fn it_picks_up_a_newly_added_heartbeat_file_on_a_later_scan() {
+        let mut state = HeartbeatSetState::default();
+        eval_scan(&mut state, vec![], vec![]);
+        let diff = eval_scan(&mut state, vec![good("new.yaml")], vec![]);
+        assert_eq!(diff.to_start.len(), 1, "new file must be picked up");
+    }
+
+    #[test]
+    fn it_clears_the_broken_state_when_a_file_is_corrected() {
+        let mut state = HeartbeatSetState::default();
+        eval_scan(&mut state, vec![], vec![broken("f.yaml")]);
+        assert!(state.broken.contains(Path::new("f.yaml")));
+        eval_scan(&mut state, vec![good("f.yaml")], vec![]);
+        assert!(
+            !state.broken.contains(Path::new("f.yaml")),
+            "broken state must be cleared"
+        );
+    }
+
+    #[test]
+    fn it_handles_mixed_good_and_broken_files_independently() {
+        let mut state = HeartbeatSetState::default();
+        let diff = eval_scan(&mut state, vec![good("ok.yaml")], vec![broken("bad.yaml")]);
+        assert_eq!(diff.to_start.len(), 1);
+        assert_eq!(diff.new_errors.len(), 1);
     }
 }
