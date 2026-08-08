@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use katsuobushi_sandbox_guest::heartbeat::{BeatStatus, WorkState, combine_work_state};
+use katsuobushi_sandbox_guest::heartbeat::{combine_work_state, BeatStatus, WorkState};
 use katsuobushi_sandbox_guest::runner::{run_heartbeat_set, BeatStatusUpdate};
 
 use anyhow::Context as _;
@@ -1069,10 +1069,7 @@ async fn run_work_state_coordinator(
         // lock across async I/O.
         let (finished, nudge_count, last_report_text, last_report_at) = {
             let session = ctl.session.lock().await;
-            let finished = session
-                .turn
-                .as_ref()
-                .map_or(false, |t| t.terminal_reported);
+            let finished = session.turn.as_ref().is_some_and(|t| t.terminal_reported);
             let nudge_count = session.turn.as_ref().map_or(0, |t| t.nudges);
             (
                 finished,
@@ -1093,7 +1090,9 @@ async fn run_work_state_coordinator(
             beats
                 .iter()
                 .filter(|(_, s)| s.beating)
-                .max_by_key(|(_, s)| s.duration_secs)
+                .max_by(|(la, sa), (lb, sb)| {
+                    sa.duration_secs.cmp(&sb.duration_secs).then(la.cmp(lb))
+                })
                 .map(|(l, s)| (l.clone(), s.duration_secs))
         } else {
             None
@@ -1123,8 +1122,8 @@ async fn run_work_state_coordinator(
         }
 
         // Write work-state.json: forced on transitions, throttled otherwise.
-        let due = is_transition
-            || last_ws_write.map_or(true, |t| t.elapsed() >= Duration::from_secs(1));
+        let due =
+            is_transition || last_ws_write.is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
         if due {
             let record = WorkStateRecord {
                 work_state_version: 1,
@@ -1879,6 +1878,32 @@ mod tests {
             step(&mut s, working()).persist,
             Some(PersistMode::Throttled)
         ));
+    }
+
+    // ── Carrying-label selection ────────────────────────────────────────────
+
+    #[test]
+    fn carrying_label_tie_breaks_on_label_for_equal_duration() {
+        // Two labels with the same duration_secs: the lexicographically larger
+        // one must always win, regardless of HashMap iteration order.
+        let make = |dur| BeatStatus {
+            beating: true,
+            duration_secs: dur,
+            is_late: false,
+            narration: None,
+        };
+        let mut beats: HashMap<String, BeatStatus> = HashMap::new();
+        beats.insert("zebra".to_string(), make(10));
+        beats.insert("alpha".to_string(), make(10));
+        beats.insert("mango".to_string(), make(5)); // shorter run, never wins
+
+        let winner = beats
+            .iter()
+            .filter(|(_, s)| s.beating)
+            .max_by(|(la, sa), (lb, sb)| sa.duration_secs.cmp(&sb.duration_secs).then(la.cmp(lb)))
+            .map(|(l, _)| l.clone());
+
+        assert_eq!(winner.as_deref(), Some("zebra"));
     }
 
     // ── RFC3339 timestamp formatting ────────────────────────────────────────
