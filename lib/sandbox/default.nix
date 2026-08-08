@@ -569,19 +569,10 @@ let
 
     **Turn discipline — never end a turn without reporting.** The operator waits
     on your `report done`/`report blocked`; a turn that ends silently strands it.
-    So, every turn:
-
-    - Run builds, tests, and other long commands in the **foreground**. A
-      foreground command holds your turn open until it returns, which is exactly
-      what you want — the operator sees the turn as live the whole time.
-    - Do **not** background long work (`&`, `run_in_background`) as a way to
-      "wait" for it. If you must background something, you are not done: end the
-      turn with `report working "waiting on <what>"`, and run `report done` only
-      once it has actually finished and you have verified it.
-    - Before you stop, always run exactly one terminal report — `report done` if
-      the work is complete and pushed, or `report blocked` if you cannot proceed.
-      If the operator re-prompts you because you stopped without one, treat that
-      as a reminder to report your real state now.
+    Before you stop, always run exactly one terminal report — `report done` if
+    the work is complete and pushed, or `report blocked` if you cannot proceed.
+    If the operator re-prompts you because you stopped without one, treat that
+    as a reminder to report your real state now.
 
     **Build and test through the project's menu, not from Rust/JS/etc. habit.**
     Before your first build, test, or run command, list the project's own
