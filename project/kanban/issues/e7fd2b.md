@@ -56,3 +56,42 @@ working.
       bounce-duplicated commits.
 - [ ] `nix develop -c rust lint` is clean.
 
+
+## Dispatch log
+
+- implementor: `card-e7fd2b-3a047397`
+
+Round 1 — implementor reported `done`. Added `guard_against_agent_commits` to
+`sandbox/dispatch.rs`: before each dispatch (unless `--force`) it enumerates
+existing `refs/remotes/sandbox-guest/` bookmarks, then runs `git log HEAD` with
+those as `^` exclusions and `--author=agent@katsuobushi.local`. Any match refuses
+and names the commits. The probe **fails closed** — if either git invocation
+cannot run or exits non-zero, the dispatch errors rather than proceeding on an
+unchecked range. Nine tests. Also restated the attribution requirements in the
+sandbox skill's Bounce section.
+
+617 tests, lint clean.
+
+### It fired correctly in production on its first run
+
+The host's tree contained agent-authored commits at landing time, so the guard
+was exercised for real rather than only in tests:
+
+```
+Error: refusing dispatch: 3 commit(s) authored by agent@katsuobushi.local
+would be frozen by this dispatch:
+
+  9bf7545 feat(sandbox): refuse dispatch when agent-authored commits would freeze
+  b818732 docs(orchestration): fix three contradictions in fresh-reviewer guidance
+  9f89191 docs(orchestration): document fresh-reviewer protocol and off-contract cleanup
+```
+
+It named exactly the right three, explained the consequence, gave both fix
+commands and the override.
+
+**And it caught a defect the documented procedure had missed.** Two of those
+three had already been through `jj metaedit --update-author`, which reported
+success and did nothing (filed as `6d77aa`). So the guard's first real act was to
+catch commits that the prose-level fix had silently failed to correct — which is
+precisely the argument the `9344ec` reviewer made for checking the **outcome**
+rather than trusting the step.
