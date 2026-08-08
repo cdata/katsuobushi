@@ -46,3 +46,74 @@ state instead.
 - [ ] The `project-orchestration` skill's references to a VM's reported state
       use the new vocabulary.
 
+
+## Dispatch log
+
+- implementor: `card-4c1acb-b562aa17`
+
+Round 1 — implementor reported `done`. Added an "Authoring heartbeats" section
+to the sandbox skill covering the five YAML fields, the two duration forms, and
+the kill-on-timeout, flicker and process-group rules. Added a "Reading the work
+state" table for all four readings (Active, Active (Late), Finished, Idle) with
+per-reading guidance. Repointed the "looks stuck" guidance at the `WORK` column
+of `sandbox status` rather than `console.log`, which stops at the login prompt.
+Removed `progressStallSecs` from the `lib.sandbox` example. Updated the
+`project-orchestration` skill's "Trust the branch" gotcha to use `Idle`
+work-state language in place of the retired `ended-unreported` phase label.
+
+Landed on the `c5c2c2` tip with no conflict; `rust test` green on the merged
+tree.
+
+## Review notes
+
+### Round 1 — `review-4c1acb-08f5e022` — VERDICT: needs-changes
+
+`markdown lint` passes. No Rust changed, so the Rust gates were correctly not
+required — the reviewer said so rather than skipping silently, and read
+`heartbeat.rs` as the source of truth for checking the documented contract.
+
+**The field-by-field contract check passed.** Required (`label`, `timeout`,
+`check`) vs optional (`interval`, `detail`) matches `heartbeat.rs:106-129`; the
+10s interval default matches `DEFAULT_INTERVAL` (`:16`); the `s`/`m` duration
+forms match `parse_duration` (`:60-82`) including the "no other units" claim;
+and the shell-body/first-stdout-line description of `check` and `detail`
+matches `CheckOutcome::Beat`.
+
+**BLOCKING — the two traps that bite a first-time author are missing.** Both are
+documented in the shipped heartbeat files but not in the skill, which is what an
+author reads *before* writing their first one.
+
+1. **The block-scalar trap.** The example shows correct `|` syntax but never
+   says why the indentation is there, that the parser strips it before `sh(1)`
+   sees it, or what breaks otherwise. The shipped files carry an explicit
+   four-line comment about exactly this, and call it "the usual source of a
+   check that passes and means nothing" — a misindented or folded (`>`) body
+   can collapse into a no-op that always exits 0.
+2. **The first-beat problem.** Both shipped files deliberately write a baseline
+   and `exit 1` on their first run, with a comment saying so. The skill mentions
+   none of it. An author writing any comparison-type check — CPU, a counter, an
+   mtime — will get a **spurious beat on the first tick**, because any value
+   compares favourably against nothing. The `pgrep` example dodges the problem
+   by nature rather than teaching the pattern.
+
+**Non-blocking, to fix in the same pass:**
+
+3. **The work-state table reads `Active (Late)` as a fourth row**, beside
+   `Active`, `Finished` and `Idle`. `WorkState` has three variants and the code
+   comment is emphatic that late is a flag on `Active`. A one-line note would
+   resolve the visual contradiction.
+4. **A nuance was lost in the "Trust the branch" rewrite.** The core warning and
+   recovery path survive verbatim. But the old `ended-unreported` label
+   *encoded* that nudges had already run, so seeing it meant the agent had
+   ignored them. `Idle` is a live reading that is equally true *before* any
+   nudge, so "a persistent `Idle` reading after those nudges" gestures at the
+   distinction without giving the operator the decision boundary the old label
+   did.
+
+**Informational:** the skill does not say what happens to a file that will not
+parse — one error, then silence for that path, with other files unaffected.
+
+**Cleared:** the "looks stuck" repoint is accurate — the `WORK` column is real,
+`console.log` genuinely stops at the login prompt, and the surrounding
+troubleshooting sequence (provision.log → console.log → WORK column) remains
+coherent.
