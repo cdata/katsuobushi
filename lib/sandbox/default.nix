@@ -335,7 +335,8 @@ let
   # replaces it, so a bare repo still gets the shipped beats.
   shippedHeartbeatsDir = pkgs.runCommand "katsuobushi-shipped-heartbeats" { } ''
     mkdir -p $out
-    cp ${controlSrc}/rust/katsuobushi-sandbox-guest/heartbeats/*.yaml $out/
+    find ${controlSrc}/rust/katsuobushi-sandbox-guest/heartbeats -maxdepth 1 -name "*.yaml" \
+      -exec cp {} $out/ \;
   '';
 
   # vsock + control-socket constants. The guest server listens on AF_VSOCK; the

@@ -33,6 +33,12 @@ pub const TURN_BEAT_LABEL: &str = "$turn";
 
 /// Merge heartbeats from all directories in `dirs`. Errors are collected
 /// without stopping remaining directories from loading.
+///
+/// **Label collision:** when a heartbeat in a later directory carries the same
+/// label as one in an earlier directory, both are included — neither replaces
+/// the other. In practice this means a project heartbeat with the same label
+/// as a shipped heartbeat runs *alongside* the shipped one; both appear in the
+/// work state.
 pub fn collect_heartbeats(dirs: &[PathBuf]) -> (Vec<Heartbeat>, Vec<HeartbeatError>) {
     let mut heartbeats = Vec::new();
     let mut errors = Vec::new();
@@ -49,9 +55,10 @@ pub fn collect_heartbeats(dirs: &[PathBuf]) -> (Vec<Heartbeat>, Vec<HeartbeatErr
 /// effect within a minute, and slow enough to impose no perceptible I/O load.
 const RESCAN_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Load heartbeats from every directory in `hb_dirs`, re-read periodically so
-/// that a file corrected or added after startup begins beating without a
-/// guest restart. Never returns normally.
+/// Spawn and manage heartbeat tasks for every file in `hb_dirs`, plus the turn
+/// heartbeat. Re-scans all directories every [`RESCAN_INTERVAL`] so that a
+/// file corrected or added after startup begins beating without a guest
+/// restart. Runs the rescan loop indefinitely.
 ///
 /// **Re-read rule ("once per broken path"):**
 /// - A parse error on a file is reported to stderr exactly once per broken
@@ -358,6 +365,52 @@ mod tests {
         let labels: Vec<&str> = heartbeats.iter().map(|h| h.label.as_str()).collect();
         assert!(labels.contains(&"Agent work"), "{labels:?}");
         assert!(labels.contains(&"Custom"), "{labels:?}");
+    }
+
+    /// No directories → no heartbeats and no errors; the function must not
+    /// panic or read from the filesystem when the list is empty.
+    #[test]
+    fn it_returns_empty_results_when_no_directories_are_given() {
+        let (heartbeats, errors) = collect_heartbeats(&[]);
+        assert!(
+            heartbeats.is_empty(),
+            "expected no heartbeats: {heartbeats:?}"
+        );
+        assert!(errors.is_empty(), "expected no errors: {errors:?}");
+    }
+
+    /// When shipped and project directories both contain a file with the same
+    /// label, both heartbeats appear in the merged result — neither replaces
+    /// the other. This is correct: a project directory adds to the shipped set.
+    #[test]
+    fn it_keeps_both_heartbeats_when_labels_collide_across_directories() {
+        let shipped = TempDir::new("shipped-collision");
+        let project = TempDir::new("project-collision");
+        let shared_label = "Agent work";
+        fs::write(
+            shipped.path().join("agent-work.yaml"),
+            format!("label: {shared_label}\ntimeout: 45m\ncheck: true\n"),
+        )
+        .unwrap();
+        fs::write(
+            project.path().join("agent-work-override.yaml"),
+            format!("label: {shared_label}\ntimeout: 10m\ncheck: true\n"),
+        )
+        .unwrap();
+
+        let dirs = vec![shipped.path().to_owned(), project.path().to_owned()];
+        let (heartbeats, errors) = collect_heartbeats(&dirs);
+        assert!(errors.is_empty(), "expected no errors: {errors:?}");
+        assert_eq!(
+            heartbeats.len(),
+            2,
+            "both heartbeats must be present even with a shared label; got {heartbeats:?}"
+        );
+        let count = heartbeats
+            .iter()
+            .filter(|h| h.label == shared_label)
+            .count();
+        assert_eq!(count, 2, "expected two entries with label {shared_label:?}");
     }
 
     /// A check whose body sleeps far beyond the budget must return `false`
