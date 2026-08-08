@@ -113,6 +113,10 @@ struct InstanceView {
     /// Formatted age of [`InstanceView::last_note`] (e.g. `"5m ago"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     last_note_age: Option<String>,
+    /// Raw RFC-3339 timestamp of [`InstanceView::last_note`], exactly as written
+    /// by the guest. Machine-readable complement to the humanised `last_note_age`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_note_at: Option<String>,
 }
 
 impl InstanceView {
@@ -663,6 +667,7 @@ fn summarize(
         nudge_budget: ws.as_ref().and_then(|w| w.nudge_budget),
         last_note: ws.as_ref().and_then(|w| w.last_note.clone()),
         last_note_age: ws.as_ref().and_then(|w| w.last_note_age.clone()),
+        last_note_at: ws.as_ref().and_then(|w| w.last_note_at.clone()),
         store_db: store_db_label(host, &inst_dir.join("nixdb-status")),
         // Through the host seam, like every other read here — so a unit test
         // of `summarize` never touches the real filesystem.
@@ -776,6 +781,10 @@ struct WorkStateSummary {
     last_note: Option<String>,
     /// Formatted age of [`WorkStateSummary::last_note`] (e.g. `"5m ago"`).
     last_note_age: Option<String>,
+    /// Raw RFC-3339 timestamp of the last voluntary report, exactly as the
+    /// guest wrote it to `work-state.json`. Machine-readable companion to
+    /// [`WorkStateSummary::last_note_age`].
+    last_note_at: Option<String>,
 }
 
 /// Read and format the work-state record from `work-state.json`. Returns `None`
@@ -812,6 +821,7 @@ fn read_work_state(host: &impl Host, path: &Path, now: Option<i64>) -> Option<Wo
 
     let display = format!("{state_label}{detail}");
     let last_note_age = age_ago(now, record.last_report_at.as_deref());
+    let last_note_at = record.last_report_at;
 
     Some(WorkStateSummary {
         display,
@@ -819,6 +829,7 @@ fn read_work_state(host: &impl Host, path: &Path, now: Option<i64>) -> Option<Wo
         nudge_budget: record.nudge_budget,
         last_note: record.last_report_text,
         last_note_age,
+        last_note_at,
     })
 }
 
@@ -1004,6 +1015,7 @@ mod tests {
             nudge_budget: None,
             last_note: None,
             last_note_age: None,
+            last_note_at: None,
         }
     }
 
@@ -2100,6 +2112,7 @@ mod tests {
             nudge_budget: Some(5),
             last_note: Some("building".to_string()),
             last_note_age: Some("2m ago".to_string()),
+            last_note_at: Some("2026-06-28T11:55:00Z".to_string()),
             ..view("inst-a", State::Running, Some(Mode::Agent), false)
         };
         let json = serde_json::to_string(&v).expect("serialize");
@@ -2111,6 +2124,39 @@ mod tests {
         assert!(json.contains(r#""nudgeBudget":5"#), "{json}");
         assert!(json.contains(r#""lastNote":"building""#), "{json}");
         assert!(json.contains(r#""lastNoteAge":"2m ago""#), "{json}");
+        assert!(
+            json.contains(r#""lastNoteAt":"2026-06-28T11:55:00Z""#),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn it_round_trips_raw_timestamp_unchanged_in_json() {
+        // The raw RFC-3339 timestamp must appear byte-for-byte as the guest wrote
+        // it — a machine consumer needs it to compare or recompute ages, which
+        // lastNoteAge (a formatted string) cannot support.
+        let raw_ts = "2026-06-28T11:57:00Z";
+        let record = format!(
+            r#"{{"workStateVersion":1,"workState":"idle","isLate":false,"lastReportText":"running tests","lastReportAt":"{raw_ts}","nudgeCount":2,"nudgeBudget":5}}"#
+        );
+        let mut host = FakeHost::new();
+        host.push_read(Ok(record.into_bytes()));
+        let ws =
+            read_work_state(&host, Path::new("/x/work-state.json"), now()).expect("record present");
+        assert_eq!(
+            ws.last_note_at.as_deref(),
+            Some(raw_ts),
+            "raw timestamp preserved in WorkStateSummary"
+        );
+
+        // Wire into InstanceView and verify the JSON output carries it verbatim.
+        let v = InstanceView {
+            last_note_at: ws.last_note_at,
+            ..view("inst-a", State::Running, Some(Mode::Agent), false)
+        };
+        let json = serde_json::to_string(&v).expect("serialize");
+        let expected = format!(r#""lastNoteAt":"{raw_ts}""#);
+        assert!(json.contains(&expected), "raw timestamp in --json: {json}");
     }
 
     #[test]
