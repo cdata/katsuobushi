@@ -223,7 +223,6 @@ mod tests {
             host_cid: 2,
             heartbeat_secs: 10,
             heartbeat_miss: 3,
-            progress_stall_secs: 300,
             delivery_deadline_secs: 20,
             delivery_retries: 3,
             ready_gate_secs: 60,

@@ -54,7 +54,7 @@ const READINESS_TRIES: usize = 90;
 const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_CAP: Duration = Duration::from_secs(2);
 
-/// The host watchdog's three deadlines plus the resend budget, and the phase-0
+/// The host watchdog's deadlines plus the resend budget, and the phase-0
 /// ready-gate bound, resolved from the spec tunables. Carried into [`drive`] so
 /// its `select!` timers are driven by data, not magic numbers — and so a test
 /// can shrink them.
@@ -66,10 +66,6 @@ struct Watchdog {
     /// `heartbeatSecs * heartbeatMiss`: no `Heartbeat` within this window ⇒ the
     /// transport is dead (error).
     heartbeat_deadline: Duration,
-    /// `progressStallSecs`: no `Report`/lifecycle within this window ⇒ surface a
-    /// first "no reports" notice (no break; a second, stronger one follows at
-    /// 3x this if the silence continues).
-    progress_deadline: Duration,
     /// `deliveryDeadlineSecs`: no `TurnAccepted` within this window ⇒ resend the
     /// identical `Prompt`.
     delivery_deadline: Duration,
@@ -86,7 +82,6 @@ impl Watchdog {
                 spec.heartbeat_secs
                     .saturating_mul(u64::from(spec.heartbeat_miss)),
             ),
-            progress_deadline: Duration::from_secs(spec.progress_stall_secs),
             delivery_deadline: Duration::from_secs(spec.delivery_deadline_secs),
             delivery_retries: spec.delivery_retries,
         }
@@ -102,9 +97,6 @@ impl Watchdog {
 enum DriveEvent<'a> {
     /// A relayed agent `Report` (working/info/done/blocked).
     Report(&'a Report),
-    /// A progress-stall notice: the neutral "no reports for T" first, then a
-    /// stronger one at 3T. At most [`STALL_NOTICES`] per silent episode.
-    Stalled(&'a str),
     /// The `reported:false` verdict for this `turn_id` — the agent stopped
     /// without a terminal report. Terminal (the drive loop breaks).
     Stopped(u64),
@@ -255,8 +247,8 @@ fn prompt_core(
 /// the old client's own-runtime approach rather than routing through the host
 /// seam (whose runtime is private).
 ///
-/// The streaming sink renders agent `Report`s and the watchdog's `Stalled`/
-/// `Stopped` notices; the silent heartbeat touch writes `liveness.json` through
+/// The streaming sink renders agent `Report`s and the watchdog's `Stopped`
+/// notices; the silent heartbeat touch writes `liveness.json` through
 /// the host seam. A terminal `Err` (transport dead / resend
 /// exhausted) is rendered once as the `Lost` ✗ verdict, then the process exits
 /// nonzero — short-circuiting `anyhow`'s noisier top-level chain.
@@ -290,7 +282,6 @@ fn deliver_over_vsock(
         journal_event(host, state_dir, instance_name, &event);
         match event {
             DriveEvent::Report(report) => render_report(renderer, report),
-            DriveEvent::Stalled(text) => render_note(renderer, ReportKind::Stalled, text),
             DriveEvent::Stopped(turn_id) => {
                 render_note(renderer, ReportKind::Stopped, &stopped_message(turn_id))
             }
@@ -379,8 +370,8 @@ fn rearmed_message(turn_id: u64) -> String {
 }
 
 /// Render the `--until-report` re-armed note: a tagged `{"event":"rearmed",…}`
-/// line in `--json`, a dim ⚠ line otherwise (reusing the `Stalled` glyph — this
-/// is a "still waiting" notice, not a failure).
+/// line in `--json`, a dim ⚠ line otherwise (a "still waiting" notice, not a
+/// failure).
 fn render_rearmed(renderer: &Renderer, turn_id: u64) -> Result<()> {
     #[derive(Serialize)]
     struct Note<'a> {
@@ -393,11 +384,11 @@ fn render_rearmed(renderer: &Renderer, turn_id: u64) -> Result<()> {
             event: "rearmed",
             text: &text,
         },
-        |r| r.report(ReportKind::Stalled, &text),
+        |r| r.report(ReportKind::Stopped, &text),
     )
 }
 
-/// Render a watchdog notice (Stalled/Stopped/Lost) through the shared renderer:
+/// Render a watchdog notice (Stopped/Lost) through the shared renderer:
 /// `--json` emits a tagged `{"event":…,"text":…}` line (the NDJSON stream's
 /// out-of-band note), human mode paints the glyph line.
 fn render_note(renderer: &Renderer, kind: ReportKind, text: &str) -> Result<()> {
@@ -407,7 +398,6 @@ fn render_note(renderer: &Renderer, kind: ReportKind, text: &str) -> Result<()> 
         text: &'a str,
     }
     let event = match kind {
-        ReportKind::Stalled => "stalled",
         ReportKind::Stopped => "stopped",
         ReportKind::Lost => "lost",
         _ => "note",
@@ -476,10 +466,8 @@ fn handle_phase1_line<Sink, Touch>(
     sink: &mut Sink,
     touch: &mut Touch,
     last_hb: &mut Instant,
-    last_prog: &mut Instant,
     last_touch: &mut Option<Instant>,
     accepted: &mut bool,
-    stalls: &mut u32,
 ) -> Result<LineFlow>
 where
     Sink: FnMut(DriveEvent) -> Result<()>,
@@ -512,11 +500,7 @@ where
             }
             match report.status {
                 Status::Working | Status::Info => {
-                    // Progress: reset the stall timer, re-arm the notice
-                    // escalation from the start, and treat it as the implicit
-                    // delivery ack (fallback).
-                    *last_prog = Instant::now();
-                    *stalls = 0;
+                    // Treat as the implicit delivery ack (fallback).
                     *accepted = true;
                     sink(DriveEvent::Report(&report))?;
                 }
@@ -571,14 +555,11 @@ where
 }
 
 /// The host watchdog. Sends `Prompt{turn_id}`
-/// over `stream`, then runs a `select!` loop over the guest line stream plus three
+/// over `stream`, then runs a `select!` loop over the guest line stream plus two
 /// deadline timers, until a terminal condition:
 ///
 /// - **heartbeat-deadline** (`heartbeat_deadline`): no `Heartbeat` in the window
 ///   ⇒ the transport is dead ⇒ `Err` (rendered `Lost`).
-/// - **progress-deadline** (`progress_deadline`): no `Report`/lifecycle in the
-///   window ⇒ surface the `Stalled` notice **once** per episode (no break, no
-///   kill); cleared by the next `working`/`info` report.
 /// - **delivery-deadline** (`delivery_deadline`): no `TurnAccepted` yet ⇒ resend
 ///   the identical `Prompt` up to `delivery_retries`, then `Err` clearly.
 ///
@@ -627,7 +608,6 @@ where
     let Watchdog {
         ready_gate,
         heartbeat_deadline,
-        progress_deadline,
         delivery_deadline,
         delivery_retries,
     } = watchdog;
@@ -683,12 +663,10 @@ where
     write_half.flush().await.ok();
 
     let mut last_hb = Instant::now();
-    let mut last_prog = Instant::now();
     let mut sent = Instant::now();
     let mut last_touch: Option<Instant> = None;
     let mut accepted = false;
     let mut resends: u32 = 0;
-    let mut stalls: u32 = 0;
 
     // A fast agent may have produced its first line *during* the ready-gate;
     // stashed it rather than dropping it. Feed it through the identical handler the
@@ -701,10 +679,8 @@ where
             &mut sink,
             &mut touch,
             &mut last_hb,
-            &mut last_prog,
             &mut last_touch,
             &mut accepted,
-            &mut stalls,
         )? {
             return Ok(());
         }
@@ -729,10 +705,8 @@ where
                             &mut sink,
                             &mut touch,
                             &mut last_hb,
-                            &mut last_prog,
                             &mut last_touch,
                             &mut accepted,
-                            &mut stalls,
                         )? {
                             break;
                         }
@@ -744,13 +718,6 @@ where
                     "transport dead — no heartbeat for {}s (the VM or guest server is gone)",
                     heartbeat_deadline.as_secs()
                 );
-            }
-            _ = sleep_until(stall_notice_at(last_prog, progress_deadline, stalls)), if stalls < STALL_NOTICES => {
-                stalls += 1;
-                let note = stall_message(progress_deadline, stalls);
-                sink(DriveEvent::Stalled(&note))?;
-                // Never a break and never a kill — the escalation only changes
-                // what is said, not what is done.
             }
             _ = sleep_until(sent + delivery_deadline), if !accepted => {
                 if resends < delivery_retries {
@@ -787,57 +754,10 @@ where
     Ok(())
 }
 
-/// How many progress notices one silent episode may produce. The first is
-/// neutral, the second (much later) is the actual warning; after that the
-/// episode goes quiet rather than nagging.
-const STALL_NOTICES: u32 = 2;
-
-/// When the next progress notice is due, given how many have already fired in
-/// this episode.
-///
-/// The first lands at the configured window. The second lands at **three times**
-/// it, which is what makes escalating honest: only `working`/`info` reports
-/// reset the clock (heartbeats are deliberately silent), so an agent inside one
-/// long foreground call — a cold workspace compile is routinely 15-25 minutes —
-/// looks idle however hard it is working. One window of silence is normal; three
-/// consecutive ones is worth a real warning.
-fn stall_notice_at(last_prog: Instant, window: Duration, stalls: u32) -> Instant {
-    match stalls {
-        0 => last_prog + window,
-        _ => last_prog + window * 3,
-    }
-}
-
-/// The text of the `n`-th progress notice in an episode.
-///
-/// The first fire informs; it must NOT assert the agent may be stuck. In the
-/// field the old always-alarming wording fired on essentially every cold launch
-/// and was benign every time — which trained the operator toward alarm, and
-/// their one alarmed response was the destructive one (killing a live
-/// provisioning step). A watchdog that always barks is worse than none.
-fn stall_message(window: Duration, n: u32) -> String {
-    let secs = window.as_secs();
-    if n < STALL_NOTICES {
-        format!(
-            "no reports for {secs}s — normal during long builds (only reports reset this \
-             clock, so a single long tool call looks idle); inspect with `sandbox attach` if \
-             unexpected"
-        )
-    } else {
-        format!(
-            "still no reports after {}s — the agent may be stuck; inspect with `sandbox attach` \
-             (raise `progressStallSecs` if this project's builds are simply this long)",
-            secs * 3
-        )
-    }
-}
-
 /// Append one drive event to the instance's report journal.
 ///
-/// Best-effort in both directions: a `Stalled` notice is a *watchdog* opinion
-/// rather than something the agent said, so it is deliberately not journaled;
-/// and any failure to write warns once on stderr and is otherwise swallowed —
-/// the journal must never be able to break a live drive.
+/// Best-effort: any failure to write warns once on stderr and is otherwise
+/// swallowed — the journal must never be able to break a live drive.
 fn journal_event(host: &impl Host, state_dir: &Path, name: &str, event: &DriveEvent) {
     let (turn_id, status, text) = match event {
         DriveEvent::Report(r) => (
@@ -852,7 +772,6 @@ fn journal_event(host: &impl Host, state_dir: &Path, name: &str, event: &DriveEv
         ),
         DriveEvent::Stopped(id) => (Some(*id), "stopped", stopped_message(*id)),
         DriveEvent::ReArmed(id) => (Some(*id), "re-armed", rearmed_message(*id)),
-        DriveEvent::Stalled(_) => return,
     };
     let at = now_rfc3339(host).unwrap_or_default();
     let entry = report_log::Entry {
@@ -1162,7 +1081,6 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum Ev {
         Report(Status),
-        Stalled,
         Stopped(u64),
         ReArmed(u64),
     }
@@ -1174,7 +1092,6 @@ mod tests {
         Watchdog {
             ready_gate: Duration::from_millis(20),
             heartbeat_deadline: Duration::from_secs(3600),
-            progress_deadline: Duration::from_secs(3600),
             delivery_deadline: Duration::from_secs(3600),
             delivery_retries: 3,
         }
@@ -1215,7 +1132,6 @@ mod tests {
                 |event: DriveEvent| -> Result<()> {
                     events.borrow_mut().push(match event {
                         DriveEvent::Report(r) => Ev::Report(r.status),
-                        DriveEvent::Stalled(_) => Ev::Stalled,
                         DriveEvent::Stopped(id) => Ev::Stopped(id),
                         DriveEvent::ReArmed(id) => Ev::ReArmed(id),
                     });
@@ -1412,7 +1328,6 @@ mod tests {
                 |event: DriveEvent| -> Result<()> {
                     events.borrow_mut().push(match event {
                         DriveEvent::Report(r) => Ev::Report(r.status),
-                        DriveEvent::Stalled(_) => Ev::Stalled,
                         DriveEvent::Stopped(id) => Ev::Stopped(id),
                         DriveEvent::ReArmed(id) => Ev::ReArmed(id),
                     });
@@ -1507,11 +1422,10 @@ mod tests {
 
     /// A watchdog with the named deadlines in milliseconds and a short ready-gate
     /// (these tests feed no `SessionReady`, so the gate just times out into phase-1).
-    fn wd_ms(heartbeat: u64, progress: u64, delivery: u64, retries: u32) -> Watchdog {
+    fn wd_ms(heartbeat: u64, delivery: u64, retries: u32) -> Watchdog {
         Watchdog {
             ready_gate: Duration::from_millis(20),
             heartbeat_deadline: Duration::from_millis(heartbeat),
-            progress_deadline: Duration::from_millis(progress),
             delivery_deadline: Duration::from_millis(delivery),
             delivery_retries: retries,
         }
@@ -1531,7 +1445,7 @@ mod tests {
                 1,
                 "inst-a",
                 "go".into(),
-                wd_ms(60, LONG_MS, LONG_MS, 3),
+                wd_ms(60, LONG_MS, 3),
                 false,
                 |_ev: DriveEvent| -> Result<()> { Ok(()) },
                 || {},
@@ -1556,75 +1470,6 @@ mod tests {
     }
 
     #[test]
-    fn it_escalates_a_progress_stall_at_most_twice_then_keeps_streaming() {
-        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
-        let events: RefCell<Vec<Ev>> = RefCell::new(Vec::new());
-        let notes: RefCell<Vec<String>> = RefCell::new(Vec::new());
-        let result = runtime.block_on(async {
-            let (client, mut server) = tokio::io::duplex(4096);
-            let driver = drive(
-                client,
-                1,
-                "inst-a",
-                "go".into(),
-                wd_ms(LONG_MS, 60, LONG_MS, 3),
-                false,
-                |event: DriveEvent| -> Result<()> {
-                    if let DriveEvent::Stalled(text) = event {
-                        notes.borrow_mut().push(text.to_string());
-                    }
-                    events.borrow_mut().push(match event {
-                        DriveEvent::Report(r) => Ev::Report(r.status),
-                        DriveEvent::Stalled(_) => Ev::Stalled,
-                        DriveEvent::Stopped(id) => Ev::Stopped(id),
-                        DriveEvent::ReArmed(id) => Ev::ReArmed(id),
-                    });
-                    Ok(())
-                },
-                || {},
-            );
-            let ctrl = async {
-                let _ = read_chunk(&mut server).await;
-                // Accept the turn (disable delivery), then go quiet well past
-                // both notice deadlines (1x and 3x the window): the episode must
-                // produce exactly two notices, not one per window.
-                server
-                    .write_all(br#"{"type":"report","status":"working","text":"x"}"#)
-                    .await
-                    .unwrap();
-                server.write_all(b"\n").await.unwrap();
-                server.flush().await.unwrap();
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                server
-                    .write_all(br#"{"type":"turncompleted","turn_id":1,"reported":true}"#)
-                    .await
-                    .unwrap();
-                server.write_all(b"\n").await.unwrap();
-                server.flush().await.unwrap();
-                server
-            };
-            let (result, _server) = tokio::join!(driver, ctrl);
-            result
-        });
-        result.expect("a stall surfaces a notice, it does not error");
-        let events = events.into_inner();
-        assert_eq!(
-            events.iter().filter(|e| matches!(e, Ev::Stalled)).count(),
-            2,
-            "an episode escalates once and then goes quiet: {events:?}"
-        );
-
-        // The wording is the point of the escalation: the first fire must not
-        // assert the agent may be stuck (it fires on essentially every cold
-        // launch and is benign), and only the second one warns.
-        let notes = notes.into_inner();
-        assert!(!notes[0].contains("may be stuck"), "{notes:?}");
-        assert!(notes[0].contains("normal during long builds"), "{notes:?}");
-        assert!(notes[1].contains("may be stuck"), "{notes:?}");
-        assert!(notes[1].contains("progressStallSecs"), "{notes:?}");
-    }
-
-    #[test]
     fn the_unreported_stop_warning_names_both_recoveries() {
         // Reachable only without `--until-report`, which is now the interactive
         // default — so it addresses a watching operator. AC 619259/2: it must
@@ -1641,29 +1486,6 @@ mod tests {
     }
 
     #[test]
-    fn the_first_stall_notice_informs_and_only_the_second_warns() {
-        // Pure over the message builder, so the wording contract is pinned
-        // without waiting on real timers.
-        let window = Duration::from_secs(300);
-        let first = stall_message(window, 1);
-        assert!(first.contains("no reports for 300s"), "{first}");
-        assert!(!first.contains("may be stuck"), "{first}");
-
-        let second = stall_message(window, 2);
-        assert!(second.contains("may be stuck"), "{second}");
-        // The second names the *elapsed* silence, not the window.
-        assert!(second.contains("900s"), "{second}");
-    }
-
-    #[test]
-    fn the_second_stall_notice_is_due_three_windows_in() {
-        let start = Instant::now();
-        let window = Duration::from_secs(300);
-        assert_eq!(stall_notice_at(start, window, 0), start + window);
-        assert_eq!(stall_notice_at(start, window, 1), start + window * 3);
-    }
-
-    #[test]
     fn it_resends_the_prompt_until_the_turn_is_accepted() {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
         let (result, p1, p2) = runtime.block_on(async {
@@ -1673,7 +1495,7 @@ mod tests {
                 7,
                 "inst-a",
                 "go".into(),
-                wd_ms(LONG_MS, LONG_MS, 80, 3),
+                wd_ms(LONG_MS, 80, 3),
                 false,
                 |_ev: DriveEvent| -> Result<()> { Ok(()) },
                 || {},
@@ -1720,7 +1542,7 @@ mod tests {
                 9,
                 "inst-a",
                 "go".into(),
-                wd_ms(LONG_MS, LONG_MS, 50, 2),
+                wd_ms(LONG_MS, 50, 2),
                 false,
                 |_ev: DriveEvent| -> Result<()> { Ok(()) },
                 || {},
@@ -1790,7 +1612,6 @@ mod tests {
                 |event: DriveEvent| -> Result<()> {
                     events.borrow_mut().push(match event {
                         DriveEvent::Report(r) => Ev::Report(r.status),
-                        DriveEvent::Stalled(_) => Ev::Stalled,
                         DriveEvent::Stopped(id) => Ev::Stopped(id),
                         DriveEvent::ReArmed(id) => Ev::ReArmed(id),
                     });
@@ -2016,22 +1837,6 @@ mod tests {
         // `re-armed` notice must not displace it.
         let last = report_log::latest_terminal_at(&root, "inst-a").unwrap();
         assert_eq!(last.status, "stopped");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_stall_notice_is_not_journaled_as_something_the_agent_said() {
-        // `Stalled` is the watchdog's opinion, not an agent report — journaling
-        // it would put words in the agent's mouth.
-        let root = journal_root("stall");
-        let host = host_with_clock("2026-08-01T12:00:00Z");
-        journal_event(
-            &host,
-            &root,
-            "inst-a",
-            &DriveEvent::Stalled("no progress for 300s"),
-        );
-        assert!(report_log::read(&root, "inst-a").is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
