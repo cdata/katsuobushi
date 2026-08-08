@@ -292,16 +292,13 @@ The serial console is also teed to `console.log` in the instance's state dir.
 
 ### Watching a running turn
 
-`sandbox status` shows a **WORK** column for each running agent instance. The
-guest updates it via heartbeat while a turn is active.
+`sandbox status` shows a **WORK** column for each running agent instance.
 
-- **Active** — the guest heartbeat is current; the agent is working. A long
-  foreground operation (e.g. a cold build) holds this state for its full
-  duration.
-- **Active (Late)** — heartbeats have stopped arriving. The guest may be stuck.
-  Inspect with `sandbox attach` before intervening.
-- **Idle** — the agent stopped without reporting. The guest nudges it
-  automatically. If the column stays `Idle`, the turn needs your attention.
+- **Finished** — the agent reported a terminal result. Fetch the branch.
+- **Active** — work runs. The label names what is running.
+- **Active (Late)** — work runs past its own declared bound. Inspect with
+  `sandbox attach`.
+- **Idle** — nothing runs. Read the nudge count.
 
 ### Ending a session
 
