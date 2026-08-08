@@ -2,20 +2,37 @@
 //! instances whose project-board card has reached a terminal status
 //! (`accepted` or `cancelled`).
 //!
-//! Dispatched card instances are named `card-<id>` by `sandbox dispatch`. For
-//! each such instance, the prune reads the project board (read-only, the same
+//! Two types of per-card instance are handled:
+//!
+//! - **Implementor** instances, named `card-<id>` by `sandbox dispatch`.
+//! - **Reviewer** instances, named `review-<id>-<8hex>` by the orchestrator
+//!   (via `sandbox start --agent --name review-<id>`). The `<id>` MUST be the
+//!   6-hex card-id — that naming is contractual (see the
+//!   `project-orchestration` skill), and prune relies on it to map the instance
+//!   back to its card. If the suffix cannot be parsed as a valid card-id, the
+//!   entry is skipped.
+//!
+//! For each such instance, prune reads the project board (read-only, the same
 //! one-way seam `dispatch` uses) and, when the card is in the archive (i.e.,
 //! terminal state), removes:
 //!
 //! - The fetched work-product ref:
-//!   `refs/remotes/sandbox-guest/card-<id>`
-//! - The instance state dir: `<stateGlob>/card-<id>/` (contains `sync.git/`,
+//!   `refs/remotes/sandbox-guest/<inst>` (implementor and reviewer alike)
+//! - The instance state dir: `<stateGlob>/<inst>/` (contains `sync.git/`,
 //!   `instance.json`, and disk images)
 //!
 //! **Safety rule**: only cards explicitly in the archive (accepted or cancelled)
 //! are pruned. Cards not found on the board at all (icebox, or a manually-named
 //! instance that happens to look like `card-<id>`) are skipped — not provably
 //! terminal.
+//!
+//! **Known limitation — liveness gap.** `prune` does not check whether a VM is
+//! still running before removing its state dir. If a card is accepted while its
+//! implementor or reviewer VM is still running, the state dir (and any in-flight
+//! disk images) is removed under a live QEMU process. The workflow mitigates
+//! this: the orchestrator `stop`s VMs before the product owner accepts.
+//! `sandbox stop` has the same gap. A liveness gate is explicitly out of scope
+//! here; the mitigation is procedural.
 //!
 //! **jj op-log pruning** (`jj abandon`, `jj util gc`) is explicitly out of
 //! scope here: reaping git refs and state dirs is low-risk; touching the op log
@@ -39,8 +56,15 @@ use crate::Global;
 /// The remote-bookmark namespace for fetched sandbox refs (mirrors `fetch.rs`).
 const SANDBOX_GUEST_REMOTE: &str = "sandbox-guest";
 
-/// Instance name prefix stamped by `sandbox dispatch` on card instances.
+/// Instance name prefix stamped by `sandbox dispatch` on implementor instances.
 const CARD_PREFIX: &str = "card-";
+
+/// Instance name prefix stamped by the orchestrator on reviewer instances.
+/// The full instance name is `review-<card-id>-<8hex>`, where `<card-id>` is
+/// exactly 6 lowercase hex digits. That naming is contractual (see the
+/// `project-orchestration` skill) — prune relies on it to map each reviewer
+/// instance back to its card without consulting any external metadata.
+const REVIEW_PREFIX: &str = "review-";
 
 /// One successfully pruned instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -78,18 +102,58 @@ pub fn run(config: &Path, board_dir: &Path, global: Global) -> Result<()> {
     })
 }
 
+/// Extract the card-id an instance is responsible for, or `None` if the
+/// instance name does not match a known card-instance pattern.
+///
+/// - `card-<id>` → the implementor for card `<id>`.
+/// - `review-<id>-<8hex>` → the reviewer for card `<id>`; the `<id>` must be
+///   exactly 6 lowercase hex (contractual per the `project-orchestration`
+///   skill). An instance name whose slug cannot be parsed this way is skipped.
+fn instance_card_id(inst: &str) -> Option<CardId> {
+    if let Some(id_str) = inst.strip_prefix(CARD_PREFIX) {
+        return CardId::parse(id_str);
+    }
+    if let Some(rest) = inst.strip_prefix(REVIEW_PREFIX) {
+        // rest = "<card-id>-<8hex>": at minimum 6 + 1 + 8 = 15 chars.
+        let n = rest.len();
+        if n < 15 {
+            return None;
+        }
+        let bytes = rest.as_bytes();
+        // Separator dash and 8 lowercase hex digits occupy the last 9 chars.
+        if bytes[n - 9] != b'-' {
+            return None;
+        }
+        if !rest[n - 8..]
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return None;
+        }
+        return CardId::parse(&rest[..n - 9]);
+    }
+    None
+}
+
 /// The testable core: enumerate dispatched-card instances, reconcile against
 /// the board, and prune those in terminal state.
 ///
-/// - Only `card-<id>` instances are considered; non-card instances are ignored.
+/// Both implementor (`card-<id>`) and reviewer (`review-<id>-<8hex>`) instances
+/// are considered. For all other instance names the entry is skipped.
+///
 /// - Only cards in the board archive (terminal: accepted/cancelled) are pruned.
 /// - A card absent from the board at all is skipped — not provably terminal.
 ///
 /// For each pruned instance:
 /// 1. `git update-ref -d refs/remotes/sandbox-guest/<inst>` is run through the
 ///    host seam. A non-zero exit means the ref was already absent — treated as
-///    success, `ref_deleted` is reported `false`.
+///    success, `ref_deleted` is reported `false`. An IO error (git failed to
+///    spawn) is a system-level failure and propagates, aborting the prune so
+///    both the ref and the state dir remain for the next run to retry.
 /// 2. `remove_dir` removes the state dir (contains `sync.git/`, disk images).
+///    An error on one entry (e.g. the path is a file, not a directory) is
+///    reported to stderr and that entry is skipped; other instances continue
+///    to be pruned.
 fn prune_with(
     host: &impl Host,
     spec: &Spec,
@@ -101,12 +165,9 @@ fn prune_with(
 
     let mut pruned = Vec::new();
     for inst in instances {
-        // Only dispatched card instances carry the `card-` prefix.
-        let Some(id_str) = inst.strip_prefix(CARD_PREFIX) else {
+        // Determine which card this instance belongs to (if any).
+        let Some(card_id) = instance_card_id(&inst) else {
             continue;
-        };
-        let Some(card_id) = CardId::parse(id_str) else {
-            continue; // not a valid 6-hex card id suffix
         };
         // Prune only when the card is explicitly terminal (in the archive).
         // A card absent from the board entirely is not provably terminal — skip.
@@ -114,14 +175,25 @@ fn prune_with(
             continue;
         }
 
-        // Delete the fetched ref (idempotent: non-zero = already absent).
+        // Delete the fetched ref. A non-zero exit means the ref was already
+        // absent (idempotent). An IO failure means git could not be spawned —
+        // that is a system error, not "ref not found", and must propagate so
+        // the state dir is not removed under a ref that was never deleted.
         let ref_path = format!("refs/remotes/{SANDBOX_GUEST_REMOTE}/{inst}");
         let mut cmd = Command::new(&spec.tools.git);
         cmd.args(["update-ref", "-d", &ref_path]);
-        let ref_deleted = host.run(&cmd).is_ok_and(|o| o.status.success());
+        let output = host
+            .run(&cmd)
+            .with_context(|| format!("spawning git to delete ref {ref_path}"))?;
+        let ref_deleted = output.status.success();
 
-        // Remove the state dir (sync.git, instance.json, disk images).
-        remove_dir(&roots.state_glob.join(&inst))?;
+        // Remove the state dir (sync.git, instance.json, disk images). If the
+        // path is malformed (e.g. a file rather than a directory), report the
+        // error and skip this entry — one bad entry must not abort the whole run.
+        if let Err(e) = remove_dir(&roots.state_glob.join(&inst)) {
+            eprintln!("prune: skipping malformed state dir for {inst}: {e:#}");
+            continue;
+        }
 
         pruned.push(Pruned {
             instance: inst,
@@ -147,6 +219,7 @@ mod tests {
     use crate::sandbox::host::{Call, FakeHost};
     use crate::sandbox::spec::{GraphicsSpec, Roots, Tools};
     use std::cell::RefCell;
+    use std::io;
     use std::os::unix::process::ExitStatusExt;
     use std::path::PathBuf;
     use std::process::{ExitStatus, Output};
@@ -273,6 +346,36 @@ mod tests {
     }
 
     #[test]
+    fn it_skips_a_card_in_needs_review_lane() {
+        // needs-review is the most dangerous near-miss — one step from the
+        // archive. A card in this lane must never be pruned.
+        let spec = fake_spec("/state");
+        let board = Board::parse(
+            "---\nkanban-plugin: basic\n---\n\n\
+             ## To-do\n\n## In Progress\n\n\
+             ## Needs Review\n\n- [ ] [[dddddd]]\n\n\
+             ## Ready\n\n\
+             ---\n\n## Archive\n\n",
+        );
+        let mut host = FakeHost::new();
+        host.push_list_dir(Ok(entries(&["card-dddddd"])));
+
+        let removed: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+        let pruned = prune_with(&host, &spec, &board, |p| {
+            removed.borrow_mut().push(p.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(
+            pruned.is_empty(),
+            "a card in needs-review must not be pruned"
+        );
+        assert!(removed.into_inner().is_empty());
+        assert!(!host.calls().iter().any(|c| matches!(c, Call::Run(_))));
+    }
+
+    #[test]
     fn it_skips_a_card_not_on_the_board_at_all() {
         // `card-cccccc` is not mentioned anywhere on the board (not provably
         // terminal).
@@ -380,6 +483,75 @@ mod tests {
     }
 
     #[test]
+    fn it_propagates_a_git_io_error_for_a_ref_delete_failure() {
+        // An IO failure spawning git (e.g. binary not found, disk error) must
+        // propagate as an error — not be silently treated as "ref already absent".
+        // The state dir must NOT be removed when git fails to spawn, so both
+        // the ref and the state dir remain for the next prune run to retry.
+        let state = "/state";
+        let spec = fake_spec(state);
+        let board = mixed_board();
+        let mut host = FakeHost::new();
+        host.push_list_dir(Ok(entries(&["card-bbbbbb"])));
+        host.push_run(Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "git: no such file or directory",
+        )));
+
+        let removed: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+        let result = prune_with(&host, &spec, &board, |p| {
+            removed.borrow_mut().push(p.to_path_buf());
+            Ok(())
+        });
+
+        assert!(result.is_err(), "a git IO error must propagate");
+        assert!(
+            removed.into_inner().is_empty(),
+            "state dir must not be removed when git fails to spawn"
+        );
+    }
+
+    #[test]
+    fn it_skips_a_malformed_state_dir_and_continues() {
+        // Two archived cards. remove_dir fails for card-aaaaaa (simulates a
+        // file-not-directory entry) but succeeds for card-bbbbbb. The prune
+        // must continue and report card-bbbbbb as pruned despite the earlier
+        // failure — one bad entry must not abort the whole run.
+        let state = "/state";
+        let board = Board::parse(
+            "---\nkanban-plugin: basic\n---\n\n\
+             ## To-do\n\n## In Progress\n\n## Needs Review\n\n## Ready\n\n\
+             ---\n\n## Archive\n\n- [x] [[aaaaaa]]\n- [x] [[bbbbbb]]\n\n",
+        );
+        let spec = fake_spec(state);
+        let mut host = FakeHost::new();
+        host.push_list_dir(Ok(entries(&["card-aaaaaa", "card-bbbbbb"])));
+        host.push_run(Ok(exit(0))); // git for card-aaaaaa
+        host.push_run(Ok(exit(0))); // git for card-bbbbbb
+
+        let removed: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+        let pruned = prune_with(&host, &spec, &board, |p| {
+            if p.ends_with("card-aaaaaa") {
+                return Err(anyhow::anyhow!("not a directory"));
+            }
+            removed.borrow_mut().push(p.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            pruned.len(),
+            1,
+            "only the successfully-removed entry is reported"
+        );
+        assert_eq!(pruned[0].instance, "card-bbbbbb");
+        assert_eq!(
+            removed.into_inner(),
+            vec![PathBuf::from(state).join("card-bbbbbb")]
+        );
+    }
+
+    #[test]
     fn it_prunes_only_terminal_cards_from_a_mixed_listing() {
         // Mixed: aaaaaa (live/To-do), bbbbbb (archived/terminal), named-inst
         // (no card prefix). Only bbbbbb is pruned.
@@ -434,6 +606,111 @@ mod tests {
     }
 
     #[test]
+    fn it_prunes_a_reviewer_instance_for_an_archived_card() {
+        // review-bbbbbb-46c73967 is the reviewer for card bbbbbb which is in the
+        // archive — both the ref and the state dir must be removed.
+        let state = "/state";
+        let spec = fake_spec(state);
+        let board = mixed_board();
+        let mut host = FakeHost::new();
+        host.push_list_dir(Ok(entries(&["review-bbbbbb-46c73967"])));
+        host.push_run(Ok(exit(0))); // git update-ref -d: ref deleted
+
+        let removed: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+        let pruned = prune_with(&host, &spec, &board, |p| {
+            removed.borrow_mut().push(p.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].instance, "review-bbbbbb-46c73967");
+        assert!(pruned[0].ref_deleted);
+        assert_eq!(
+            removed.into_inner(),
+            vec![PathBuf::from(state).join("review-bbbbbb-46c73967")]
+        );
+    }
+
+    #[test]
+    fn it_skips_a_reviewer_instance_with_a_non_card_id_slug() {
+        // "review-hello-46c73967": "hello" is not a valid 6-hex card-id.
+        // "review-46c73967": too short — the remainder after stripping the prefix
+        // has no space for both a card-id and an 8-hex suffix.
+        let spec = fake_spec("/state");
+        let board = mixed_board();
+        let mut host = FakeHost::new();
+        host.push_list_dir(Ok(entries(&[
+            "review-hello-46c73967",
+            "review-46c73967",
+            "review-",
+        ])));
+
+        let removed: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+        let pruned = prune_with(&host, &spec, &board, |p| {
+            removed.borrow_mut().push(p.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(
+            pruned.is_empty(),
+            "reviewer instances with non-card-id slugs must be skipped"
+        );
+        assert!(removed.into_inner().is_empty());
+        assert!(!host.calls().iter().any(|c| matches!(c, Call::Run(_))));
+    }
+
+    #[test]
+    fn it_skips_a_reviewer_instance_whose_card_is_not_terminal() {
+        // review-aaaaaa-46c73967 is the reviewer for card aaaaaa which is in
+        // To-do (live) — must not be pruned.
+        let spec = fake_spec("/state");
+        let board = mixed_board();
+        let mut host = FakeHost::new();
+        host.push_list_dir(Ok(entries(&["review-aaaaaa-46c73967"])));
+
+        let removed: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+        let pruned = prune_with(&host, &spec, &board, |p| {
+            removed.borrow_mut().push(p.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(
+            pruned.is_empty(),
+            "reviewer instance for a live card must not be pruned"
+        );
+        assert!(removed.into_inner().is_empty());
+    }
+
+    #[test]
+    fn it_prunes_both_implementor_and_reviewer_for_the_same_archived_card() {
+        // A full pair: card-bbbbbb (implementor) and review-bbbbbb-46c73967
+        // (reviewer). Both must be pruned in the same pass.
+        let state = "/state";
+        let spec = fake_spec(state);
+        let board = mixed_board();
+        let mut host = FakeHost::new();
+        host.push_list_dir(Ok(entries(&["card-bbbbbb", "review-bbbbbb-46c73967"])));
+        host.push_run(Ok(exit(0))); // git for card-bbbbbb
+        host.push_run(Ok(exit(0))); // git for review-bbbbbb-46c73967
+
+        let removed: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+        let pruned = prune_with(&host, &spec, &board, |p| {
+            removed.borrow_mut().push(p.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(pruned.len(), 2);
+        let names: Vec<_> = pruned.iter().map(|p| p.instance.as_str()).collect();
+        assert!(names.contains(&"card-bbbbbb"));
+        assert!(names.contains(&"review-bbbbbb-46c73967"));
+        assert_eq!(removed.into_inner().len(), 2);
+    }
+
+    #[test]
     fn it_serializes_a_pruned_instance_as_json() {
         let p = Pruned {
             instance: "card-bbbbbb".into(),
@@ -445,5 +722,52 @@ mod tests {
             "json: {json}"
         );
         assert!(json.contains("\"ref_deleted\":true"), "json: {json}");
+    }
+
+    // Unit tests for `instance_card_id` — the name→card mapping at the heart of
+    // the reviewer-instance matching.
+    #[test]
+    fn instance_card_id_parses_card_prefix() {
+        assert_eq!(
+            instance_card_id("card-a3f7b2").as_ref().map(CardId::as_str),
+            Some("a3f7b2")
+        );
+        assert!(instance_card_id("card-").is_none());
+        assert!(instance_card_id("card-xyz").is_none());
+    }
+
+    #[test]
+    fn instance_card_id_parses_review_prefix_with_valid_card_id() {
+        assert_eq!(
+            instance_card_id("review-c72eb6-46c73967")
+                .as_ref()
+                .map(CardId::as_str),
+            Some("c72eb6")
+        );
+    }
+
+    #[test]
+    fn instance_card_id_rejects_review_with_short_remainder() {
+        // "review-46c73967" → rest is only 8 chars, needs at least 15.
+        assert!(instance_card_id("review-46c73967").is_none());
+    }
+
+    #[test]
+    fn instance_card_id_rejects_review_with_non_hex_suffix() {
+        // Last 8 chars contain non-hex ('z').
+        assert!(instance_card_id("review-aabbcc-zzzzzzzz").is_none());
+    }
+
+    #[test]
+    fn instance_card_id_rejects_review_with_non_card_id_slug() {
+        // "hello" is not 6 lowercase hex.
+        assert!(instance_card_id("review-hello-46c73967").is_none());
+    }
+
+    #[test]
+    fn instance_card_id_rejects_unrecognized_prefix() {
+        assert!(instance_card_id("named-foo").is_none());
+        assert!(instance_card_id("interactive-bar").is_none());
+        assert!(instance_card_id("").is_none());
     }
 }

@@ -103,8 +103,14 @@ The launch, liveness, and recovery mechanics below come from the `sandbox` skill
 — load it before running any of these commands.
 
 ```sh
-sandbox start --agent --name review-<slug> --prompt "<review directive>"
+sandbox start --agent --name review-<card-id> --prompt "<review directive>"
 ```
+
+The `--name` argument **must use the card-id as the slug** (e.g.
+`review-a3f7b2`). `sandbox prune` uses this convention to map a reviewer
+instance back to its card so it can reap the state dir and ref after the card
+is accepted or cancelled. An arbitrary slug would make the reviewer's
+state unclaimable by prune.
 
 A good review directive:
 
@@ -135,8 +141,8 @@ to get it reviewed. When it reports:
   cold instance. Then re-review with the same reviewer.
 
 Only once the card reaches `ready` is the reviewer spent — then remove it:
-`sandbox stop --remove review-<slug>`. Until then **pause** it
-(`sandbox stop review-<slug>`, no `--remove`) so the re-review starts warm.
+`sandbox stop --remove review-<card-id>`. Until then **pause** it
+(`sandbox stop review-<card-id>`, no `--remove`) so the re-review starts warm.
 
 ## Implement in a sandbox by default
 
@@ -287,7 +293,7 @@ than discarding them:
 
 ```sh
 sandbox stop card-<id>          # pause the implementor — no --remove
-sandbox stop review-<slug>      # pause the reviewer   — no --remove
+sandbox stop review-<card-id>   # pause the reviewer   — no --remove
 ```
 
 `stop` on a named instance powers the VM off but keeps its state dir, branch,
@@ -300,13 +306,13 @@ instance **auto-starts it** (~30–60s to boot and arm), so resuming is just:
 
 ```sh
 sandbox prompt card-<id> "<the review findings, verbatim, + what to change>"
-sandbox prompt review-<slug> "<re-review directive pointing at the new commits>"
+sandbox prompt review-<card-id> "<re-review directive pointing at the new commits>"
 ```
 
 Remove each VM only when its work is truly spent:
 
 - **implementor `card-<id>`** — when the card reaches `ready` (review passed).
-- **reviewer `review-<slug>`** — same: it may be asked to re-review any number
+- **reviewer `review-<card-id>`** — same: it may be asked to re-review any number
   of times before then.
 - **either one, early** — if the card is bounced to `todo`, cancelled, or the
   instance is stalled/unreported. A stalled VM is not warm, it's stuck; remove
