@@ -445,12 +445,11 @@ it.
 `work state:` in the detail view) tells you what the agent is doing without
 attaching:
 
-| Reading         | Meaning                                                       | What to do                                                                                              |
-| --------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `Active`        | At least one heartbeat is beating; the agent is working.      | Wait.                                                                                                   |
-| `Active (Late)` | Beating, but a heartbeat has exceeded its declared `timeout`. | Look at the heartbeat's label; decide whether to wait or attach and inspect.                            |
-| `Finished`      | The agent filed a terminal report (`done`/`blocked`).         | Collect the report from `sandbox status <name>` (`last report:`) or `reports.ndjson`.                   |
-| `Idle`          | No heartbeat beats and no terminal report was filed.          | The sandbox auto-nudges an idle agent. If `Idle` persists, attach and inspect, or stop and re-dispatch. |
+| Reading    | Meaning                                                                                                                                                                                                                                                               | What to do                                                                                              |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `Active`   | At least one heartbeat is beating; the agent is working. When a heartbeat exceeds its `timeout`, the display shows `Active (Late)` — a flag on this state, not a separate state. A past-timeout heartbeat is still beating; one that stops shows as `Idle`, not late. | Wait. If `(Late)`, look at the heartbeat's label; decide whether to wait or attach and inspect.         |
+| `Finished` | The agent filed a terminal report (`done`/`blocked`).                                                                                                                                                                                                                 | Collect the report from `sandbox status <name>` (`last report:`) or `reports.ndjson`.                   |
+| `Idle`     | No heartbeat beats and no terminal report was filed.                                                                                                                                                                                                                  | The sandbox auto-nudges an idle agent. If `Idle` persists, attach and inspect, or stop and re-dispatch. |
 
 Unnamed instances are ephemeral (removed on stop). `--name` makes an instance
 persistent: it keeps its branch. A provided `--name` is suffixed with random
@@ -500,7 +499,44 @@ Rules to write against:
   process identifier does not.** Use `pgrep -f` or similar for work that may
   span multiple processes or restart a child.
 
-A minimal example:
+**Block-scalar syntax.** The `check` and `detail` bodies use YAML block-scalar
+style: a pipe (`|`) on the field line and every shell line indented two spaces
+relative to the `check:` key. The YAML parser strips those two leading spaces
+before handing the body to `sh(1)`. That indentation is YAML structure, not part
+of the shell script. Use `|` (literal), not `>` (folded) — a folded body
+collapses newlines into spaces and turns a multi-line script into a one-liner
+that silently exits 0 and beats on every tick regardless of what the work is
+actually doing.
+
+**Comparison-type checks and the first-beat problem.** Any check that compares a
+current reading against a previous one — CPU usage, a file mtime, a counter —
+has no previous reading on the first run. Without handling that case, the check
+exits 0 and fires a spurious beat before any real work has happened. The
+pattern: on the first run, write the baseline and exit 1 (no beat). On the next
+tick, compare and exit 0 only when the value has advanced.
+
+A process-existence check (`pgrep -f`) avoids this problem by nature — the
+process either exists or it does not. Use the baseline pattern for any check
+that measures change rather than presence:
+
+```yaml
+label: Compiling
+timeout: 45m
+interval: 10s
+check: |
+  prev=/run/myproject/hb-build.prev
+  cur=$(stat -c %Y target/debug/my-binary 2>/dev/null) || exit 1
+  if [ -f "$prev" ]; then
+    old=$(cat "$prev")
+    printf '%s\n' "$cur" > "$prev"
+    [ "$cur" -gt "$old" ]
+  else
+    printf '%s\n' "$cur" > "$prev"
+    exit 1
+  fi
+```
+
+A process-existence check that does not need the baseline:
 
 ```yaml
 label: Compiling
@@ -509,6 +545,10 @@ interval: 10s
 check: |
   pgrep -f 'rustc|cargo' >/dev/null
 ```
+
+A heartbeat file that will not parse reports one error for that path, then is
+silently skipped on every subsequent tick while it stays broken; the other files
+are unaffected.
 
 ## Notes
 
