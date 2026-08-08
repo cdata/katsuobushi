@@ -439,6 +439,13 @@ convenient: `git branch -D sandbox/<name>`. To land _only_ the new commits
 - git: `git cherry-pick <last-landed-guest-sha>..<new-tip>` (the `..` range
   excludes the left boundary, skipping previously-landed commits).
 
+The attribution and description requirements from step 3 above apply to every
+bounce-duplicated commit too: re-author each to the repository owner
+(`jj metaedit --update-author` / `git commit --amend --reset-author --no-edit`)
+and reject any with an empty commit message before you proceed. The next
+`sandbox dispatch` will refuse if any commit authored by the agent identity
+remains on `HEAD`.
+
 Never `jj rebase` the `sandbox-guest/<name>` bookmark. jj's immutability default
 refuses it on a remote bookmark, and even if overridden it would move the
 bookmark and break the idempotency the design relies on.
