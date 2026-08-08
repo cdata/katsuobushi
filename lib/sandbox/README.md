@@ -58,19 +58,18 @@ project id; see
 [`templates/sandbox/flake.nix`](../../templates/sandbox/flake.nix) for the
 fully-commented reference. The most important arguments:
 
-| Argument                                                 | Purpose                                                                                                                                                                                                                   |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workspaceRoot`                                          | Your project root (e.g. `./.`). Used to build the per-instance mirror at launch; not baked into the image.                                                                                                                |
-| `projectId`                                              | Owner-qualified id (e.g. `"my-org/my-project"`). Names the in-guest path and per-instance host state dirs.                                                                                                                |
-| `allowedOrigins`                                         | Extra reachable hostnames, appended to the lean Anthropic+Nix baseline (`baseAllowedOrigins`). No implicit wildcards.                                                                                                     |
-| `packages`                                               | Goes on the guest `PATH` — **this is where your agent harness goes** (e.g. `claude-code`).                                                                                                                                |
-| `secrets`                                                | `NAME -> { fromEnv \| fromFile }`. Read from the host at launch, injected via `fw_cfg`; never in the store.                                                                                                               |
-| `extraRepos` / `workspaceContext` / `homeFiles`          | Pin reference repos, carry untracked project context, and map files into the agent's home.                                                                                                                                |
-| `importHostStoreDb`                                      | Default `true`. Reuse everything the host has already built (e.g. `nix develop` toolchains) offline; see below.                                                                                                           |
-| `graphics`                                               | Opt-in headless compositor + paravirtual GPU so a browser / Wayland app can render. Off by default; see below.                                                                                                            |
-| `vcpu` / `mem`                                           | CPU + RAM (avoid `mem = 2048` exactly — QEMU hangs).                                                                                                                                                                      |
-| `storeVolumeSize` / `scratchVolumeSize` / `dbVolumeSize` | Disk-backed scratch image sizes in MiB (sparse). Default 16384 / 32768 / 4096. See "Reusing the host's Nix store".                                                                                                        |
-| `progressStallSecs`                                      | How long a driven turn may go without a **report** before the host prints a neutral "no reports" notice (a stronger one follows at 3x that). Default 300. Raise it past your cold-build time — see "The progress notice". |
+| Argument                                                 | Purpose                                                                                                               |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `workspaceRoot`                                          | Your project root (e.g. `./.`). Used to build the per-instance mirror at launch; not baked into the image.            |
+| `projectId`                                              | Owner-qualified id (e.g. `"my-org/my-project"`). Names the in-guest path and per-instance host state dirs.            |
+| `allowedOrigins`                                         | Extra reachable hostnames, appended to the lean Anthropic+Nix baseline (`baseAllowedOrigins`). No implicit wildcards. |
+| `packages`                                               | Goes on the guest `PATH` — **this is where your agent harness goes** (e.g. `claude-code`).                            |
+| `secrets`                                                | `NAME -> { fromEnv \| fromFile }`. Read from the host at launch, injected via `fw_cfg`; never in the store.           |
+| `extraRepos` / `workspaceContext` / `homeFiles`          | Pin reference repos, carry untracked project context, and map files into the agent's home.                            |
+| `importHostStoreDb`                                      | Default `true`. Reuse everything the host has already built (e.g. `nix develop` toolchains) offline; see below.       |
+| `graphics`                                               | Opt-in headless compositor + paravirtual GPU so a browser / Wayland app can render. Off by default; see below.        |
+| `vcpu` / `mem`                                           | CPU + RAM (avoid `mem = 2048` exactly — QEMU hangs).                                                                  |
+| `storeVolumeSize` / `scratchVolumeSize` / `dbVolumeSize` | Disk-backed scratch image sizes in MiB (sparse). Default 16384 / 32768 / 4096. See "Reusing the host's Nix store".    |
 
 ### A comprehensive example
 
@@ -172,7 +171,6 @@ sandbox = katsuobushi.lib.sandbox {
   storeVolumeSize = 16384;             # writable /nix/store overlay (MiB, sparse)
   scratchVolumeSize = 32768;           # workspace clone + cargo/rustup/XDG caches
   dbVolumeSize = 4096;                 # guest Nix database
-  progressStallSecs = 1500;            # 25 min: past this project's cold build
 
   # Escape hatch: extra NixOS modules merged into the guest
   #
@@ -292,32 +290,18 @@ still prints the raw ssh command if you want to build on it.
 
 The serial console is also teed to `console.log` in the instance's state dir.
 
-### The progress notice
+### Watching a running turn
 
-While a turn is driven, the host watches for reports and prints a notice when
-none arrive for a while:
+`sandbox status` shows a **WORK** column for each running agent instance. The
+guest updates it via heartbeat while a turn is active.
 
-```text
-⚠ no reports for 300s — normal during long builds (only reports reset this
-  clock, so a single long tool call looks idle); inspect with `sandbox attach`
-  if unexpected
-```
-
-**Read this as information, not an alarm.** Only `working`/`info` reports reset
-the clock — heartbeats are deliberately silent and do not count — so an agent
-inside one long foreground tool call looks idle no matter how hard it is
-working. A dispatched agent's first act is typically a cold workspace compile,
-routinely 15–25 minutes, so on such a project the default window fires on
-essentially every launch and is benign every time.
-
-If the silence continues to **three times** the window, a second, stronger
-notice fires (`still no reports after 900s — the agent may be stuck …`) and the
-episode then goes quiet. Neither notice ever breaks or kills the turn.
-
-Set `progressStallSecs` past your project's cold-build time (e.g. `1500` for a
-~20-minute build) so the notice means something when it does fire. Whatever it
-says, **inspect before intervening** — `sandbox attach` shows what the agent is
-actually doing — and never kill a launch that is still provisioning.
+- **Active** — the guest heartbeat is current; the agent is working. A long
+  foreground operation (e.g. a cold build) holds this state for its full
+  duration.
+- **Active (Late)** — heartbeats have stopped arriving. The guest may be stuck.
+  Inspect with `sandbox attach` before intervening.
+- **Idle** — the agent stopped without reporting. The guest nudges it
+  automatically. If the column stays `Idle`, the turn needs your attention.
 
 ### Ending a session
 
