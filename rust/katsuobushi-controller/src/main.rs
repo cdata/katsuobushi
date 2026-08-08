@@ -330,6 +330,14 @@ enum SandboxCommand {
         /// `-` to stream the PNG to stdout.
         path: Option<String>,
     },
+    /// Remove vestigial git refs and state dirs for instances whose card is
+    /// terminal (accepted or cancelled). Only `card-<id>` instances are
+    /// considered; user-started instances are never touched.
+    Prune {
+        /// The project board directory (holds BOARD.md + issues/).
+        #[arg(long, default_value = "project/kanban")]
+        board_dir: PathBuf,
+    },
 }
 
 impl From<KindArg> for project::model::Kind {
