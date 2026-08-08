@@ -200,7 +200,9 @@ pub fn load_heartbeats(dir: &Path) -> (Vec<Heartbeat>, Vec<HeartbeatError>) {
 ///
 /// The runner re-reads the directories on a slow timer. On each read it calls
 /// [`eval_scan`] to compute what changed: newly fixed or added files produce
-/// new tasks; error messages are suppressed for files that are still broken.
+/// new tasks; error messages are suppressed for files that are still broken
+/// (once per broken path, not once per error message); deleted or broken files
+/// that were running have their tasks aborted.
 #[derive(Debug, Default)]
 pub struct HeartbeatSetState {
     /// Paths for which a running task has already been spawned.
@@ -215,16 +217,23 @@ pub struct HeartbeatSetDiff {
     pub to_start: Vec<Heartbeat>,
     /// Errors that have not been reported before and should be printed once.
     pub new_errors: Vec<HeartbeatError>,
+    /// Paths whose tasks should be aborted (file deleted or became unparseable).
+    pub to_stop: Vec<PathBuf>,
 }
 
 /// Apply one scan result to `state` and return what changed.
 ///
 /// Rules:
+/// - A path that was previously loaded but is no longer valid (deleted or
+///   unparseable) is placed in `to_stop` and removed from `state.loaded`, so
+///   the caller can abort the old task and so that a recreated file starts a
+///   fresh task under the normal add path.
 /// - A heartbeat file that was not previously loaded gets a task spawned.
-///   If it was broken before, its error state is cleared.
+///   If it was broken before, its broken state is cleared.
 /// - A file that is still loaded (task already running) is skipped.
-/// - A parse error on a file not yet in the broken set is reported once and
-///   added to the set. A file already in the broken set stays silent.
+/// - A parse error on a file not yet in the broken set is reported once
+///   (once per broken path) and added to the set. A file already in the
+///   broken set stays silent, even if its error message has changed.
 pub fn eval_scan(
     state: &mut HeartbeatSetState,
     heartbeats: Vec<Heartbeat>,
@@ -232,6 +241,22 @@ pub fn eval_scan(
 ) -> HeartbeatSetDiff {
     let mut to_start = Vec::new();
     let mut new_errors = Vec::new();
+    let mut to_stop = Vec::new();
+
+    // Paths that are currently valid (successfully parsed).
+    let current_valid: HashSet<PathBuf> = heartbeats.iter().map(|hb| hb.source.clone()).collect();
+
+    // A path that was running but is no longer valid (deleted or broken) must
+    // have its task aborted. Remove it from loaded so a recreated file starts
+    // fresh under the normal add path.
+    state.loaded.retain(|path| {
+        if current_valid.contains(path) {
+            true
+        } else {
+            to_stop.push(path.clone());
+            false
+        }
+    });
 
     for hb in heartbeats {
         let path = hb.source.clone();
@@ -252,6 +277,7 @@ pub fn eval_scan(
     HeartbeatSetDiff {
         to_start,
         new_errors,
+        to_stop,
     }
 }
 
@@ -944,6 +970,54 @@ mod heartbeat_set_tests {
         assert_eq!(diff1.new_errors.len(), 1, "first scan: error reported");
         let diff2 = eval_scan(&mut state, vec![], vec![broken("bad.yaml")]);
         assert!(diff2.new_errors.is_empty(), "second scan: error suppressed");
+        let diff3 = eval_scan(&mut state, vec![], vec![broken("bad.yaml")]);
+        assert!(
+            diff3.new_errors.is_empty(),
+            "third scan: error still suppressed"
+        );
+    }
+
+    #[test]
+    fn it_stops_a_loaded_heartbeat_when_its_file_is_deleted() {
+        let mut state = HeartbeatSetState::default();
+
+        // First scan: file appears and is loaded, task spawned.
+        let diff = eval_scan(&mut state, vec![good("vanish.yaml")], vec![]);
+        assert_eq!(diff.to_start.len(), 1);
+        assert!(diff.to_stop.is_empty());
+
+        // Second scan: file is gone (deleted). Task must be stopped and path
+        // removed from loaded so a recreated file starts fresh.
+        let diff = eval_scan(&mut state, vec![], vec![]);
+        assert!(
+            diff.to_start.is_empty(),
+            "deleted file must not be re-started"
+        );
+        assert_eq!(
+            diff.to_stop,
+            vec![PathBuf::from("vanish.yaml")],
+            "deleted file path must appear in to_stop"
+        );
+        assert!(
+            !state.loaded.contains(Path::new("vanish.yaml")),
+            "path must be removed from loaded after deletion"
+        );
+
+        // Third scan: file is still absent; must not re-appear in to_stop.
+        let diff = eval_scan(&mut state, vec![], vec![]);
+        assert!(
+            diff.to_stop.is_empty(),
+            "already-removed path must not re-appear"
+        );
+
+        // Fourth scan: file is recreated; must start a fresh task.
+        let diff = eval_scan(&mut state, vec![good("vanish.yaml")], vec![]);
+        assert_eq!(
+            diff.to_start.len(),
+            1,
+            "recreated file must start a fresh task"
+        );
+        assert!(diff.to_stop.is_empty());
     }
 
     #[test]

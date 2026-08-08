@@ -2,6 +2,7 @@
 //! body on its own interval, tracks beat state via the pure core in
 //! [`crate::heartbeat`], and reports parse errors to stderr exactly once.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -49,13 +50,15 @@ const RESCAN_INTERVAL: Duration = Duration::from_secs(60);
 /// that a file corrected or added after startup begins beating without a
 /// guest restart. Never returns normally.
 ///
-/// **Re-read rule ("once per error state"):**
-/// - A parse error on a file is reported to stderr exactly once, the first
-///   time the error is seen. The file stays silent on every subsequent scan
-///   while it remains broken.
+/// **Re-read rule ("once per broken path"):**
+/// - A parse error on a file is reported to stderr exactly once per broken
+///   path. The file stays silent on every subsequent scan while it remains
+///   broken, even if its error message changes.
 /// - A broken file that is corrected, and a file newly added to a directory,
 ///   are both picked up on the next scan without a restart.
 /// - An already-running heartbeat is never re-spawned.
+/// - A file that is deleted or becomes unparseable has its task aborted on the
+///   next scan. A file that is recreated afterward starts a fresh task.
 ///
 /// Each heartbeat task sends [`BeatStatusUpdate`] values to `beat_tx` on every
 /// tick so the server can aggregate them into a [`WorkState`] and detect
@@ -75,6 +78,8 @@ pub async fn run_heartbeat_set(
     tokio::spawn(run_turn_heartbeat(turn_armed, beat_tx.clone()));
 
     let mut hb_state = HeartbeatSetState::default();
+    // JoinHandles keyed by source path; aborted when a file is deleted or becomes broken.
+    let mut handles: HashMap<PathBuf, tokio::task::JoinHandle<()>> = HashMap::new();
     let mut rescan = tokio::time::interval(RESCAN_INTERVAL);
     rescan.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -87,12 +92,19 @@ pub async fn run_heartbeat_set(
         for err in &diff.new_errors {
             eprintln!("katsuobushi-heartbeat: parse error: {err}");
         }
+        for path in diff.to_stop {
+            if let Some(handle) = handles.remove(&path) {
+                handle.abort();
+            }
+        }
         for hb in diff.to_start {
             let cwd = cwd.clone();
             let tx = beat_tx.clone();
-            tokio::spawn(async move {
+            let source = hb.source.clone();
+            let handle = tokio::spawn(async move {
                 run_one(hb, cwd, tx).await;
             });
+            handles.insert(source, handle);
         }
     }
 }

@@ -180,7 +180,8 @@ The rules that close the gaps:
   that does not flicker. A check on a process group survives a single process
   exit. A check on one process identifier does not.
 - A file the guest cannot read or parse never beats. The guest reports the error
-  to the host once, so a broken heartbeat is visible and is not silent.
+  to the host once (see [Re-reading the heartbeat set](#re-reading-the-heartbeat-set)
+  below for the exact rule), so a broken heartbeat is visible and is not silent.
 - A `detail` body that fails is ignored. The label alone shows.
 
 The directory is version-controlled and reaches the VM through the ordinary git
@@ -190,15 +191,26 @@ agent can write the file, but it cannot do so quietly.
 #### Re-reading the heartbeat set
 
 The guest re-reads the heartbeat directories on a slow timer (once per minute).
-The rule is **once per error state**: a broken file's error is reported once and
-suppressed on every subsequent scan while the file remains broken. A file that
-is corrected, or a file that is newly added to a directory, is picked up on the
-next scan without a guest restart.
+The rule is **once per broken path**: a broken file's error is reported once and
+suppressed on every subsequent scan while the file remains broken. A file edited
+from one broken form to another does not re-report; only the first error for a
+given path is emitted. Editing a broken file to a working form clears its state
+and starts a task on the next scan.
 
 This is the intended reading of "once" in the design. "Once ever" would leave a
 corrected file invisible and give its author no signal explaining why. "Once per
-interval" would fill the log. "Once per error state" is silent while a file
+interval" would fill the log. "Once per broken path" is silent while a file
 stays broken, loud when it first breaks, and self-healing when it is fixed.
+
+When a file is deleted after its task has started, the guest aborts the task on
+the next rescan and removes the path from its loaded set. A file that is
+recreated afterward starts a fresh task under the normal add path.
+
+Known limitations of the re-read implementation:
+
+- A working heartbeat whose check body is edited (valid to valid, different
+  content) continues to run the old body until a guest restart. Re-reading the
+  content of an already-running heartbeat is not implemented.
 
 A filesystem watcher is not used. Re-reading on a slow timer is sufficient: the
 I/O cost of scanning a small directory of YAML files once per minute is
