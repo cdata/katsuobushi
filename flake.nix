@@ -277,6 +277,7 @@
         # on the controller crate, so a broken config or crate fails fast.
         checks = {
           sandbox = sandbox.checks.sandbox;
+          sandbox-verb-coverage = sandbox.checks.sandbox-verb-coverage;
         }
         // rust.cargoChecks
         // markdown.checks

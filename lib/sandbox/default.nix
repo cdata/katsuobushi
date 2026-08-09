@@ -1887,6 +1887,65 @@ let
     command = emitExecScript subcommand;
   };
 
+  # Drift check: sandbox wrapper subcommands ↔ Rust SandboxCommand variants.
+  #
+  # Builds a derivation that fails at `nix flake check` time when the Nix
+  # wrapper's subcommand set and the Rust CLI's SandboxCommand variants diverge
+  # in either direction. The Nix side is baked in at eval time; the Rust side is
+  # parsed from the source at build time, so adding a variant without updating
+  # menuCommands (or vice-versa) breaks the check immediately.
+  sandboxVerbCoverage =
+    let
+      # Eval-time: sorted list of verbs declared in the Nix wrapper.
+      nixVerbs = builtins.sort builtins.lessThan (builtins.attrNames menuCommands.sandbox.subcommands);
+      # Write them to a store path so the build-time script can read them
+      # without Nix escaping getting in the way of multiline shell strings.
+      nixVerbsFile = pkgs.writeText "sandbox-nix-verbs" (lib.concatStringsSep "\n" nixVerbs + "\n");
+    in
+    pkgs.runCommand "sandbox-verb-coverage"
+      {
+        nativeBuildInputs = with pkgs; [
+          gawk
+          gnugrep
+          gnused
+        ];
+      }
+      ''
+        main_rs="${controlSrc}/rust/katsuobushi-controller/src/main.rs"
+
+        # Extract SandboxCommand variant names from the Rust source.
+        # The range `/^enum SandboxCommand/,/^\}/` captures the enum body; only
+        # lines at exactly 4-space indent starting with an uppercase letter are
+        # variant names (doc comments use `///`, field lines have deeper indent).
+        # PascalCase → kebab-case matches how clap exposes them as subcommands.
+        rust_verbs=$(awk '/^enum SandboxCommand/,/^\}/' "$main_rs" \
+          | grep -E '^    [A-Z]' | awk '{print $1}' | tr -d '{,' \
+          | sed 's/\([a-z]\)\([A-Z]\)/\1-\2/g' | tr 'A-Z' 'a-z' | sort)
+
+        nix_verbs=$(sort "${nixVerbsFile}")
+
+        ok=true
+
+        while IFS= read -r verb; do
+          [ -z "$verb" ] && continue
+          if ! printf '%s\n' "$nix_verbs" | grep -qx "$verb"; then
+            echo "sandbox-verb-coverage: '$verb' is in SandboxCommand (rust/katsuobushi-controller/src/main.rs) but not in menuCommands.sandbox.subcommands (lib/sandbox/default.nix)" >&2
+            ok=false
+          fi
+        done <<< "$rust_verbs"
+
+        while IFS= read -r verb; do
+          [ -z "$verb" ] && continue
+          if ! printf '%s\n' "$rust_verbs" | grep -qx "$verb"; then
+            echo "sandbox-verb-coverage: '$verb' is in menuCommands.sandbox.subcommands (lib/sandbox/default.nix) but not in SandboxCommand (rust/katsuobushi-controller/src/main.rs)" >&2
+            ok=false
+          fi
+        done <<< "$nix_verbs"
+
+        [ "$ok" = "true" ] || exit 1
+        touch "$out"
+      '';
+
   # One `sandbox` branch; the lifecycle verbs are its subcommands (`sandbox
   # start`, `sandbox prompt`, …). Each leaf keeps the same handOff/emitExec body
   # as before — the branch only groups them into a single binary + menu row.
@@ -1910,6 +1969,7 @@ let
         # exit iff a secret is missing or /dev/vhost-vsock is absent).
         status = handOff "status" "List instances, or detail a single instance";
         fetch = handOff "fetch" "Fetch a sandbox's branch into this repo";
+        deliver = handOff "deliver" "Deliver a branch from the host repo into an instance's mirror";
         stop = handOff "stop" "Suspend or remove an instance";
         # attach: the running/has-session probes, then a tiny terminal-handoff
         # recipe.
@@ -1918,6 +1978,7 @@ let
         # landing the PNG at the requested path (or host stdout for `-`). Requires
         # graphics.enable; katsuctl fails clearly if off.
         screenshot = handOff "screenshot" "Grab the headless compositor framebuffer of a graphics instance";
+        prune = handOff "prune" "Remove vestigial refs and state for terminal-card instances";
       };
     };
   };
@@ -1949,6 +2010,9 @@ in
 
   # Building the guest image so CI catches a broken sandbox config.
   checks.sandbox = runner;
+  # Verb-coverage check: fails when the wrapper and Rust CLI disagree on which
+  # sandbox subcommands exist. Wired into `nix flake check` via flake.nix.
+  checks.sandbox-verb-coverage = sandboxVerbCoverage;
 
   # The assembled guest system, exposed for advanced/inspection use.
   nixosConfiguration = guestSystem;
