@@ -1611,9 +1611,34 @@ let
 
           if [ ! -d ${workspacePath}/.git ]; then
             git clone ${shareMount}/sync.git ${workspacePath}
+            cd ${workspacePath}
+            git checkout "sandbox/$instance" 2>/dev/null || git checkout -b "sandbox/$instance"
+          else
+            # Resume: the orchestrator may have pushed refs/heads/base into the
+            # mirror to reflect cards that landed while this instance was paused.
+            # Fetch it and rebase the instance branch so the guest works against
+            # the current project state, not the tip it launched from.
+            #
+            # This is NOT the orphaning fault from card c1a6e1. The orchestrator
+            # never rewrites sandbox/$instance or any commit already in the
+            # mirror; it only adds or advances refs/heads/base. The rebase below
+            # rewrites only the guest's own commits, in the guest's own clone.
+            cd ${workspacePath}
+            # Explicitly select the instance branch before rebasing so HEAD
+            # drift (from any prior operation) cannot silently redirect the
+            # rebase to the wrong branch.
+            if ! git checkout "sandbox/$instance"; then
+              echo "sandbox: cannot switch to branch sandbox/$instance; stopping" >&2
+              exit 1
+            fi
+            if git fetch ${shareMount}/sync.git '+refs/heads/base:refs/heads/base' 2>/dev/null; then
+              if ! git rebase refs/heads/base; then
+                git rebase --abort 2>/dev/null || true
+                echo "sandbox: rebase onto the current base conflicted; stopping rather than continuing on a stale base" >&2
+                exit 1
+              fi
+            fi
           fi
-          cd ${workspacePath}
-          git checkout "sandbox/$instance" 2>/dev/null || git checkout -b "sandbox/$instance"
 
           # Overlay declared untracked context (.git excluded so the clean
           # linkage wins). Host-side staging already refused symlink escapes.
