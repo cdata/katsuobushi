@@ -98,6 +98,11 @@ struct Plan {
     /// `instance.json` read the *same* resolution; never holds `Unavailable` (that
     /// fails the launch loud in [`decide`] before a `Plan` is built).
     gpu: Option<Resolution>,
+    /// The commit to push as `refs/heads/base` in the mirror on a resume, or
+    /// `None` when the tip has not moved (base already records this SHA) or this
+    /// is a fresh launch. The guest rebases its branch onto this ref so it works
+    /// against the current project state after waking from a pause.
+    base_commit: Option<String>,
 }
 
 impl Plan {
@@ -262,6 +267,10 @@ fn decide(
         mirror_exists,
     )?;
 
+    // On a named resume, refresh the mirror's base ref when the project tip has
+    // advanced so the guest can rebase its branch onto the current state.
+    let base_commit = resolve_base_refresh(host, &spec.tools.git, &project, &sync_git, &seed)?;
+
     // The one graphics probe: walk the GPU role ladder against the host now, so
     // the recipe and the persisted instance.json share a single resolution. An
     // exhausted ladder with no `software` tail fails the launch loud here rather
@@ -289,6 +298,7 @@ fn decide(
         prompt: prompt.map(str::to_string),
         until_report,
         gpu,
+        base_commit,
     })
 }
 
@@ -511,6 +521,70 @@ fn resolve_seed(
     Ok(Seed::Fresh(commit))
 }
 
+/// Resolve the base commit to push into the mirror on a resume.
+///
+/// Returns `Some(sha)` when the project `HEAD` differs from the current
+/// `refs/heads/base` in the mirror (or when no base ref exists yet). Returns
+/// `None` when the tip has not moved — base already records this exact SHA —
+/// so a resume where nothing landed is a genuine no-op for the guest.
+///
+/// Always returns `None` for a fresh ([`Seed::Fresh`]) instance.
+///
+/// ## Distinguished from card c1a6e1
+///
+/// Card c1a6e1 documents the orphaning fault: the orchestrator rewrote commits
+/// already in the mirror's `sandbox/<instance>` branch, causing the guest's
+/// branch to be orphaned. This function is categorically different: it never
+/// touches `sandbox/<instance>`. It only adds or advances `refs/heads/base`, a
+/// separate ref the guest uses as a rebase target. The orchestrator never
+/// rewrites any commit that is already in the mirror.
+fn resolve_base_refresh(
+    host: &impl Host,
+    git: &Path,
+    project: &Path,
+    sync_git: &Path,
+    seed: &Seed,
+) -> Result<Option<String>> {
+    // Only named resumes need a base refresh.
+    if !matches!(seed, Seed::Resume(_)) {
+        return Ok(None);
+    }
+
+    // Read the current project HEAD — this becomes the new base.
+    let mut head_cmd = Command::new(git);
+    head_cmd.arg("-C").arg(project).arg("rev-parse").arg("HEAD");
+    let out = host
+        .run(&head_cmd)
+        .context("running `git rev-parse HEAD` for base refresh")?;
+    if !out.status.success() {
+        bail!("`git rev-parse HEAD` failed while resolving base for resume");
+    }
+    let current_head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if current_head.is_empty() {
+        bail!("could not resolve HEAD for base refresh");
+    }
+
+    // Check the mirror's existing base ref. An absent or unreadable ref is
+    // treated as "not present" — the first resume always pushes.
+    let mut base_cmd = Command::new(git);
+    base_cmd
+        .arg("-C")
+        .arg(sync_git)
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg("refs/heads/base");
+    let existing_base = match host.run(&base_cmd) {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => String::new(),
+    };
+
+    if !existing_base.is_empty() && existing_base == current_head {
+        return Ok(None); // tip unchanged — nothing to push
+    }
+
+    Ok(Some(current_head))
+}
+
 /// The ephemeral-name timestamp (`YYYYMMDD-HHMMSS`, UTC), formatted in Rust:
 /// the recipe contract runs every world-touching tool by its pinned store
 /// path, and shelling out to a bare-PATH `date` was the lone exception (and an
@@ -706,6 +780,17 @@ fn build_recipe(spec: &Spec, config: &Path, roots: &ResolvedRoots, plan: &Plan) 
                 "resuming named instance from its existing branch ({commit})"
             ));
         }
+    }
+    // On a resume where the project tip has advanced, push the current HEAD as
+    // refs/heads/base in the mirror so the guest can rebase its branch onto it.
+    // Skipped when the tip has not moved (base_commit is None) — the mirror's
+    // existing base is already current, so the guest's rebase is a no-op too.
+    if let Some(sha) = &plan.base_commit {
+        r.line(format!(
+            "{git} -C {} push --quiet {} \"{sha}:refs/heads/base\" --force",
+            qp(&plan.project),
+            qp(&sync_git)
+        ));
     }
     // Re-open the whole mirror to "other" writes so the guest can push (the
     // mapped-xattr saga) — run every launch, idempotent.
@@ -1236,6 +1321,7 @@ mod tests {
             prompt: None,
             until_report: false,
             gpu: None,
+            base_commit: None,
         }
     }
 
@@ -1554,6 +1640,128 @@ mod tests {
         )
         .expect("seed");
         assert_eq!(seed, Seed::Fresh("snap".into()));
+    }
+
+    // ---- base refresh on resume ----
+
+    #[test]
+    fn it_pushes_base_when_tip_has_moved_on_resume() {
+        // Resume with a new HEAD: the base ref in the mirror shows the old SHA;
+        // resolve_base_refresh must return the new HEAD.
+        let mut host = FakeHost::new();
+        host.push_run(Ok(ok_out("newsha999\n"))) // rev-parse HEAD (project)
+            .push_run(Ok(ok_out("oldsha111\n"))); // rev-parse --verify refs/heads/base (mirror)
+        let result = resolve_base_refresh(
+            &host,
+            Path::new("/git"),
+            Path::new("/proj"),
+            Path::new("/state/sync.git"),
+            &Seed::Resume("existingbranch789".into()),
+        )
+        .expect("resolve should succeed");
+        assert_eq!(result, Some("newsha999".to_string()));
+    }
+
+    #[test]
+    fn it_skips_base_when_tip_unchanged_on_resume() {
+        // Same HEAD as the mirror's current base — no push needed.
+        let mut host = FakeHost::new();
+        host.push_run(Ok(ok_out("samesha\n"))) // rev-parse HEAD (project)
+            .push_run(Ok(ok_out("samesha\n"))); // rev-parse --verify refs/heads/base (mirror)
+        let result = resolve_base_refresh(
+            &host,
+            Path::new("/git"),
+            Path::new("/proj"),
+            Path::new("/state/sync.git"),
+            &Seed::Resume("existingbranch789".into()),
+        )
+        .expect("resolve should succeed");
+        assert_eq!(result, None, "unchanged tip must return None");
+    }
+
+    #[test]
+    fn it_pushes_base_on_first_resume_when_no_base_ref_exists() {
+        // Mirror has no refs/heads/base yet (first resume ever). The verify
+        // returns a non-zero exit — treat as absent and push the current HEAD.
+        let mut host = FakeHost::new();
+        host.push_run(Ok(ok_out("firsttip\n"))) // rev-parse HEAD
+            .push_run(Ok(Output {
+                // rev-parse --verify refs/heads/base: ref absent
+                status: ExitStatus::from_raw(128),
+                stdout: Vec::new(),
+                stderr: b"fatal: Needed a single revision".to_vec(),
+            }));
+        let result = resolve_base_refresh(
+            &host,
+            Path::new("/git"),
+            Path::new("/proj"),
+            Path::new("/state/sync.git"),
+            &Seed::Resume("existingbranch789".into()),
+        )
+        .expect("resolve should succeed");
+        assert_eq!(
+            result,
+            Some("firsttip".to_string()),
+            "first resume must push base even when no base ref exists yet"
+        );
+    }
+
+    #[test]
+    fn it_returns_no_base_commit_for_a_fresh_seed() {
+        // Fresh instances do not need a base push — the seed IS the base.
+        let host = FakeHost::new();
+        let result = resolve_base_refresh(
+            &host,
+            Path::new("/git"),
+            Path::new("/proj"),
+            Path::new("/state/sync.git"),
+            &Seed::Fresh("freshsha".into()),
+        )
+        .expect("resolve should succeed");
+        assert_eq!(result, None);
+        assert!(
+            host.calls().is_empty(),
+            "fresh instance must not touch the host seam"
+        );
+    }
+
+    #[test]
+    fn it_emits_base_push_in_recipe_when_base_commit_is_set() {
+        let spec = spec_with(vec![], vec![], false);
+        let mut p = plan("myfeature-0badf00d", true, Mode::Interactive);
+        p.clone_mirror = false;
+        p.seed = Seed::Resume("existingbranch789".into());
+        p.base_commit = Some("newbasesha".to_string());
+        let recipe = render(&spec, &p);
+        assert!(
+            recipe.contains("newbasesha:refs/heads/base"),
+            "recipe must push the base commit: {recipe}"
+        );
+    }
+
+    #[test]
+    fn it_omits_base_push_when_base_commit_is_none() {
+        let spec = spec_with(vec![], vec![], false);
+        let mut p = plan("myfeature-0badf00d", true, Mode::Interactive);
+        p.clone_mirror = false;
+        p.seed = Seed::Resume("existingbranch789".into());
+        // base_commit is None by default — unchanged tip
+        let recipe = render(&spec, &p);
+        assert!(
+            !recipe.contains("refs/heads/base"),
+            "recipe must not push base when tip is unchanged: {recipe}"
+        );
+    }
+
+    #[test]
+    fn snapshot_named_resume_with_base_refresh() {
+        let spec = spec_with(vec![env_secret()], vec![], false);
+        let mut p = plan("myfeature-0badf00d", true, Mode::Agent);
+        p.clone_mirror = false;
+        p.seed = Seed::Resume("existingbranch789".into());
+        p.base_commit = Some("deadbeefcafe1234deadbeefcafe1234deadbeef".to_string());
+        p.prompt = Some("continue the work".into());
+        insta::assert_snapshot!(render(&spec, &p));
     }
 
     // ---- secrets stay references, never values ----
