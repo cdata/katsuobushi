@@ -348,9 +348,10 @@ than failing non-fast-forward. For instances first fetched with this version,
 that idempotency also holds at the repository level (no abandoned commits, no
 rebase surprises on a review bounce). Instances migrated from an older fetch
 scheme may have a stale `refs/heads/sandbox/<name>` ref left behind; the guard
-below handles it correctly and it is safe to delete (see Bounce, below). A
-colocated jj repo imports the ref automatically: jj reads `refs/remotes/*`
-alongside `refs/heads/*` and `refs/tags/*`.
+below handles it correctly and it is safe to delete when convenient:
+`git branch -D sandbox/<name>`. A colocated jj repo imports the ref
+automatically: jj reads `refs/remotes/*` alongside `refs/heads/*` and
+`refs/tags/*`.
 
 `sandbox fetch` also guards against the off-script case: if any local
 `refs/heads/` branch descends from the current ref tip (evidence that the host
@@ -378,60 +379,87 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
 
 1. `sandbox fetch <name>`.
 2. **Snapshot the host first.** If the working copy is dirty, capture it as a
-   `wip: …` commit (jj: the working copy already _is_ a commit; git: commit the
-   dirty tree) — never a stash. Concurrent host edits must survive the landing.
-3. **Duplicate** the guest commits onto the current tip of your work. Do **not**
-   rebase: the guest branch is a remote bookmark, and jj refuses `jj rebase` on
-   an immutable remote bookmark by default. Instead:
-   - jj: `jj duplicate <name>@sandbox-guest -d @` — copies the guest commits
-     with new identities, leaving the remote bookmark untouched.
-   - git: `git cherry-pick sandbox-guest/<name>` — copies the diff without
-     moving any ref. (`sandbox-guest/<name>` is git's disambiguation form for
-     `refs/remotes/sandbox-guest/<name>`; `<name>@sandbox-guest` is jj notation
-     and is rejected by git.) Duplicating (never rebasing) guarantees the remote
-     bookmark always points only at guest history, so every future force-update
-     is safe.
+   `wip: …` commit (git: commit the dirty tree; jj colocated: `@`'s content is
+   staged in git's index — see the colocated note in step 3 for the safe landing
+   path) — never a stash. Concurrent host edits must survive the landing.
+3. **Land the branch as a single squash commit.** The commit message comes from
+   the card, not from commits on the branch — a branch that bounced carries
+   messages like "address review findings" that carry no meaning in the owner's
+   history. Map the card's `type` to a Conventional-Commit prefix:
+   `feature → feat`, `bug → fix`, `chore → chore`, `docs → docs`.
 
-   Two requirements apply to every duplicated commit — satisfy both at landing,
-   before the next sandbox dispatch. After that, the next dispatch seeds its
-   guest from the host's working tree, making these commits ancestors of an
-   immutable remote bookmark; jj will refuse to re-author them.
+   ```sh
+   git merge --squash sandbox-guest/<name>
+   git commit -m "<type>(<scope>): <card title>"
+   ```
 
-   **Attribution.** Re-author each landed commit to the repository owner's
-   identity. The guest commits as its own agent identity inside the sandbox
-   (`agent@katsuobushi.local`); work in the owner's history must be attributed
-   to the owner instead. The duplicate step is the seam: it creates a copy in
-   the owner's repo, so the host sets authorship there. The guest branch keeps
-   its own identity — honest about who ran the code — while only what enters the
-   owner's history is re-attributed. **Design decision: re-author on landing,
-   not identity at launch** — handing the guest the owner's identity at launch
-   would make agent commits indistinguishable from a person's inside the sandbox
-   itself.
-   - git: after each `cherry-pick`, run
-     `git commit --amend --reset-author --no-edit`.
-   - jj: after duplicating, run `jj metaedit --update-author -r <revset>` for
-     each duplicated change. This re-authors to the configured user (the
-     repository owner) rather than to an explicit name you pass in; it does not
-     modify the author timestamp.
+   `git merge --squash` accumulates every change the branch adds relative to the
+   three-way merge base — all rounds of work land together. A new commit is born
+   with the repository owner's author identity and signs under the repository's
+   existing `commit.gpgsign` configuration — no attribution repair and no
+   separate signing step is needed. The guest branch keeps its own agent
+   identity (`agent@katsuobushi.local`) and is untouched by the landing.
 
-   **Non-empty description.** Reject any duplicated commit whose commit message
-   is empty (git: empty or whitespace-only subject line; jj:
-   `(no description set)`) — fill it in before proceeding. Use the card title or
-   the agent's `done` summary as a starting point. A commit with no message is
-   not reviewable and not bisectable.
+   **Do not** use `git cherry-pick <branch-tip>`. On a branch that has bounced,
+   cherry-pick applies the tip commit alone — the review fix — and silently
+   drops the original work. This is the defect that cancelled card `186265`.
+   `git merge --squash` is correct: it sees the full diff from the merge base.
 
-4. **Clean → land it, then remove the sandbox.** In `jj`, advance the
-   working-copy pointer `@` onto the duplicated commits and leave bookmark
-   placement to the user — anchoring accepted work on `@` keeps it durable
-   across the git imports the sandbox commands trigger. In `git`, fast-forward
-   your branch onto the cherry-picked commits. Either way, confirm the files
-   materialize in the working copy, then run `sandbox stop --remove <name>` —
-   the instance's unit of work is accepted, so it's spent (a plain
-   `sandbox stop` removes an ephemeral instance; `--remove` also tears down a
-   named one). Keep the `sandbox-guest/<name>` remote bookmark as the revert
-   artifact while the card is in review. Once the card reaches `accepted`,
-   delete it — the work is no longer pending and the revert artifact is spent.
-   Deleting it also clears the dispatch-seeding stash commits
+   **jj colocated repos — advance past any WIP before landing.** In a colocated
+   repo, git HEAD tracks `@-` (the parent of jj's working-copy commit `@`), and
+   jj's snapshot of `@` is reflected in git's index. `git merge --squash` does
+   not reset the index, so a non-empty `@` causes `git commit` to sweep that
+   staged content into the landing commit. If `jj status` shows working-copy
+   changes, flush them first:
+
+   ```sh
+   jj new        # commit WIP in @ as @-; new empty @ on top
+   ```
+
+   Caution: `git add` can stage content that `jj status` does not clearly
+   surface; if you have run raw git commands in the working copy, confirm with
+   `git status --short` that the index is clean before proceeding.
+
+   With `@` empty, the git recipe applies as-is — `git merge --squash` performs
+   a three-way merge from the merge base, so an unrelated commit that landed on
+   the host between review rounds is preserved, not overwritten:
+
+   ```sh
+   git merge --squash sandbox-guest/<name>
+   git commit -m "<type>(<scope>): <card title>"
+   jj git import    # let jj pick up the new commit
+   ```
+
+   If `git merge --squash` reports a conflict, follow the **Conflict
+   reconciliation** procedure below.
+
+   Verify the branch's changes are present in HEAD. A byte-identical-tree check
+   (`git diff sandbox-guest/<name> HEAD`) fails on a drifted tip where HEAD
+   intentionally diverges from the branch. Use a scoped diff instead — it
+   confirms every file the branch touched matches the branch tip, without
+   asserting that nothing else changed:
+
+   ```sh
+   mapfile -t FILES < <(git diff --name-only \
+     "$(git merge-base HEAD "sandbox-guest/<name>")" \
+     "sandbox-guest/<name>")
+   git diff "sandbox-guest/<name>" HEAD -- "${FILES[@]}"
+   ```
+
+   No output means the branch's changes are fully present in HEAD. Extra host
+   files that survived the merge do not appear — their presence is correct, not
+   a mismatch. (`git diff` exits 0 whether or not it prints; pass `--exit-code`
+   if you script this check.)
+
+4. **Clean → land it, then remove the sandbox.** Confirm the files materialize
+   in the working copy — in a colocated jj repo, `jj git import` imports the
+   squash commit and `jj status` shows the landed changes. Then run
+   `sandbox stop --remove <name>` — the instance's unit of work is accepted, so
+   it's spent (a plain `sandbox stop` removes an ephemeral instance; `--remove`
+   also tears down a named one). Keep the `sandbox-guest/<name>` remote bookmark
+   as the revert artifact while the card is in review. Once the card reaches
+   `accepted`, delete it — the work is no longer pending and the revert artifact
+   is spent. Deleting it also clears the dispatch-seeding stash commits
    (`WIP on (no branch): …`, `index on (no branch): …`) that `git stash create`
    left in the host's object store at dispatch time:
    - git: `git update-ref -d refs/remotes/sandbox-guest/<name>`, then
@@ -444,42 +472,6 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
 
 5. **Doesn't land cleanly →** treat the reconciliation as ordinary delegated
    work, not a special case (below).
-
-**Bounce (review turn 2+):** When you send the agent back for changes after
-landing its first commit, the agent pushes its follow-up onto the _original_
-guest commit — its mirror is frozen at launch and doesn't see the host's rebased
-copy. On `sandbox fetch <name>` a second time the remote bookmark simply
-advances to the new tip; nothing is orphaned because the host never built on
-that bookmark. For instances migrated from an older fetch scheme, the first
-post-upgrade fetch creates `refs/remotes/sandbox-guest/<name>` while leaving a
-stale `refs/heads/sandbox/<name>` behind — that debris ref is filtered out by
-the strict-descent guard and does not block re-fetching; delete it when
-convenient: `git branch -D sandbox/<name>`. To land _only_ the new commits
-(since your last landing), identify the boundary and duplicate from there:
-
-- jj: `jj duplicate <new-tip>@sandbox-guest~<n>..<new-tip>@sandbox-guest -d @`
-  (where `<n>` is the count of new commits since the last landing, so the range
-  excludes the ones you already duplicated).
-- git: `git cherry-pick <last-landed-guest-sha>..<new-tip>` (the `..` range
-  excludes the left boundary, skipping previously-landed commits).
-
-The attribution and description requirements from step 3 above apply to every
-bounce-duplicated commit too: re-author each to the repository owner
-(`jj metaedit --update-author` / `git commit --amend --reset-author --no-edit`)
-and reject any with an empty commit message before you proceed. The next
-`sandbox dispatch` will refuse if any commit authored by the agent identity
-remains on `HEAD`.
-
-Never `jj rebase` the `sandbox-guest/<name>` bookmark. jj's immutability default
-refuses it on a remote bookmark, and even if overridden it would move the
-bookmark and break the idempotency the design relies on.
-
-**Superseded guest commits** on the old guest branch (commits the bounced guest
-built on top of the seed but that are no longer reachable from the new tip after
-you duplicated the accepted work) are pruned by reaping the sandbox refs and
-state dirs at acceptance. That reaping is tracked in card `c72eb6`; the guidance
-above (delete the remote bookmark at acceptance + `gc`) covers the stash-seed
-commits; `c72eb6` covers the superseded work commits.
 
 ### Conflict reconciliation
 

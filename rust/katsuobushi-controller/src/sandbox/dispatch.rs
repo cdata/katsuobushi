@@ -107,19 +107,18 @@ fn list_sandbox_guest_refs(host: &impl Host, git: &Path) -> Result<Vec<String>> 
 }
 
 /// Refuse dispatch if the host working tree contains commits authored by
-/// [`AGENT_EMAIL`] that have not yet been re-attributed to the repository owner.
+/// [`AGENT_EMAIL`].
 ///
-/// When the host lands sandbox work via `jj duplicate` / `git cherry-pick`, the
-/// duplicated commits inherit the agent's author identity. The host must re-author
-/// them (step 3 of the landing procedure) **before** calling dispatch again.
-/// After dispatch, those commits become ancestors of an immutable remote bookmark
-/// and `jj` refuses to rewrite their author.
+/// Under the squash-landing procedure, `git merge --squash` creates a new commit
+/// with the owner's identity, so agent-authored commits should never appear in the
+/// host's working tree. If they do appear — from a `git cherry-pick` or an older
+/// landing workflow — this dispatch would freeze them as ancestors of an immutable
+/// remote bookmark. This guard detects that situation and refuses early.
 ///
 /// The check bounds the range to commits reachable from `HEAD` but **not** from
 /// any existing `refs/remotes/sandbox-guest/` bookmark. That set is exactly the
 /// host-side copies landed since the last dispatch — the originals in the guest
-/// bookmark are excluded because they were already frozen and cannot be re-authored
-/// regardless.
+/// bookmark are excluded because they are already frozen regardless.
 ///
 /// Fails closed: if either git probe cannot run or exits non-zero, the function
 /// returns an error rather than silently claiming the range is clean.
@@ -162,14 +161,12 @@ fn guard_against_agent_commits(host: &impl Host, git: &Path) -> Result<()> {
         "refusing dispatch: {n} commit(s) authored by {AGENT_EMAIL} would be frozen \
          by this dispatch:\n\n\
          {list}\n\n\
-         These commits were landed from a sandbox but not yet re-attributed to the \
-         repository owner. Once this dispatch seeds the guest, they become ancestors \
-         of an immutable remote bookmark; jj then refuses to rewrite their author.\n\n\
-         Fix before dispatching:\n\
-         - jj: `jj metaedit --update-author -r <revset-covering-listed-commits>`\n\
-         - git: for each commit (oldest first), \
-           `git commit --amend --reset-author --no-edit`\n\n\
-         Override: re-run with --force if you have a specific reason to proceed.",
+         Under the squash-landing procedure, agent-authored commits should not appear \
+         in the host's working tree — `git merge --squash` creates a new commit with \
+         the owner's identity. These may be from a `git cherry-pick` or a migration \
+         from an older landing workflow.\n\n\
+         Re-land with `git merge --squash sandbox-guest/<name>` and remove the stale \
+         commits from HEAD, or re-run with --force to proceed anyway.",
         n = commits.len()
     );
 }
@@ -501,19 +498,15 @@ mod tests {
     }
 
     #[test]
-    fn it_mentions_the_fix_commands_and_override_in_the_refusal() {
+    fn it_mentions_the_squash_fix_and_override_in_the_refusal() {
         let mut host = FakeHost::new();
         host.push_run(cmd_output(0, b"", b""));
         host.push_run(cmd_output(0, b"abc1234 some work\n", b""));
         let err = guard_against_agent_commits(&host, Path::new("/bin/git")).unwrap_err();
         let msg = format!("{err}");
         assert!(
-            msg.contains("jj metaedit --update-author"),
-            "should mention jj fix: {msg}"
-        );
-        assert!(
-            msg.contains("--reset-author"),
-            "should mention git amend fix: {msg}"
+            msg.contains("git merge --squash"),
+            "should mention squash landing fix: {msg}"
         );
         assert!(
             msg.contains("--force"),
