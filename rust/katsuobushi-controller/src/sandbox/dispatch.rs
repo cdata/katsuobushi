@@ -36,8 +36,8 @@ use crate::Global;
 const INSTRUCTIONS_FILE: &str = ".dispatch-instructions.md";
 
 /// Author email used by the in-guest agent. Commits carrying this identity
-/// that appear in the host working tree are copies landed from sandbox work
-/// that haven't been re-attributed yet — dispatching again would freeze them.
+/// in the host working tree arrived by a non-squash route (cherry-pick or an
+/// older landing workflow) and would be frozen by the next dispatch.
 const AGENT_EMAIL: &str = "agent@katsuobushi.local";
 
 pub fn run(
@@ -77,8 +77,8 @@ pub fn run(
 
 /// Return all `refs/remotes/sandbox-guest/` refnames present in the host repo.
 /// Commits reachable from these refs are original guest commits already frozen
-/// by a previous dispatch — we cannot re-author them anyway, so the check for
-/// un-attributed agent commits excludes them.
+/// by a previous dispatch — they are already immutable, so the check for
+/// stray agent-authored commits excludes them.
 ///
 /// Fails with an error (not a silent pass-through) so the caller can report
 /// that the range check could not run.
@@ -106,14 +106,16 @@ fn list_sandbox_guest_refs(host: &impl Host, git: &Path) -> Result<Vec<String>> 
         .collect())
 }
 
-/// Refuse dispatch if the host working tree contains commits authored by
-/// [`AGENT_EMAIL`].
+/// Backstop guard: refuse dispatch if the host working tree contains commits
+/// authored by [`AGENT_EMAIL`].
 ///
-/// Under the squash-landing procedure, `git merge --squash` creates a new commit
-/// with the owner's identity, so agent-authored commits should never appear in the
-/// host's working tree. If they do appear — from a `git cherry-pick` or an older
-/// landing workflow — this dispatch would freeze them as ancestors of an immutable
-/// remote bookmark. This guard detects that situation and refuses early.
+/// Under the squash-landing procedure, `git merge --squash` creates the landed
+/// commit with the owner's identity, so agent-authored commits never appear in
+/// the host's working tree during normal operation. This guard catches the
+/// off-script case: work that arrived by another route (cherry-pick, an older
+/// landing workflow, or a manual copy) and would be frozen as an immutable
+/// remote-bookmark ancestor by this dispatch. It is a backstop, not a routine
+/// check — triggering it indicates a non-standard landing that needs attention.
 ///
 /// The check bounds the range to commits reachable from `HEAD` but **not** from
 /// any existing `refs/remotes/sandbox-guest/` bookmark. That set is exactly the
@@ -161,12 +163,12 @@ fn guard_against_agent_commits(host: &impl Host, git: &Path) -> Result<()> {
         "refusing dispatch: {n} commit(s) authored by {AGENT_EMAIL} would be frozen \
          by this dispatch:\n\n\
          {list}\n\n\
-         Under the squash-landing procedure, agent-authored commits should not appear \
-         in the host's working tree — `git merge --squash` creates a new commit with \
-         the owner's identity. These may be from a `git cherry-pick` or a migration \
-         from an older landing workflow.\n\n\
-         Re-land with `git merge --squash sandbox-guest/<name>` and remove the stale \
-         commits from HEAD, or re-run with --force to proceed anyway.",
+         These commits arrived by a non-squash route (cherry-pick or an older landing \
+         workflow). Under the standard squash-landing procedure, `git merge --squash` \
+         creates the landed commit with the owner's identity, so this situation does \
+         not arise in normal operation.\n\n\
+         To recover: re-land the branch with `git merge --squash sandbox-guest/<name>` \
+         and remove these commits from HEAD, or re-run with --force to skip this check.",
         n = commits.len()
     );
 }
