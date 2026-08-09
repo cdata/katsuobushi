@@ -304,6 +304,22 @@ enum SandboxCommand {
         /// Instance name or 1-based index.
         instance: String,
     },
+    /// Deliver a branch from the host repo into another instance's mirror.
+    ///
+    /// The opposite of `sandbox fetch`. Pushes `--branch` (any git ref
+    /// in the host repo) into the target instance's mirror at
+    /// `refs/heads/delivered/<basename>`, where `<basename>` is the last
+    /// path segment of the source ref. That prefix never collides with the
+    /// target guest's own `sandbox/<inst>` working branch.
+    Deliver {
+        /// Instance name or 1-based index of the target instance.
+        instance: String,
+        /// The source ref to push (local branch, remote bookmark, or any
+        /// git ref in the host repo). Examples: `sandbox-guest/card-abc`,
+        /// `refs/remotes/sandbox-guest/card-abc`, `main`.
+        #[arg(long)]
+        branch: String,
+    },
     /// Stop an instance, optionally removing its persisted state.
     Stop {
         /// Also remove the instance's state directory.
@@ -771,6 +787,43 @@ mod tests {
             }
             _ => panic!("expected sandbox screenshot"),
         }
+    }
+
+    /// `deliver` takes an instance name and a required `--branch` flag.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deliver_instance_and_branch_parse() {
+        let cli = parse(&[
+            "katsuctl",
+            "sandbox",
+            "--config",
+            "/x",
+            "deliver",
+            "reviewer-inst",
+            "--branch",
+            "sandbox-guest/card-abc",
+        ]);
+        match cli.domain {
+            Domain::Sandbox(SandboxArgs {
+                command: SandboxCommand::Deliver { instance, branch },
+                ..
+            }) => {
+                assert_eq!(instance, "reviewer-inst");
+                assert_eq!(branch, "sandbox-guest/card-abc");
+            }
+            _ => panic!("expected sandbox deliver"),
+        }
+    }
+
+    /// `deliver` requires `--branch`; omitting it is a parse error.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deliver_requires_branch() {
+        assert!(
+            Cli::try_parse_from(["katsuctl", "sandbox", "--config", "/x", "deliver", "inst-abc",])
+                .is_err(),
+            "deliver without --branch must not parse"
+        );
     }
 
     /// `--config` is mandatory for the sandbox domain.
