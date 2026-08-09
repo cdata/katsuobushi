@@ -314,6 +314,7 @@ mod tests {
     fn it_fetches_a_branch_into_a_jj_visible_remotes_ref() {
         // Writing to refs/remotes/ ensures jj imports it as a remote bookmark
         // (not a local branch), so a force-update never rewrites local history.
+        // In a colocated jj repo, `jj git import` picks up the ref automatically.
         let state = "/state";
         let spec = fake_spec(state, "/bin/git");
         let mut host = FakeHost::new();
@@ -364,7 +365,8 @@ mod tests {
 
     #[test]
     fn it_fetches_the_same_instance_twice_without_non_fast_forward() {
-        // The host uses jj duplicate (never jj rebase) to land guest commits, so
+        // The host uses git merge --squash to land guest commits. The squash
+        // commit on the host has no parent relationship to the guest commits, so
         // the remote bookmark always points only at guest history. A repeated
         // fetch of an already-landed instance (every review bounce) finds no
         // local descendants and succeeds cleanly.
@@ -587,11 +589,12 @@ mod tests {
 
     #[test]
     fn it_succeeds_on_bounce_when_no_local_branches_descend() {
-        // The canonical review bounce: guest pushes commit-A, host fetches,
-        // host lands via `jj duplicate` (leaving the remote bookmark untouched),
-        // guest pushes commit-B onto the original commit-A, host fetches again.
-        // No local branch descends from the old tip (because duplicate creates
-        // new commit identities), so the guard passes and the second fetch lands.
+        // The canonical review bounce: guest pushes commit-A, host fetches, host
+        // lands via `git merge --squash` (the squash commit has no parent
+        // relationship to the guest commits, leaving the remote bookmark
+        // untouched), guest pushes commit-B onto the original commit-A, host
+        // fetches again. No local branch descends from the old tip, so the guard
+        // passes and the second fetch lands.
         let state = "/state";
         let spec = fake_spec(state, "/bin/git");
         let mut host = FakeHost::new();
