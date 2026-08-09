@@ -5,6 +5,7 @@ use crate::{Global, SandboxArgs, SandboxCommand};
 use anyhow::Result;
 
 mod attach;
+mod deliver;
 pub mod directive;
 mod dispatch;
 pub mod emit;
@@ -74,6 +75,9 @@ pub fn dispatch(args: SandboxArgs, global: Global) -> Result<()> {
         } => prompt::run(&config, &instance, text, until_report, redeliver, global),
         SandboxCommand::Status { instance } => status::run(&config, instance, global),
         SandboxCommand::Fetch { instance } => fetch::run(&config, &instance, global),
+        SandboxCommand::Deliver { instance, branch } => {
+            deliver::run(&config, &instance, &branch, global)
+        }
         SandboxCommand::Stop { remove, instance } => stop::run(&config, remove, &instance, global),
         SandboxCommand::Attach { instance } => attach::run(&config, &instance, global),
         SandboxCommand::Screenshot { instance, path } => {

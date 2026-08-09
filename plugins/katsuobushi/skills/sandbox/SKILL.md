@@ -6,9 +6,10 @@ description:
   when the user wants to "use the sandbox to…", delegate a task to a sandbox or
   VM, run risky / long-running / parallel work in isolation, spin up an
   agent-mode sandbox, push prompts to a running sandbox instance, check on or
-  fetch a sandbox's work, attach to a running sandbox's live session, screenshot
-  a graphics-enabled sandbox, or stop one — i.e. anything involving the sandbox
-  start / sandbox prompt / sandbox status / sandbox attach / sandbox fetch /
+  fetch a sandbox's work, deliver a branch into another instance's mirror,
+  attach to a running sandbox's live session, screenshot a graphics-enabled
+  sandbox, or stop one — i.e. anything involving the sandbox start / sandbox
+  prompt / sandbox status / sandbox attach / sandbox fetch / sandbox deliver /
   sandbox screenshot / sandbox stop commands or `nix run .#sandbox`.
 ---
 
@@ -312,9 +313,32 @@ writes it down.
 
 ```sh
 sandbox fetch <name>            # git fetch <mirror> +sandbox/<name>:refs/remotes/sandbox-guest/<name>
+sandbox deliver <name> --branch <ref>  # git push <mirror> +<ref>:refs/heads/delivered/<basename>
 ```
 
-The fetch force-updates the `sandbox-guest/<name>` remote bookmark to the
+`sandbox deliver` is the opposite direction: it pushes `--branch` (any git ref
+in the host repo — a local branch, a `sandbox-guest/<src>` remote bookmark, or
+any rev-parseable ref) into the target instance's mirror as
+`refs/heads/delivered/<basename>`, where `<basename>` is the last path segment
+of the source ref. The `delivered/` prefix never collides with the target
+guest's own working branch (`sandbox/<inst>`), so a delivery cannot overwrite
+what that guest is working on. The push is always force so re-delivery is
+idempotent.
+
+Two callers in practice:
+
+- **Peer review**: fetch the author's branch (`sandbox fetch <src>`), then
+  `sandbox deliver <reviewer> --branch sandbox-guest/<src>` so the reviewer sees
+  it as `delivered/<src>` in their mirror. A guest sees only its own host
+  directory, so the orchestrator is the only path between two instances.
+- **Base refresh**: push the current host tip into a resumed instance's mirror
+  before it starts work, so it does not re-clone from a stale base.
+
+`sandbox deliver` does **not** commit, merge, or modify the target guest's
+working branch. It only writes a ref into the mirror; what the guest does with
+that ref (checkout, diff, cherry-pick) is the guest's business.
+
+`sandbox fetch` force-updates the `sandbox-guest/<name>` remote bookmark to the
 guest's tip. Writing to `refs/remotes/` rather than `refs/heads/` means jj
 imports it as a _remote_ bookmark: a remote bookmark moving never rewrites local
 history, so force-updating it cannot orphan host commits regardless of what the
