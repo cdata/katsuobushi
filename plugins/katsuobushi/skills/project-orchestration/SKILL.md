@@ -120,6 +120,11 @@ sandbox stop --remove <off-contract-name>
 To spot them, run `sandbox status` and look for names that don't match
 `review-<card-id>` or `card-<card-id>` for any active card on the board.
 
+Once launched, `sandbox` prints the full suffixed instance name — for example
+`review-a3f7b2-bb7f4e11` or `card-a3f7b2-bb7f4e11`. Every command that addresses
+a running instance — `stop`, `prompt`, `fetch`, `deliver` — takes that suffixed
+name; `--name` at launch is the only place the bare slug appears.
+
 A good review directive:
 
 - States the reviewer is **independent** and must **not change code / commit**.
@@ -136,9 +141,62 @@ A good review directive:
 - Ends:
   `report done "VERDICT: accept | needs-changes + strongest findings (file:line) + test-quality assessment + would-you-block"`.
 
-The reviewer seeds from your **current working tree** (the sandbox uses
-`git stash create`), so it sees uncommitted WIP — you do **not** need to commit
-to get it reviewed. When it reports:
+### Delivering the branch to the reviewer
+
+A guest can see only its own host directory, so no instance can read another's
+mirror: the orchestrator is the only path between two parties. The reviewer's
+clone therefore does **not** automatically contain the implementor's branch.
+
+Before sending the reviewer its directive, fetch the implementor's branch into
+the host and deliver it into the reviewer's mirror:
+
+```sh
+# After sandbox fetch card-<id-instance> brings the branch into the host:
+sandbox deliver review-<card-id-instance> --branch sandbox-guest/<card-id-instance>
+```
+
+`review-<card-id-instance>` is the **full suffixed name** that `sandbox start`
+printed when the reviewer launched — for example `review-fdc720-bb7f4e11`, not
+the bare slug `review-fdc720` passed to `--name`. Record it on the card when you
+launch; see "Keep the pair warm" below.
+
+Inside the reviewer's clone the branch lands as `delivered/<card-id-instance>`
+(the `delivered/` prefix never collides with the reviewer's own `sandbox/<inst>`
+working branch). The reviewer reads it with:
+
+```sh
+git fetch origin
+git log origin/delivered/<card-id-instance>
+```
+
+Include the branch name and current tip SHA in the review directive:
+`"The branch is origin/delivered/<card-id-instance>; tip is <sha>."` The
+reviewer uses that SHA to answer "what changed since I last read this" after a
+bounce.
+
+**Review rounds add commits; the branch is never rewritten.** The implementor
+pushes follow-up work on top of its existing commits — no rebase, no force-push.
+After a re-delivery, the reviewer reads only the new commits:
+
+```sh
+git log <prev-tip>..origin/delivered/<card-id-instance>
+```
+
+where `<prev-tip>` is the SHA recorded at the start of the previous round.
+
+**Re-review after a bounce.** Once the implementor pushes new commits, the
+orchestrator fetches and re-delivers before resuming the reviewer:
+
+```sh
+sandbox fetch card-<id-instance>
+sandbox deliver review-<card-id-instance> --branch sandbox-guest/<card-id-instance>
+```
+
+Re-delivery is force-idempotent: `delivered/<card-id-instance>` in the
+reviewer's mirror simply advances to the new tip. The reviewer runs
+`git fetch origin` and reads the new range using the SHA from the prior round.
+
+When it reports:
 
 - **accept** → move the card `needs-review → ready` (you're executing the
   reviewer's decision), file any non-blocking follow-ups as their own cards, and
@@ -149,9 +207,10 @@ to get it reviewed. When it reports:
   cold instance. Then re-review with the same reviewer.
 
 Only once the card reaches `ready` is the reviewer spent — then remove it:
-`sandbox stop --remove review-<card-id>`. Until then **pause** it
-(`sandbox stop review-<card-id>`, no `--remove`) so the re-review starts warm;
-see "When to replace the reviewer instead of pausing" for the exception.
+`sandbox stop --remove review-<card-id-instance>`. Until then **pause** it
+(`sandbox stop review-<card-id-instance>`, no `--remove`) so the re-review
+starts warm; see "When to replace the reviewer instead of pausing" for the
+exception.
 
 ## Implement in a sandbox by default
 
@@ -216,9 +275,9 @@ sandbox dispatch a3f7b2 --force         # dispatch a blocked / non-todo card any
 before delivering it — so a killed dispatch can leave a card marked
 `in-progress` beside an idle VM that never got its instructions. The composed
 text is persisted to `directive.md` in the instance's state dir; resend it with
-`sandbox prompt card-<id> --redeliver` rather than rebuilding it from the card
-plus the instructions file. (If the VM never came up at all, reset the card to
-`todo` and re-dispatch instead.)
+`sandbox prompt card-<id-instance> --redeliver` rather than rebuilding it from
+the card plus the instructions file. (If the VM never came up at all, reset the
+card to `todo` and re-dispatch instead.)
 
 Write a **`.dispatch-instructions.md`** in the board dir with the project's
 conventions: the acceptance gate, one-command-per-Bash, commit/push discipline,
@@ -253,18 +312,18 @@ When a dispatched agent reports, advance the card. This is **not** hardcoded
 into `dispatch` — you (the orchestrator) drive it, per the `sandbox` skill's
 collect- and-integrate flow:
 
-- **`done`** → `sandbox fetch card-<id>`, land the branch (rebase workflow from
-  the `sandbox` skill), then `project status set <id> needs-review`. **Pause the
-  VM instead of removing it** — the landing procedure's
-  `sandbox stop --remove <name>` assumes the unit of work is accepted, which is
-  not true at `needs-review` (see "Keep the pair warm", below). Now review it (a
-  sandbox reviewer, above) before it reaches `ready`. **Check that work actually
-  landed:** `sandbox fetch` compares the fetched branch tip to the seed it
-  launched from and warns (human: a `WARNING: no committed work landed` line;
-  `--json`: `"landed": false`) when they match — i.e. the agent ended its turn
-  without committing. Treat that as a non-`done`: inspect with `sandbox attach`,
-  reset the card to `todo`, and re-dispatch a fresh instance rather than
-  advancing an empty branch to review.
+- **`done`** → `sandbox fetch card-<id-instance>`, land the branch (rebase
+  workflow from the `sandbox` skill), then
+  `project status set <id> needs-review`. **Pause the VM instead of removing
+  it** — the landing procedure's `sandbox stop --remove <name>` assumes the unit
+  of work is accepted, which is not true at `needs-review` (see "Keep the pair
+  warm", below). Now review it (a sandbox reviewer, above) before it reaches
+  `ready`. **Check that work actually landed:** `sandbox fetch` compares the
+  fetched branch tip to the seed it launched from and warns (human: a
+  `WARNING: no committed work landed` line; `--json`: `"landed": false`) when
+  they match — i.e. the agent ended its turn without committing. Treat that as a
+  non-`done`: inspect with `sandbox attach`, reset the card to `todo`, and
+  re-dispatch a fresh instance rather than advancing an empty branch to review.
 - **`blocked`** → append the agent's report to the card's `## Dispatch log`
   section, `project status set <id> todo`, resolve what it needs, and
   re-dispatch a **fresh** instance (so its clone sees current HEAD).
@@ -301,8 +360,8 @@ loop usually runs more than one turn. So **pause** both VMs of the pair rather
 than discarding them:
 
 ```sh
-sandbox stop card-<id>          # pause the implementor — no --remove
-sandbox stop review-<card-id>   # pause the reviewer   — no --remove
+sandbox stop card-<id-instance>          # pause the implementor — no --remove
+sandbox stop review-<card-id-instance>   # pause the reviewer   — no --remove
 ```
 
 **When to replace the reviewer instead of pausing.** Pausing is right when the
@@ -315,7 +374,7 @@ then start a fresh one with the **same name**. Accept the cold rebuild for the
 new reviewer — the warm caches of the removed instance are gone:
 
 ```sh
-sandbox stop --remove review-<card-id>   # discard the opinionated reviewer
+sandbox stop --remove review-<card-id-instance>   # discard the opinionated reviewer
 sandbox start --agent --name review-<card-id> --prompt "<fresh review directive>"
 ```
 
@@ -332,8 +391,8 @@ the mistake this section exists to prevent. `sandbox prompt` on a paused
 instance **auto-starts it** (~30–60s to boot and arm), so resuming is just:
 
 ```sh
-sandbox prompt card-<id> "<the review findings, verbatim, + what to change>"
-sandbox prompt review-<card-id> "<re-review directive pointing at the new commits>"
+sandbox prompt card-<id-instance> "<the review findings, verbatim, + what to change>"
+sandbox prompt review-<card-id-instance> "<re-review directive pointing at the new commits>"
 ```
 
 Remove each VM only when its work is truly spent:
