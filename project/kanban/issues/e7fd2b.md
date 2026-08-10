@@ -5,6 +5,8 @@ type: feature
 blocked_by: [9344ec]
 labels: [landing, sandbox]
 created: 2026-08-08T06:39:06Z
+disposition: accepted
+disposition_at: 2026-08-10T02:00:10Z
 ---
 
 ## What to build
