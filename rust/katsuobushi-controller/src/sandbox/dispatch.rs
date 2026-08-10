@@ -72,6 +72,7 @@ pub fn run(
         Some(directive),
         until_report,
         global,
+        Some(board_dir),
     )
 }
 

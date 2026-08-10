@@ -52,7 +52,15 @@ pub fn dispatch(args: SandboxArgs, global: Global) -> Result<()> {
             prompt,
             until_report: _,
             no_until_report,
-        } => start::run(&config, agent, name, prompt, armed(no_until_report), global),
+        } => start::run(
+            &config,
+            agent,
+            name,
+            prompt,
+            armed(no_until_report),
+            global,
+            None,
+        ),
         SandboxCommand::Dispatch {
             card,
             board_dir,

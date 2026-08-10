@@ -393,6 +393,15 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
 
    ```sh
    git merge --squash sandbox-guest/<name>
+   _board=$(git diff --cached --name-only -- project/kanban/)
+   if [ -n "$_board" ]; then
+     printf 'warning: guest branch carried board state — restoring project/kanban/ from HEAD\n' >&2
+     git checkout HEAD -- project/kanban/ >/dev/null 2>&1 || true
+     while IFS= read -r _f; do
+       git rm --cached -- "$_f" >/dev/null
+       rm -f -- "$_f"
+     done < <(git diff --cached --name-only -- project/kanban/)
+   fi
    git commit -m "<type>(<scope>): <card title>"
    ```
 
@@ -429,6 +438,15 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
 
    ```sh
    git merge --squash sandbox-guest/<name>
+   _board=$(git diff --cached --name-only -- project/kanban/)
+   if [ -n "$_board" ]; then
+     printf 'warning: guest branch carried board state — restoring project/kanban/ from HEAD\n' >&2
+     git checkout HEAD -- project/kanban/ >/dev/null 2>&1 || true
+     while IFS= read -r _f; do
+       git rm --cached -- "$_f" >/dev/null
+       rm -f -- "$_f"
+     done < <(git diff --cached --name-only -- project/kanban/)
+   fi
    git commit -m "<type>(<scope>): <card title>"
    jj git import    # let jj pick up the new commit
    ```

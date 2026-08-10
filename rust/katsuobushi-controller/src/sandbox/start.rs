@@ -31,7 +31,7 @@ use anyhow::{bail, Context, Result};
 use crate::sandbox::directive;
 use crate::sandbox::emit::{self, Recipe};
 use crate::sandbox::gfx::{self, Resolution};
-use crate::sandbox::host::{pick_cid, pick_port, Host, HostImpl, OsRng, Rng};
+use crate::sandbox::host::{pick_cid, pick_port, run_ok, Host, HostImpl, OsRng, Rng};
 use crate::sandbox::instance::{self, Instance, Mode, SUPPORTED_INSTANCE_VERSION};
 use crate::sandbox::spec::{load_spec, resolve_roots, ResolvedRoots, SecretSource, Spec};
 use crate::Global;
@@ -121,6 +121,12 @@ impl Plan {
 /// Production entry point: load the spec, stand up the real host
 /// seam, make every probe-dependent decision in Rust, persist `instance.json`,
 /// then emit the flat recipe (printing only its path for the wrapper to `exec`).
+///
+/// `board_exclude` is the project-relative path to the board directory (e.g.
+/// `project/kanban`).  When `Some`, a stash-based seed has any board changes
+/// filtered out before the seed is pushed to the mirror — the board is
+/// orchestrator-only and must never travel in the guest branch.  `None` for a
+/// direct `sandbox start` that is not a dispatch.
 pub fn run(
     config: &Path,
     agent: bool,
@@ -128,6 +134,7 @@ pub fn run(
     prompt: Option<String>,
     until_report: bool,
     global: Global,
+    board_exclude: Option<&Path>,
 ) -> Result<()> {
     let spec = load_spec(config)?;
     let host = HostImpl::new().context("initializing the host IO seam")?;
@@ -154,6 +161,7 @@ pub fn run(
         until_report,
         &clock,
         pid,
+        board_exclude,
     )?;
 
     // `--json` *describes* the resolved identity rather than emitting a script:
@@ -217,6 +225,7 @@ fn decide(
     until_report: bool,
     clock: &str,
     pid: u32,
+    board_exclude: Option<&Path>,
 ) -> Result<Plan> {
     // `--prompt` implies agent mode, exactly as the shell runner did.
     let mode = if agent || prompt.is_some() {
@@ -265,6 +274,7 @@ fn decide(
         &branch,
         named,
         mirror_exists,
+        board_exclude,
     )?;
 
     // On a named resume, refresh the mirror's base ref when the project tip has
@@ -468,8 +478,15 @@ fn resolve_project(host: &impl Host, git: &Path) -> Result<PathBuf> {
 ///   `HEAD` when the tree is clean and `stash create` prints nothing
 ///   ([`Seed::Fresh`]).
 ///
+/// When `board_exclude` is `Some` and the stash snapshot contains changes to
+/// that path, those changes are filtered out before the seed is returned (see
+/// [`strip_board_from_stash`]).  The board is orchestrator-only; board state in
+/// the seed travels through the guest branch and would merge back silently at
+/// landing time.
+///
 /// All git calls go through the seam so the branch is decided without touching a
 /// real repo.
+#[allow(clippy::too_many_arguments)]
 fn resolve_seed(
     host: &impl Host,
     git: &Path,
@@ -478,6 +495,7 @@ fn resolve_seed(
     branch: &str,
     named: bool,
     mirror_exists: bool,
+    board_exclude: Option<&Path>,
 ) -> Result<Seed> {
     if named && mirror_exists {
         let mut verify = Command::new(git);
@@ -512,6 +530,8 @@ fn resolve_seed(
             bail!("`git rev-parse HEAD` failed — the project repo has no commits?");
         }
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    } else if let Some(exclude) = board_exclude {
+        strip_board_from_stash(host, git, project, branch, &snap, exclude)?
     } else {
         snap
     };
@@ -519,6 +539,156 @@ fn resolve_seed(
         bail!("could not resolve a seed commit (neither `stash create` nor HEAD produced one)");
     }
     Ok(Seed::Fresh(commit))
+}
+
+/// When a dispatch-time stash snapshot (`stash_sha`) contains changes to
+/// `board_exclude`, build and return a new commit whose tree has those paths
+/// restored to their `HEAD` state.  Returns `stash_sha` unchanged when no
+/// board changes are present in the stash.
+///
+/// The board is orchestrator-only (`project/kanban/` by convention).  Any
+/// board state that travels in a stash seed ends up in the guest branch tree
+/// and merges back silently when the orchestrator runs `git merge --squash` at
+/// landing time, silently corrupting the board lane.  Filtering here is the
+/// earliest place to sever that path.
+///
+/// Implementation uses a temporary git index at
+/// `<project>/.git/katsuctl-seed-<branch>.idx` (via `GIT_INDEX_FILE`) so the
+/// host's real index is never disturbed.  The file is not cleaned up — it is
+/// overwritten on the next dispatch of the same branch and is harmless once the
+/// instance is pruned.
+fn strip_board_from_stash(
+    host: &impl Host,
+    git: &Path,
+    project: &Path,
+    branch: &str,
+    stash_sha: &str,
+    board_exclude: &Path,
+) -> Result<String> {
+    // Normalise to a project-relative path for the git commands that run under
+    // `-C <project>`.  An absolute board_exclude (e.g. when the user passes
+    // `--board-dir /abs/path`) is stripped of the project prefix; a relative
+    // one (e.g. the default `project/kanban`) is used as-is.
+    let board_rel: &Path = if board_exclude.is_absolute() {
+        board_exclude.strip_prefix(project).unwrap_or(board_exclude)
+    } else {
+        board_exclude
+    };
+
+    // Quick check: does the stash actually differ from HEAD in the board dir?
+    // If not, skip the filtering work entirely.
+    let mut diff_check = Command::new(git);
+    diff_check
+        .arg("-C")
+        .arg(project)
+        .arg("diff")
+        .arg("--name-only")
+        .arg("HEAD")
+        .arg(stash_sha)
+        .arg("--")
+        .arg(board_rel);
+    let board_changed = host.run(&diff_check).ok().is_some_and(|o| {
+        o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty()
+    });
+
+    if !board_changed {
+        return Ok(stash_sha.to_string());
+    }
+
+    eprintln!(
+        "sandbox: dispatch seed has {board_rel:?} changes — stripping board from seed commit"
+    );
+
+    // Use a branch-unique temp-index path so concurrent dispatches of
+    // different cards do not race on the same file.
+    let safe = branch.trim_start_matches("refs/heads/").replace('/', "-");
+    let tmp_idx = project
+        .join(".git")
+        .join(format!("katsuctl-seed-{safe}.idx"));
+
+    // Step 1: load the stash's working-tree state into the temp index.
+    let mut read_stash = Command::new(git);
+    read_stash
+        .arg("-C")
+        .arg(project)
+        .arg("read-tree")
+        .arg(stash_sha)
+        .env("GIT_INDEX_FILE", &tmp_idx);
+    run_ok(host, &read_stash, "loading stash tree into temp index")?;
+
+    // Step 2: remove all board entries from the temp index.
+    let mut rm_board = Command::new(git);
+    rm_board
+        .arg("-C")
+        .arg(project)
+        .arg("rm")
+        .arg("--cached")
+        .arg("-r")
+        .arg("--quiet")
+        .arg("--ignore-unmatch")
+        .arg("--")
+        .arg(board_rel)
+        .env("GIT_INDEX_FILE", &tmp_idx);
+    host.run(&rm_board).ok(); // best effort: --ignore-unmatch handles a missing prefix
+
+    // Step 3: restore the board tree from HEAD so it is not absent from the seed.
+    let head_board_ref = format!("HEAD:{}", board_rel.display());
+    let mut verify_head = Command::new(git);
+    verify_head
+        .arg("-C")
+        .arg(project)
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg(&head_board_ref);
+    if host
+        .run(&verify_head)
+        .ok()
+        .is_some_and(|o| o.status.success())
+    {
+        let prefix = format!("{}/", board_rel.display());
+        let mut restore_head = Command::new(git);
+        restore_head
+            .arg("-C")
+            .arg(project)
+            .arg("read-tree")
+            .arg(format!("--prefix={prefix}"))
+            .arg(&head_board_ref)
+            .env("GIT_INDEX_FILE", &tmp_idx);
+        host.run(&restore_head).ok(); // best effort
+    }
+
+    // Step 4: write the filtered tree and create the seed commit.
+    let mut write_tree = Command::new(git);
+    write_tree
+        .arg("-C")
+        .arg(project)
+        .arg("write-tree")
+        .env("GIT_INDEX_FILE", &tmp_idx);
+    let tree_out = run_ok(host, &write_tree, "writing filtered dispatch seed tree")?;
+    let tree_sha = String::from_utf8_lossy(&tree_out.stdout).trim().to_string();
+    if tree_sha.is_empty() {
+        bail!("git write-tree returned no SHA for the filtered dispatch seed");
+    }
+
+    let mut commit_tree = Command::new(git);
+    commit_tree
+        .arg("-C")
+        .arg(project)
+        .arg("commit-tree")
+        .arg(&tree_sha)
+        .arg("-p")
+        .arg("HEAD")
+        .arg("-m")
+        .arg("dispatch seed");
+    let commit_out = run_ok(host, &commit_tree, "creating filtered dispatch seed commit")?;
+    let new_commit = String::from_utf8_lossy(&commit_out.stdout)
+        .trim()
+        .to_string();
+    if new_commit.is_empty() {
+        bail!("git commit-tree returned no SHA for the filtered dispatch seed");
+    }
+
+    Ok(new_commit)
 }
 
 /// Resolve the base commit to push into the mirror on a resume.
@@ -1427,6 +1597,7 @@ mod tests {
             false,
             "20260627-120000",
             7,
+            None,
         )
         .expect_err("a hostile name must abort planning");
         assert!(
@@ -1477,6 +1648,7 @@ mod tests {
             false,
             "20260627-120000",
             7,
+            None,
         )
         .expect("planning should succeed");
 
@@ -1511,6 +1683,7 @@ mod tests {
             false,
             "20260627-120000",
             7,
+            None,
         )
         .expect("agent planning should succeed");
 
@@ -1562,6 +1735,7 @@ mod tests {
             false,
             "20260627-120000",
             7,
+            None,
         )
         .expect("planning should succeed");
 
@@ -1582,6 +1756,7 @@ mod tests {
             "refs/heads/sandbox/x",
             false,
             false,
+            None,
         )
         .expect("seed");
         assert_eq!(seed, Seed::Fresh("stashcommit123".into()));
@@ -1600,6 +1775,7 @@ mod tests {
             "refs/heads/sandbox/x",
             false,
             false,
+            None,
         )
         .expect("seed");
         assert_eq!(seed, Seed::Fresh("headcommit456".into()));
@@ -1617,6 +1793,7 @@ mod tests {
             "refs/heads/sandbox/myfeature-0badf00d",
             true, // named
             true, // mirror exists
+            None,
         )
         .expect("seed");
         assert_eq!(seed, Seed::Resume("existingbranch789".into()));
@@ -1637,6 +1814,7 @@ mod tests {
             "refs/heads/sandbox/myfeature-0badf00d",
             true,
             true,
+            None,
         )
         .expect("seed");
         assert_eq!(seed, Seed::Fresh("snap".into()));
@@ -2090,6 +2268,7 @@ mod tests {
             false,
             "20260627-120000",
             7,
+            None,
         )
         .expect_err("no usable GPU and no software tail must fail planning");
         assert!(
@@ -2159,5 +2338,202 @@ mod tests {
             "graphics recipe must parse under bash:\n{text}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- board stripping from stash seed ----
+
+    #[test]
+    fn it_returns_stash_sha_unchanged_when_no_board_changes() {
+        // diff returns empty output: stash and HEAD agree on the board dir.
+        let mut host = FakeHost::new();
+        host.push_run(Ok(ok_out(""))); // diff --name-only: no board changes
+        let result = strip_board_from_stash(
+            &host,
+            Path::new("/git"),
+            Path::new("/proj"),
+            "refs/heads/sandbox/card-aabbcc-deadbeef",
+            "stashsha111",
+            Path::new("project/kanban"),
+        )
+        .unwrap();
+        assert_eq!(
+            result, "stashsha111",
+            "stash sha returned unchanged when no board changes"
+        );
+    }
+
+    #[test]
+    fn it_builds_a_filtered_commit_when_board_changes_are_present() {
+        // diff returns a path: board changed in stash; filtering must produce a new SHA.
+        let mut host = FakeHost::new();
+        host.push_run(Ok(ok_out("project/kanban/BOARD.md\n"))) // diff: board changed
+            .push_run(Ok(ok_out(""))) // read-tree stash -> ok
+            .push_run(Ok(ok_out(""))) // rm --cached board
+            .push_run(Ok(ok_out("headtresha\n"))) // rev-parse --verify HEAD:project/kanban -> exists
+            .push_run(Ok(ok_out(""))) // read-tree --prefix restore from HEAD
+            .push_run(Ok(ok_out("filteredtreesha\n"))) // write-tree
+            .push_run(Ok(ok_out("filteredcommitsha\n"))); // commit-tree
+        let result = strip_board_from_stash(
+            &host,
+            Path::new("/git"),
+            Path::new("/proj"),
+            "refs/heads/sandbox/card-aabbcc-deadbeef",
+            "stashsha111",
+            Path::new("project/kanban"),
+        )
+        .unwrap();
+        assert_eq!(
+            result, "filteredcommitsha",
+            "filtered commit sha returned when board changes stripped"
+        );
+    }
+
+    #[test]
+    fn it_still_builds_a_filtered_commit_when_head_board_is_absent() {
+        // diff: board changed; HEAD:project/kanban does not exist (unusual, but
+        // must not panic — we just skip the restore step).
+        let mut host = FakeHost::new();
+        host.push_run(Ok(ok_out("project/kanban/BOARD.md\n"))) // diff: board changed
+            .push_run(Ok(ok_out(""))) // read-tree stash
+            .push_run(Ok(ok_out(""))) // rm --cached
+            .push_run(Ok(Output {
+                // rev-parse --verify: HEAD:project/kanban absent
+                status: ExitStatus::from_raw(128),
+                stdout: Vec::new(),
+                stderr: b"fatal: not a tree object".to_vec(),
+            }))
+            .push_run(Ok(ok_out("treesha-no-kanban\n"))) // write-tree
+            .push_run(Ok(ok_out("commitsha-no-kanban\n"))); // commit-tree
+        let result = strip_board_from_stash(
+            &host,
+            Path::new("/git"),
+            Path::new("/proj"),
+            "refs/heads/sandbox/card-aabbcc-deadbeef",
+            "stashsha111",
+            Path::new("project/kanban"),
+        )
+        .unwrap();
+        assert_eq!(result, "commitsha-no-kanban");
+    }
+
+    #[test]
+    fn it_fails_when_write_tree_returns_no_sha() {
+        let mut host = FakeHost::new();
+        host.push_run(Ok(ok_out("project/kanban/BOARD.md\n")))
+            .push_run(Ok(ok_out(""))) // read-tree
+            .push_run(Ok(ok_out(""))) // rm --cached
+            .push_run(Ok(ok_out("headtreesha\n"))) // verify HEAD:kanban
+            .push_run(Ok(ok_out(""))) // restore from HEAD
+            .push_run(Ok(ok_out(""))); // write-tree returns nothing (failure)
+        let err = strip_board_from_stash(
+            &host,
+            Path::new("/git"),
+            Path::new("/proj"),
+            "refs/heads/sandbox/card-aabbcc-deadbeef",
+            "stashsha111",
+            Path::new("project/kanban"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("write-tree returned no SHA"),
+            "should report write-tree failure: {err:#}"
+        );
+    }
+
+    #[test]
+    fn resolve_seed_with_board_exclude_calls_strip_when_stash_has_board_changes() {
+        // resolve_seed: stash non-empty, board_exclude set, diff says board changed
+        // → strip_board_from_stash is invoked and its filtered SHA is returned.
+        let mut host = FakeHost::new();
+        host.push_run(Ok(ok_out("stashsha\n"))) // stash create
+            .push_run(Ok(ok_out("project/kanban/BOARD.md\n"))) // diff: board changed
+            .push_run(Ok(ok_out(""))) // read-tree stash
+            .push_run(Ok(ok_out(""))) // rm --cached
+            .push_run(Ok(ok_out("headkanbansha\n"))) // rev-parse --verify HEAD:project/kanban
+            .push_run(Ok(ok_out(""))) // read-tree --prefix restore
+            .push_run(Ok(ok_out("filteredtreesha\n"))) // write-tree
+            .push_run(Ok(ok_out("filteredcommit\n"))); // commit-tree
+        let seed = resolve_seed(
+            &host,
+            Path::new("/git"),
+            Path::new("/proj"),
+            Path::new("/state/sync.git"),
+            "refs/heads/sandbox/card-aabbcc-deadbeef",
+            false,
+            false,
+            Some(Path::new("project/kanban")),
+        )
+        .expect("seed");
+        assert_eq!(
+            seed,
+            Seed::Fresh("filteredcommit".into()),
+            "filtered commit used as seed when board changes detected"
+        );
+    }
+
+    #[test]
+    fn resolve_seed_without_board_exclude_passes_stash_through_unchanged() {
+        // board_exclude = None → no diff check, stash SHA used as-is.
+        let mut host = FakeHost::new();
+        host.push_run(Ok(ok_out("stashsha\n"))); // stash create
+        let seed = resolve_seed(
+            &host,
+            Path::new("/git"),
+            Path::new("/proj"),
+            Path::new("/state/sync.git"),
+            "refs/heads/sandbox/card-aabbcc-deadbeef",
+            false,
+            false,
+            None,
+        )
+        .expect("seed");
+        assert_eq!(
+            seed,
+            Seed::Fresh("stashsha".into()),
+            "stash SHA used unchanged when board_exclude is None"
+        );
+        // Exactly one run call (the stash create); no diff was attempted.
+        let runs = host
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, Call::Run(_)))
+            .count();
+        assert_eq!(
+            runs,
+            1,
+            "only stash create must run; no diff check: {:?}",
+            host.calls()
+        );
+    }
+
+    #[test]
+    fn it_strips_board_using_absolute_board_path() {
+        // When board_exclude is absolute, it is normalised to a project-relative
+        // path for the git commands.  diff should be called with `project/kanban`
+        // (the relative part), not the full absolute path.
+        let mut host = FakeHost::new();
+        host.push_run(Ok(ok_out(""))); // diff: no board changes
+        let result = strip_board_from_stash(
+            &host,
+            Path::new("/git"),
+            Path::new("/proj"),
+            "refs/heads/sandbox/x",
+            "stashsha",
+            Path::new("/proj/project/kanban"), // absolute board path
+        )
+        .unwrap();
+        // No board changes → stash returned unchanged.
+        assert_eq!(result, "stashsha");
+        // The diff call must use the relative path `project/kanban`, not the
+        // absolute one — check by inspecting the last Run arg.
+        let diff_args = host.calls().into_iter().find_map(|c| match c {
+            Call::Run(v) if v.iter().any(|a| a == "diff") => Some(v),
+            _ => None,
+        });
+        let args = diff_args.expect("diff must have been called");
+        assert!(
+            args.last().map(|a| a.as_str()) == Some("project/kanban"),
+            "diff must use the project-relative path: {args:?}"
+        );
     }
 }
