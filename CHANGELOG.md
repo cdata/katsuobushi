@@ -7,13 +7,85 @@ breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
 ## [Unreleased]
 
-Fixes `sandbox fetch` to use strict descent in its local-branch guard, which
-previously false-positived on migrated instances and permanently blocked
-re-fetching. Moves the fetch destination from `refs/heads/sandbox/<inst>` to
-`refs/remotes/sandbox-guest/<inst>`. See
-[`MIGRATING.md`](MIGRATING.md#unreleased).
+## [0.5.0] — 2026-08-10
+
+Rebuilds how work moves between the parties that write, review, and integrate
+it. Nothing enters the owner's history until a peer review passes, landing
+creates a commit instead of rewriting one, a resumed instance works against the
+current tip, and moving a branch between instances is a command rather than a
+raw `git push` at a storage path. Also removes `progressStallSecs` and moves the
+`sandbox fetch` destination to `refs/remotes/sandbox-guest/<inst>`. See
+[`MIGRATING.md`](MIGRATING.md#050).
+
+### Added
+
+- **`sandbox deliver <instance> --branch <ref>`.** The opposite direction of
+  `sandbox fetch`: pushes any host ref into a target instance's mirror as
+  `refs/heads/delivered/<basename>`. A guest sees only its own host directory,
+  so no instance can read another's mirror; this is the supported path between
+  two parties. The `delivered/` prefix cannot collide with the target guest's
+  own `sandbox/<instance>` working branch, and the push is a force-push so
+  re-delivery after new commits simply advances the ref. Inside the guest the
+  mirror is `origin`, so the branch reads as `origin/delivered/<basename>`.
+- **A resumed instance is refreshed to the current tip.** On resuming a named
+  instance, the orchestrator advances `refs/heads/base` in that instance's
+  mirror and the guest rebases its own branch onto it. The guest rewrites only
+  its own branch, in its own clone.
+- **`checks.sandbox-verb-coverage`.** A flake check that fails when the
+  `sandbox` wrapper's subcommand list and the Rust `SandboxCommand` variants
+  diverge, in either direction, naming the offending verb and both files. Two
+  verbs had already drifted out of the wrapper when it was added.
+- **`sandbox deliver` and `sandbox prune` are reachable from the `sandbox`
+  command.** Both existed in `katsuctl` but were missing from the wrapper's
+  subcommand list, so `sandbox prune` answered `Unknown subcommand`.
+
+### Changed
+
+- **Work enters the owner's history at `ready`, not at `done`.** The report
+  bridge no longer lands on `done`: it fetches, verifies real commits landed,
+  and moves the card to `needs-review`. Landing is the step that moves a card to
+  `ready`. Three consequences — the owner's history holds only reviewed work, a
+  bounce costs no landing, and "has this landed" has an exact answer.
+- **Landing creates one squash commit instead of duplicating and repairing.**
+  `git merge --squash` plus `git commit`, with the message taken from the card
+  rather than from a commit on the branch. The commit is the owner's by
+  construction, so nothing re-authors it afterwards. One card contributes one
+  commit however many review rounds it took.
+- **The board is orchestrator-only state, not host-only.** The orchestrator is a
+  role, not a machine; the skills no longer define it as "the host agent". The
+  role runs on the host today and could later run in its own sandbox.
+- **The dispatch guard is documented as a backstop.** Under squash landing there
+  are no agent-authored commits to re-attribute, so the guard has no routine
+  case to catch. It still catches work landed by another route.
+- **A reconciliation is recorded on the card.** A branch is reviewed against the
+  tip it was seeded from and integrated onto the current tip. Where the
+  orchestrator had to choose something in a file the branch changed, the card's
+  `## Review notes` records what did not apply and whether the card returned to
+  review.
+- **`sandbox fetch` writes to `refs/remotes/sandbox-guest/<inst>`.** The
+  destination moved from `refs/heads/sandbox/<inst>` (written by 0.4.1) to
+  `refs/remotes/sandbox-guest/<inst>`. Writing to `refs/remotes/` means jj
+  imports the ref as a remote bookmark, so a force-update can never rewrite
+  local history regardless of what the host has built on top. Old
+  `refs/heads/sandbox/*` refs are left behind and are safe to delete; see
+  [`MIGRATING.md`](MIGRATING.md#050).
+
+### Removed
+
+- **`progressStallSecs` is removed from `lib.sandbox`.** The argument controlled
+  a host-side "no reports for Ns" notice; both the knob and the notice are gone.
+  Use the **WORK** column of `sandbox status` to tell a working guest from a
+  stuck one: `Active` means the heartbeat is current, `Active (Late)` means
+  heartbeats stopped, and `Idle` means the agent stopped without reporting. See
+  [`MIGRATING.md`](MIGRATING.md#050).
+- **Attribution repair is gone from the landing procedure.** `--reset-author`,
+  `jj metaedit --update-author`, and the rule that re-attribution had to happen
+  before the next dispatch all existed to fix up duplicated commits. A squash
+  landing creates a new commit, so there is nothing to repair and no deadline.
 
 ### Fixed
+
+- **`sandbox fetch` guard uses strict descent instead of containment.** The
 
 - **`sandbox fetch` guard uses strict descent instead of containment.** The
   guard previously called `git for-each-ref --contains=<old-tip>` without
@@ -37,30 +109,13 @@ re-fetching. Moves the fetch destination from `refs/heads/sandbox/<inst>` to
   `git cherry-pick sandbox-guest/<name>`, which git resolves via disambiguation
   to `refs/remotes/sandbox-guest/<name>`.
 
-### Changed
-
-- **`sandbox fetch` writes to `refs/remotes/sandbox-guest/<inst>`.** The
-  destination moved from `refs/heads/sandbox/<inst>` (written by 0.4.1) to
-  `refs/remotes/sandbox-guest/<inst>`. Writing to `refs/remotes/` means jj
-  imports the ref as a remote bookmark, so a force-update can never rewrite
-  local history regardless of what the host has built on top. Old
-  `refs/heads/sandbox/*` refs are left behind and are safe to delete; see
-  [`MIGRATING.md`](MIGRATING.md#unreleased).
-
-## [0.4.2] — 2026-08-08
-
-Removes `progressStallSecs` from `lib.sandbox` and the host-side stall notice it
-drove. Watch the **WORK** column of `sandbox status` for turn activity. See
-[`MIGRATING.md`](MIGRATING.md#042).
-
-### Removed
-
-- **`progressStallSecs` is removed from `lib.sandbox`.** The argument controlled
-  a host-side "no reports for Ns" notice; both the knob and the notice are gone.
-  Use the **WORK** column of `sandbox status` to tell a working guest from a
-  stuck one: `Active` means the heartbeat is current, `Active (Late)` means
-  heartbeats stopped, and `Idle` means the agent stopped without reporting. See
-  [`MIGRATING.md`](MIGRATING.md#042).
+- **README inventory brought back in line with the flake.** The root inventory
+  listed three of six skills and presented `menu` as a `lib.*` output when it
+  ships through the overlay as `pkgs.katsuobushi`. The `sandbox` guide
+  documented seven of ten verbs, showed a `sandbox status` example that predated
+  the **WORK** column, and never mentioned the report journal (`reports.ndjson`)
+  or the persisted directive (`directive.md` / `sandbox prompt --redeliver`).
+  The `project` guide omitted `project labels` and the icebox.
 
 ## [0.4.1] — 2026-08-06
 

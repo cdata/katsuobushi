@@ -10,6 +10,63 @@ the changes anyone tracking untagged `main` should know about.
 
 ## Unreleased
 
+## 0.5.0
+
+**`progressStallSecs` is removed — delete it from your `lib.sandbox` call.**
+Leaving it in place is a hard Nix evaluation error
+(`called with unexpected argument`), not a silent no-op.
+
+The argument drove a host-side "no reports" notice that no longer fires. Watch
+the **WORK** column of `sandbox status` instead: `Active` means work runs;
+`Active (Late)` means work runs past its own declared bound; `Idle` means
+nothing runs; `Finished` means the agent reported a terminal result.
+
+**Work now lands at `ready`, not at `done` — if you drive a board with agents,
+your report bridge changes.**
+
+On `done`, fetch the branch, confirm real commits landed, and move the card to
+`needs-review`. Do not land. Landing is the step that moves a card to `ready`,
+after a peer review accepts. A bounced card therefore costs no landing, and a
+card that bounced four times still contributes exactly one commit.
+
+**Landing is now a squash commit. Stop re-authoring.**
+
+Replace the duplicate-then-repair procedure with:
+
+```sh
+git merge --squash sandbox-guest/<name>
+git commit -m "<type>(<scope>): <card title>"
+```
+
+The message comes from the card, not from a commit on the branch. The commit is
+the owner's by construction, so `--reset-author` and
+`jj metaedit --update-author` are no longer needed — and the rule that
+re-attribution had to happen before the next dispatch is gone with them.
+
+Do **not** land with `git cherry-pick <branch-tip>`: on a bounced branch that
+applies the review fix alone and silently drops the original work.
+
+In a **colocated jj repo**, git `HEAD` tracks `@-` and jj's working-copy content
+is staged in git's index, so `git merge --squash` followed by `git commit` will
+sweep that content into the landing commit. Run `jj new` first to get an empty
+`@`, then use the git recipe.
+
+**Giving a reviewer a branch is now a command.**
+
+```sh
+sandbox fetch card-<id-instance>
+sandbox deliver review-<id-instance> --branch sandbox-guest/card-<id-instance>
+```
+
+It arrives in the reviewer's mirror as `refs/heads/delivered/<basename>`, which
+the guest reads as `origin/delivered/<basename>`. Replace any raw `git push` at
+another instance's storage path with this.
+
+**`sandbox deliver` and `sandbox prune` are now reachable from the `sandbox`
+command.** Both existed in `katsuctl` but were missing from the wrapper's
+subcommand list. A new `checks.sandbox-verb-coverage` flake check fails the
+build if the two lists diverge again.
+
 **`sandbox fetch` now writes to `refs/remotes/sandbox-guest/<inst>` — read that
 ref instead of `sandbox/<inst>` if you scripted against the old location.**
 
@@ -30,20 +87,6 @@ subsequent fetches. Delete it at any time:
 ```sh
 git branch -D sandbox/<inst>
 ```
-
-No spec or instance-state change (`specVersion 4` / `instanceVersion 2`
-unchanged).
-
-## 0.4.2
-
-**`progressStallSecs` is removed — delete it from your `lib.sandbox` call.**
-Leaving it in place is a hard Nix evaluation error
-(`called with unexpected argument`), not a silent no-op.
-
-The argument drove a host-side "no reports" notice that no longer fires. Watch
-the **WORK** column of `sandbox status` instead: `Active` means work runs;
-`Active (Late)` means work runs past its own declared bound; `Idle` means
-nothing runs; `Finished` means the agent reported a terminal result.
 
 No spec or instance-state change (`specVersion 4` / `instanceVersion 2`
 unchanged).
