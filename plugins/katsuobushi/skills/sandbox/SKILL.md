@@ -203,9 +203,20 @@ session runs inside the VM with the controller armed. After a no-`--prompt`
 launch, the VM still needs ~30–60s to finish booting and arm the channel before
 it will answer — if `sandbox prompt` can't connect, wait and retry.
 
-Give a directive that says how to finish, e.g.: _"Do X. Commit and push on the
-branch. Run `report done \"<summary>\"` when complete;
-`report blocked \"<what you need>\"` if you get stuck."_
+Give a directive that says how to finish — and explicitly ask the agent to
+confirm that nothing was left running in the background when it reports. An
+agent that ends its turn with a background job still running consumes CPU on the
+shared host and breaks the concurrency budget for other VMs.
+
+A minimal directive looks like:
+
+> Do X. Commit and push on the branch. Before reporting, stop any background
+> jobs you started — wait for them to finish or kill them explicitly. Run
+> `report done "<summary — include that nothing was left running>"` when
+> complete; `report blocked "<what you need>"` if you get stuck.
+
+The _"nothing was left running"_ clause in the summary is the confirmation: if
+the agent has to write it, it has to check.
 
 ## Driving the agent
 
@@ -701,6 +712,12 @@ are unaffected.
   than the log; `console.log` stops at the login prompt and says nothing about
   agent runtime.
 - Treat the OAuth token as a live credential; it stays on subscription billing.
+- **The guest `/nix/store` is a thin overlay on a large shared read-only base.**
+  Whole-store operations (`nix-store --verify --check-contents`,
+  `du /nix/store`, etc.) scan hundreds of gigabytes that are not the agent's to
+  verify and would run for hours on a shared host. Never write a directive that
+  asks for one; if a store check is needed, scope it to a specific path or
+  derivation.
 - **`jj` is available on the guest PATH.** A dispatched agent can create a
   scratch colocated repo and run jj-dependent reproductions — e.g. verifying
   that a `refs/remotes/` refspec does not orphan host commits, or walking

@@ -556,6 +556,19 @@ let
     If the operator re-prompts you because you stopped without one, treat that
     as a reminder to report your real state now.
 
+    **No background work left running when you report.** Before filing a
+    terminal report, ensure every job you started is either done or explicitly
+    killed — and say which. An agent that ends its turn with work still running
+    consumes CPU on a shared host and breaks the concurrency budget for other
+    VMs. If a check cannot finish within a turn, stop it and say so rather than
+    leaving it unattended. Your `report done` should state that nothing was left
+    running.
+
+    **The guest `/nix/store` is a thin overlay on a large shared read-only
+    base.** Whole-store operations such as `nix-store --verify --check-contents`
+    scan hundreds of gigabytes that are not yours to verify and would run for
+    hours on a shared host. Never run them; use targeted checks instead.
+
     **Build and test through the project's menu, not from Rust/JS/etc. habit.**
     Before your first build, test, or run command, list the project's own
     commands with
