@@ -92,7 +92,11 @@ run while the thread has available or in-flight work:
         card = pick_card()               # priority below
         wake_or_start(card)              # its warm VM, or a fresh pair
     report = wait_for_a_report()         # done | blocked | verdict
-    apply_to_board(report)               # the report bridge
+    apply_to_board(report)               # the report bridge:
+                                         #   done    → fetch + needs-review (no landing)
+                                         #   accept  → land branch + ready
+                                         #   bounce  → in-progress
+                                         #   blocked → todo + re-dispatch
 
 pick_card():
     # 1) in-flight cards first — keep work in progress bounded

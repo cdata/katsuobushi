@@ -366,9 +366,11 @@ should feel just as hands-off.
 
 ### Change integration
 
-When an agent reports `done`, integrate **without asking**. The sandbox already
-bounded the _execution_; the safety net for the _diff_ is that everything you
-land stays revertable — the fetched `sandbox/<name>` branch is preserved — not a
+Integrate **without asking** when the work is ready to land: on reviewer
+acceptance for project-board card work (landing is the step that moves the card
+to `ready`, not the step that moves it to `needs-review`); on `done` for
+unreviewed sandbox work. Either way, the safety net is that everything you land
+stays revertable — the fetched `sandbox/<name>` branch is preserved — not a
 pre-merge prompt.
 
 Speak the user's VCS tool: `.jj/` present → use `jj`; else `.git` → `git`; if
@@ -457,7 +459,8 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
    `sandbox stop --remove <name>` — the instance's unit of work is accepted, so
    it's spent (a plain `sandbox stop` removes an ephemeral instance; `--remove`
    also tears down a named one). Keep the `sandbox-guest/<name>` remote bookmark
-   as the revert artifact while the card is in review. Once the card reaches
+   as the revert artifact while the card is in the `ready` state — a product
+   owner who returns the `ready` card reverts against it. Once the card reaches
    `accepted`, delete it — the work is no longer pending and the revert artifact
    is spent. Deleting it also clears the dispatch-seeding stash commits
    (`WIP on (no branch): …`, `index on (no branch): …`) that `git stash create`
