@@ -191,6 +191,26 @@ implementor's 641 (claiming 520 for the main crate) is wrong by 7 — a misread,
 not a suite that failed to run. Both of its `done` reports carried the bad
 figure.
 
+### Post-landing validation (the next dispatch)
+
+The first dispatch after this card landed (`9f0012`, instance
+`card-9f0012-b8aed9ee`) confirms the fix works in production:
+
+- The branch's seed is now a **single** commit titled `dispatch seed`, replacing
+  the previous pair of `WIP on (no branch): …` / `index on (no branch): …` stash
+  commits.
+- Diffed against the merge base, the branch contains **zero** `project/kanban/`
+  paths — where `12bead`'s own dispatch had carried `BOARD.md` plus three card
+  notes.
+
+Also worth recording: this card's own landing reproduced the bug one last time.
+`git merge --squash` staged `BOARD.md` and `12bead.md` from the guest seed. It
+surfaced as a *conflict* only because the orchestrator had edited the same card
+note in the same window; absent that, it would have merged silently, exactly as
+the card describes. The newly-added
+`git checkout HEAD -- project/kanban/` guard cleaned it, and the landing commit
+`7d7a7b8` contains only the four non-board files.
+
 ## Dispatch log
 
 - Implementor VM: `card-12bead-a539c695` (launched 2026-08-10; paused warm after
