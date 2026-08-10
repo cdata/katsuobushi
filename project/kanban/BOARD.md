@@ -29,17 +29,19 @@ kanban-plugin: basic
 - [ ] [[2c0b55]]
 - [ ] [[b442ef]]
 - [ ] [[1b045b]]
-- [ ] [[12bead]]
 - [ ] [[9f0012]]
 - [ ] [[e1b39e]]
+- [ ] [[3ccced]]
 
 ## In Progress
 
 ## Needs Review
 
-- [ ] [[3336f8]]
+- [ ] [[12bead]]
 
 ## Ready
+
+- [ ] [[3336f8]]
 
 ---
 
