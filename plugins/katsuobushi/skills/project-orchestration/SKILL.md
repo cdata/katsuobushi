@@ -215,6 +215,39 @@ Only once the card reaches `ready` is the reviewer spent — then remove it:
 starts warm; see "When to replace the reviewer instead of pausing" for the
 exception.
 
+### Landing a branch
+
+When the reviewer accepts, the orchestrator lands the branch. A branch is
+reviewed against the **tip it was seeded from** — but integration happens onto
+the **current tip**, which may have advanced. Another card can land between
+review and integration, so the reviewer never saw that interaction.
+
+The orchestrator uses its judgement to reconcile what does not apply cleanly. In
+most cases a reconciliation is mechanical — realigning a patch to changed
+context — and needs no second review: the reviewer agreed to the intent, and the
+orchestrator aligns it to the new baseline.
+
+**When a reconciliation changes what the reviewer agreed to** — altering the
+logic, the design, or an invariant the reviewer checked — the card returns to
+`needs-review`. That case is rare and is handled one card at a time.
+
+**Write the record before the card moves to `ready`** — but only for files the
+guest's branch actually changed. A conflict in a file the guest never touched
+(such as `BOARD.md`, which every guest branch carries stale from dispatch) is
+resolved mechanically and needs no record. When a branch merges cleanly onto the
+moved tip with no hand-chosen resolution, nothing was reconciled — no record is
+required. (For how to delegate a real conflict to a fresh sandbox, see the
+`sandbox` skill's **Conflict reconciliation** section.)
+
+Where a record is required, write into the card's `## Review notes`:
+
+- What did not apply, and what the orchestrator chose in its place.
+- Whether the card returned to review, and why (or that it did not and why not).
+
+A `ready` card with a silent reconciliation in its own files is one whose final
+state the reviewer never saw. The record is how the product owner knows what
+they are accepting.
+
 ## Implement in a sandbox by default
 
 Per-issue implementation should happen **in a sandbox** — one VM per card
