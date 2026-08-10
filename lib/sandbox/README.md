@@ -292,13 +292,48 @@ The serial console is also teed to `console.log` in the instance's state dir.
 
 ### Watching a running turn
 
-`sandbox status` shows a **WORK** column for each running agent instance.
+`sandbox status` shows two columns for each agent instance. **LIVENESS** is the
+turn's lifecycle phase, and **WORK** is what the guest says it is doing.
+
+LIVENESS is one of three phases, each shown with an age:
+
+- **`in-flight`** — a turn is running. The age comes from the last activity, so
+  a value that keeps climbing is how a silent hang becomes visible.
+- **`ended-ok`** — the turn finished with a terminal report. The age is measured
+  from when it ended.
+- **`idle`** — no turn is running: between turns, or the grace window closed
+  without a terminal report.
+
+WORK is the guest's own account of the turn:
 
 - **Finished** — the agent reported a terminal result. Fetch the branch.
 - **Active** — work runs. The label names what is running.
 - **Active (Late)** — work runs past its own declared bound. Inspect with
   `sandbox attach`.
 - **Idle** — nothing runs. Read the nudge count.
+
+### When a turn ends without a report
+
+An agent can finish its turn without sending `done` or `blocked`. The guest
+re-prompts an idle agent a few times on its own, so most of these recover with
+no intervention — a report often lands after the driving command has already
+returned.
+
+Two files in the instance's state dir
+(`$XDG_STATE_HOME/katsuobushi/<project-id>/<instance>/`) exist for the cases
+that do not recover on their own:
+
+- **`reports.ndjson`** — every relayed report, one JSON object per line, written
+  as it streams. If the terminal that was driving the agent is gone, the verdict
+  is not lost: read the journal instead of re-prompting the agent to repeat
+  itself. `sandbox status <instance>` prints the latest one. The caveat is that
+  the journal is written by the _live_ drive — kill the driving process and
+  anything reported afterwards is not captured.
+- **`directive.md`** — the composed launch directive. A prompted launch writes
+  it, then boots the VM detached before delivering it, so a launcher that dies
+  in between leaves a healthy VM that never got its instructions. Re-send it
+  with `sandbox prompt <instance> --redeliver` rather than reconstructing the
+  text by hand.
 
 ### Ending a session
 
@@ -326,8 +361,11 @@ is the artifact.
 | `sandbox status [instance\|#]`                      | List instances (numbered, running/stopped, ephemeral/named), or detail one (ssh command, agent CID, branch).  |
 | `sandbox attach <instance\|#>`                      | SSH into a running instance and attach the agent's `tmux` session (`TERM=xterm-256color`).                    |
 | `sandbox fetch <instance\|#>`                       | Fetch the instance's `sandbox/<instance>` branch into this repo.                                              |
+| `sandbox deliver <instance\|#> --branch <ref>`      | The opposite of `fetch`: push a host ref **into** an instance's mirror. See below.                            |
 | `sandbox screenshot <instance\|#> [path]`           | Grab a PNG of the headless-sway output (requires the graphics opt-in). Default: timestamped PNG in the cwd.   |
 | `sandbox stop [--remove] <instance\|#>`             | Stop a VM (and remove a named instance's state with `--remove`).                                              |
+| `sandbox dispatch <card-id>`                        | Launch an agent VM to work a `project` board card. Takes a **card id**, not an instance name.                 |
+| `sandbox prune`                                     | Remove vestigial refs and state dirs for `card-<id>` instances whose card is terminal. See below.             |
 
 Every command that takes an `<instance>` also accepts the **index** shown in the
 `#` column of `sandbox status` — a convenience shorthand for the full suffixed
@@ -341,6 +379,56 @@ provided `--name foo` is suffixed with random entropy at launch (e.g.
 of an older same-named branch. The full suffixed name is printed at launch (and
 by `sandbox stop`); pass _that_ full name to restart and resume the agent's
 accumulated work.
+
+Two commands are the exception to "pass the suffixed instance name":
+`sandbox dispatch` takes a **card id** because it _creates_ the instance, and
+`--name` at launch takes the bare slug the suffix is appended to.
+
+### Moving a branch into an instance: `sandbox deliver`
+
+A guest sees exactly one host directory — its own — so no instance can read
+another's mirror. Anything that has to travel between two instances goes through
+the host, and `sandbox deliver` is that path:
+
+```sh
+sandbox fetch card-a3f7b2-9c1e08                              # guest -> host
+sandbox deliver review-a3f7b2-bb7f4e --branch sandbox-guest/card-a3f7b2-9c1e08
+```
+
+`--branch` takes any ref in the host repo. It arrives in the target's mirror as
+`refs/heads/delivered/<basename>`, where `<basename>` is the last path segment
+of the source ref. The `delivered/` prefix cannot collide with the target
+guest's own `sandbox/<instance>` working branch, so a delivery never disturbs
+what that guest is doing. The push is a force-push, so re-delivering the same
+branch after new commits simply advances it.
+
+Inside the guest, the mirror is `origin` — so the delivered branch is read as
+`origin/delivered/<basename>`, not `delivered/<basename>`.
+
+`deliver` writes a ref and nothing else. It does not commit, merge, or touch the
+target's working branch; what the guest does with the ref is up to the guest.
+
+### Reaping finished instances: `sandbox prune`
+
+```sh
+sandbox prune [--board-dir project/kanban]
+```
+
+Removes the git refs and state directories of `card-<id>` instances whose board
+card has reached a terminal state (`accepted` or `cancelled`). Only
+`card-<id>`-named instances are considered, and a card that is not on the board
+at all — an iced note, or an instance you happened to name like a card — is
+skipped, because it is not provably terminal.
+
+This is how the retained review artifacts are eventually cleaned up: a fetched
+branch is kept as the revert artifact while its card is live, and becomes
+vestigial once the card is terminal.
+
+> **Known limitation — `prune` does not check liveness.** It will remove the
+> state directory, including in-flight disk images, out from under a running
+> QEMU process. Accepting a card while its implementor or reviewer VM is still
+> up is enough to trigger this. `sandbox stop` has the same gap. The mitigation
+> is procedural, not enforced: stop a card's VMs before its card is accepted.
 
 ## What the boundary enforces
 
@@ -473,9 +561,9 @@ when graphics is disabled — so a graphics-enabled fleet is scannable at a
 glance:
 
 ```text
- #  INSTANCE        STATE    MODE   PERSIST  GRAPHICS    LIVENESS
- 1  browser-a3f9c2  running  agent  named    integrated  turn 2 in-flight · …
- 2  build-7c1e0b    running  agent  named    none        turn 1 in-flight · …
+ #  INSTANCE        STATE    MODE   PERSIST  GRAPHICS    LIVENESS       WORK
+ 1  browser-a3f9c2  running  agent  named    integrated  in-flight 9m   Active — Agent work, 9m
+ 2  build-7c1e0b    running  agent  named    none        ended-ok 3m    Finished
 ```
 
 ### Grabbing a screenshot

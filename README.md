@@ -18,13 +18,17 @@ I hope that you will enjoy it. </p>
 
 Katsuobushi libraries are broken out by domain and can be used a la carte:
 
-| Library                              | Description                                                                        |
-| ------------------------------------ | ---------------------------------------------------------------------------------- |
-| [`menu`](lib/menu/README.md)         | Generate a colorful and useful command menu for a project's devshell               |
-| [`rust`](lib/rust/README.md)         | Convenience wrapper over [Crane] to reduce boilerplate in Rust project derivations |
-| [`markdown`](lib/markdown/README.md) | Formatting and lint for Markdown documentation (via [Prettier])                    |
-| [`sandbox`](lib/sandbox/README.md)   | Ephemeral, project-specific, VM-sandboxed workspaces (Linux-only, via [`qemu`])    |
-| [`project`](lib/project/README.md)   | File-backed project backlog board (Obsidian Kanban) with sandboxed agent dispatch  |
+| Library                              | Published as   | Description                                                                        |
+| ------------------------------------ | -------------- | ---------------------------------------------------------------------------------- |
+| [`rust`](lib/rust/README.md)         | `lib.rust`     | Convenience wrapper over [Crane] to reduce boilerplate in Rust project derivations |
+| [`markdown`](lib/markdown/README.md) | `lib.markdown` | Formatting and lint for Markdown documentation (via [Prettier])                    |
+| [`sandbox`](lib/sandbox/README.md)   | `lib.sandbox`  | Ephemeral, project-specific, VM-sandboxed workspaces (Linux-only, via [`qemu`])    |
+| [`project`](lib/project/README.md)   | `lib.project`  | File-backed project backlog board (Obsidian Kanban) with sandboxed agent dispatch  |
+| [`menu`](lib/menu/README.md)         | overlay        | Generate a colorful and useful command menu for a project's devshell               |
+
+The first four are flake outputs you call directly. `menu` is different: it
+arrives through this flake's **overlay** as `pkgs.katsuobushi`, not as a
+`lib.menu` output.
 
 ### Templates
 
@@ -46,6 +50,9 @@ instructions:
 | `sandbox`               | Configuration and usage of the `sandbox` Nix library                       |
 | `project`               | Managing a backlog on the `project` board — cards, lifecycle, and priority |
 | `project-orchestration` | Driving a `project` board with sandboxed agents (dispatch + peer review)   |
+| `design`                | Author a Project Design Document (PDD) into `project/design/`              |
+| `plan`                  | Turn an accepted PDD into board cards                                      |
+| `implement`             | Drive a swarm of sandboxes to build one label thread to `ready`            |
 
 Track the [plugin marketplace][plugins] with your agent harness and install the
 `katsuobushi` plugin to get started e.g.,

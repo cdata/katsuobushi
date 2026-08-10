@@ -43,12 +43,26 @@ bypasses). **Only a human moves a card to `accepted`.**
 | `project new --title "…"`          | Mint a card note + a card in To-do                                  |
 | `project status set <id> <status>` | Move a card (enforces the state machine)                            |
 | `project prioritize <id> --top`    | Reorder within a lane (`--top/--bottom/--before <id>/--after <id>`) |
-| `project status [--available]`     | Show the board (`--lane <lane>`, `--json`)                          |
+| `project status [--available]`     | Show the board (`--lane <lane>`, `--label <label>`, `--icebox`)     |
 | `project status <id>`              | Show one card's status, frontmatter, and body                       |
+| `project labels`                   | List the label vocabulary and the cards under each label            |
 | `project lint [--fix]`             | Check board ↔ note consistency                                      |
 
 Ids accept a unique prefix. `--json` gives machine output for agents parsing the
 board — the menu wrapper passes `--json` payloads through untouched.
+
+A few filters and shorthands worth knowing:
+
+- `--available` lists only grabbable work: To-do cards whose every `blocked_by`
+  has reached `ready` or `accepted`. A blocker clears its dependents at `ready`,
+  not at `needs-review`, so downstream work builds only on reviewed work.
+- `--label <label>` narrows to one label. Since a design or epic reference is
+  just a label, this is how you look at one thread of work at a time.
+- The **icebox** holds notes that are not on the board at all: file one with
+  `project new --icebox`, list them with `project status --icebox`, and promote
+  one to the front of To-do with `project status set <id> todo`.
+- `project status set --accept-all` accepts the whole Ready lane at once. Like
+  any move to `accepted`, that is a human's call.
 
 ## Usage
 
