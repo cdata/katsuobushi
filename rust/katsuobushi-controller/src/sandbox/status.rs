@@ -552,11 +552,7 @@ fn render_detail(v: &InstanceView, ssh: Option<&str>, console_log: &str, r: &Ren
     // turn reached `ended-ok`; this says *what it said* — recoverable even when
     // the drive that streamed it is long gone.
     if let Some(last) = &v.last_report {
-        lines.push(format!(
-            "last report: {} — {}",
-            last.status,
-            first_line(&last.text)
-        ));
+        lines.push(format!("last report: {} — {}", last.status, last.text));
     }
     if let Some(ssh) = ssh {
         lines.push(format!("ssh:        {ssh}"));
@@ -1505,13 +1501,14 @@ mod tests {
             text.contains("last report: done — VERDICT: accept"),
             "{text}"
         );
-        // Only the first line lands in the row; the full text stays in the
-        // journal and in `--json`.
-        assert!(!text.contains("No blocking findings"), "{text}");
+        // The full multi-line text is shown, not just the first line.
+        assert!(text.contains("No blocking findings"), "{text}");
     }
 
     #[test]
-    fn a_very_long_report_line_is_truncated_in_the_detail_row() {
+    fn a_very_long_note_line_is_truncated_in_the_detail_row() {
+        // first_line() is still used for the `note:` field; the helper's
+        // truncation behaviour stays in force there.
         let long = "x".repeat(400);
         let shown = first_line(&long);
         assert!(shown.ends_with('…'), "{shown}");

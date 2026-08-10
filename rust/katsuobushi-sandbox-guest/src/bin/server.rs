@@ -379,6 +379,10 @@ impl Session {
                 self.last_report_text = Some(report.text.clone());
                 let mut force = false;
                 let mut clear_turn = false;
+                // When a late terminal report closes a grace-window turn, push
+                // TurnCompleted *after* Report so the host drive journals the
+                // text before it breaks on the completion signal.
+                let mut late_turn_completed: Option<u64> = None;
                 // A report that names a *different* turn is stale (a late
                 // `done` from turn N must not end turn N+1): relay it, but
                 // apply no accept/terminal transition. One with no id keeps
@@ -408,12 +412,10 @@ impl Session {
                         force = true;
                         // A late terminal report arriving during the grace window
                         // resolves the turn cleanly, so the delayed check
-                        // becomes a no-op.
+                        // becomes a no-op. TurnCompleted is deferred until
+                        // after the Report push below.
                         if was_ended {
-                            out.messages.push(GuestMessage::TurnCompleted {
-                                turn_id: id,
-                                reported: true,
-                            });
+                            late_turn_completed = Some(id);
                             clear_turn = true;
                         }
                     } else if !t.accepted {
@@ -429,6 +431,14 @@ impl Session {
                 }
                 // Relay the report as today, regardless of turn state.
                 out.messages.push(GuestMessage::Report(report));
+                // Deferred: push TurnCompleted *after* Report so the host
+                // drive sees and journals the terminal text first.
+                if let Some(id) = late_turn_completed {
+                    out.messages.push(GuestMessage::TurnCompleted {
+                        turn_id: id,
+                        reported: true,
+                    });
+                }
                 if clear_turn {
                     self.turn = None;
                 }
@@ -1946,6 +1956,41 @@ mod tests {
         assert!(stale.inject_nudge.is_none());
         assert!(stale.schedule_grace.is_none());
         assert!(stale.messages.is_empty());
+    }
+
+    #[test]
+    fn a_late_terminal_report_during_grace_precedes_turn_completed_in_the_message_list() {
+        // The host drive breaks on TurnCompleted; Report must arrive before it
+        // so the drive journals the terminal text before exiting the loop.
+        let mut s = nudging_session(3);
+        step(&mut s, Event::Prompt { turn_id: 9 });
+        step(&mut s, Event::Hook(HookEvent::TurnEnded)); // grace armed
+        step(&mut s, Event::WorkStateIdle);
+        step(&mut s, Event::GraceExpired { turn_id: 9 }); // nudge 1
+        let out = step(&mut s, done()); // late terminal report during grace window
+        let report_pos = out
+            .messages
+            .iter()
+            .position(|m| matches!(m, GuestMessage::Report(_)));
+        let completed_pos = out.messages.iter().position(|m| {
+            matches!(
+                m,
+                GuestMessage::TurnCompleted {
+                    turn_id: 9,
+                    reported: true
+                }
+            )
+        });
+        assert!(
+            report_pos.is_some() && completed_pos.is_some(),
+            "both messages present: {:?}",
+            out.messages
+        );
+        assert!(
+            report_pos.unwrap() < completed_pos.unwrap(),
+            "Report must precede TurnCompleted so the host drive journals it first: {:?}",
+            out.messages
+        );
     }
 
     #[test]

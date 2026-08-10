@@ -254,16 +254,17 @@ do **not** need to re-prompt the agent to restate itself:
 sandbox status <name>            # `last report:` shows the latest conclusion
 ```
 
-The detail view shows the first line; the full text (multi-line verdicts
-included) is in `reports.ndjson`, one JSON object per line with `turnId`,
-`status`, `text`, and a host timestamp. Journaling is best-effort and additive —
-the `--json` stream is unchanged.
+The detail view shows the full text. The same data is in `reports.ndjson`, one
+JSON object per line with `turnId`, `status`, `text`, and a host timestamp.
+Journaling is best-effort and additive — the `--json` stream is unchanged.
 
 **Limit:** the journal is written by the _live_ drive, so it captures what that
 drive saw. If you kill the driving process itself, anything the agent reports
 afterwards — including a report the guest's auto-nudges land later — is not
-journaled. Losing the **output** is fully covered; losing the **process** is
-not.
+journaled. In that case the guest's own `work-state.json` (in the instance's
+state dir) still records the last report text in its `lastReportText` field, and
+`sandbox status <name>` surfaces it on the `note:` line. Losing the **output**
+is fully covered; losing the **process** falls back to `work-state.json`.
 
 **Recovering a launch that lost its directive.** A prompted launch
 (`sandbox start --agent --prompt …`, and every `sandbox dispatch`) writes its
