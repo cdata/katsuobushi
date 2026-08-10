@@ -129,8 +129,12 @@ A good review directive:
 
 - States the reviewer is **independent** and must **not change code / commit**.
 - Names what the work is and its design contract (point at `design/…` if any).
-- Lists what to review: correctness on the fragile paths, test quality
-  (meaningful vs. rubber-stamp), failure modes, and what should **block**.
+- Lists what to examine: correctness on the fragile paths, test quality
+  (meaningful vs. rubber-stamp), and failure modes. Ask questions — "trace what
+  spawns this payload" — rather than asserting findings — "nothing spawns this
+  payload — confirm". Name areas of uncertainty, not conclusions.
+- Says plainly that the reviewer may accept, and that an accept is not a failure
+  of the review.
 - Requires **empirical** verification — run the build/tests/clippy, don't just
   read. Point the reviewer at the **project's menu** for how: "list the
   project's commands with `nix develop -c menu` and use its own test/lint
@@ -140,6 +144,71 @@ A good review directive:
   in your report if you do."
 - Ends:
   `report done "VERDICT: accept | needs-changes + strongest findings (file:line) + test-quality assessment + would-you-block"`.
+
+### Writing a directive that does not lead
+
+The whole value of peer review is that a second party reaches its own
+conclusion. The orchestrator is the party best placed to compromise that
+independence — and the most likely to do it without meaning to. A directive that
+names the verdict you expect, expresses a preference for a bounce, or centres
+the orchestrator's own conclusion about the current card turns the reviewer from
+a check into an echo.
+
+**Rules:**
+
+- **Name what to examine; do not name the verdict you expect.** "Trace what
+  spawns this payload" is a question that leaves room for any answer. "Nothing
+  spawns this payload — confirm" is an assertion that the reviewer is being
+  asked to ratify.
+- **Do not say which way you would rather it went.** "I would rather bounce this
+  card than let a criterion quietly go unsatisfied twice" is orchestrator
+  preference dressed as review guidance. Leave the verdict unframed.
+- **Relaying a prior reviewer's finding is legitimate; relaying your own
+  conclusion is not.** If a previous round of review on this card surfaced a
+  finding, you may pass it on — you are quoting what another party concluded. If
+  the finding is your own assessment of the current card, put it as one question
+  among several rather than making it the centrepiece.
+- **Say plainly that an accept is valid.** If the directive's only named outcome
+  is a block, it signals what the reviewer is expected to find. A neutral
+  directive leaves the accept as equally reachable.
+- **When you have a real suspicion, embed it as a question among several — not
+  as the frame the whole review hangs on.** One question in a list of five is a
+  cue to check carefully; a single-question directive that opens with "I believe
+  X" is leading by construction.
+
+**Worked example.**
+
+Leading directive (avoid):
+
+> Review the branch for card 457e37. The implementation claims `Capturable` is
+> satisfied but I believe nothing actually captures — trace the call chain and
+> confirm. Recommend BLOCK if you conclude a criterion is unmet in substance. I
+> would rather bounce this card than let a criterion quietly go unsatisfied
+> twice.
+
+What goes wrong: the orchestrator has asserted its conclusion ("I believe
+nothing actually captures"), pre-set the preferred outcome ("I would rather
+bounce"), and asked the reviewer to confirm rather than investigate. The
+reviewer's independent judgement is crowded out before the first line of code is
+read.
+
+Neutral rewrite:
+
+> Review the branch for card 457e37. The card's acceptance criterion is
+> `Capturable: the implementation captures X`. Please:
+>
+> 1. Confirm the test suite passes and clippy is clean.
+> 2. Trace the call chain from the public entry points: where, if anywhere, is X
+>    captured?
+> 3. Assess whether each acceptance criterion is met in substance.
+> 4. Note any test cases you think are missing or rubber-stamp.
+>
+> Report `VERDICT: accept | needs-changes` with findings and file:line
+> references.
+
+What is right: the reviewer is given a list of things to examine — including the
+question about capture — and left to reach any verdict. An accept is as valid as
+a block.
 
 ### Delivering the branch to the reviewer
 
@@ -529,6 +598,13 @@ number of Available cards:
 - **Reviewer ≠ implementor is a hard rule, not a nicety.** When you both build
   and review, you rubber-stamp your own blind spots. The sandbox boundary makes
   the separation real and cheap.
+- **An orchestrator can compromise a reviewer's independence without meaning
+  to.** A directive that names the expected verdict, says "I would rather
+  bounce", or leads with the orchestrator's own conclusion about the current
+  card turns the reviewer from a check into an echo. A reviewer that is
+  independent in name only produces an accept/block record that reads cleaner
+  than it is — and the orchestrator is the party best placed to prevent this.
+  See "Writing a directive that does not lead".
 - **Don't `--remove` a VM whose card is still in review.** The habit comes from
   the `sandbox` skill's landing procedure, which removes an instance once its
   work is accepted — but at `needs-review` it isn't. Removing it throws away the
