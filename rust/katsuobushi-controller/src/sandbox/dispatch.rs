@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn it_gives_the_guest_the_card_as_prose_and_never_a_board_write() {
-        // The board is host-only (design/PDD001): the directive hands the guest
+        // The board is orchestrator-only (design/PDD001): the directive hands the guest
         // its card as prose and routes findings through `report`. It must never
         // instruct the guest to write the board.
         let (fs, paths) = seeded();

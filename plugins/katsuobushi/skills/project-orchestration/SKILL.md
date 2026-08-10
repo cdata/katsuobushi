@@ -36,12 +36,12 @@ A card flows through the lifecycle by passing between three distinct roles, kept
 in motion by a fourth — the orchestrator. **Keep the first three separate** —
 that separation is the whole point of the `needs-review` state.
 
-| Role              | Moves                                                       | Who                                                       |
-| ----------------- | ----------------------------------------------------------- | --------------------------------------------------------- |
-| **Orchestrator**  | dispatches, lands & routes cards between the other three    | the **host** agent (not sandboxed) — normally you         |
-| **Implementor**   | `todo → in-progress → needs-review`                         | a dispatched sandbox agent (or you, if the owner asks)    |
-| **Peer reviewer** | `needs-review → ready` (accept) or `→ in-progress` (bounce) | a **different** agent — ideally an independent sandbox VM |
-| **Product owner** | `ready → accepted`                                          | **a human, always**                                       |
+| Role              | Moves                                                       | Who                                                                       |
+| ----------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------- |
+| **Orchestrator**  | dispatches, lands & routes cards between the other three    | an agent not inside a per-card sandbox — currently the host; normally you |
+| **Implementor**   | `todo → in-progress → needs-review`                         | a dispatched sandbox agent (or you, if the owner asks)                    |
+| **Peer reviewer** | `needs-review → ready` (accept) or `→ in-progress` (bounce) | a **different** agent — ideally an independent sandbox VM                 |
+| **Product owner** | `ready → accepted`                                          | **a human, always**                                                       |
 
 **Never review your own work.** If you implemented a card, you are the wrong
 party to move it out of `needs-review` — spawn an independent reviewer (below).
@@ -53,12 +53,11 @@ that depends on it. Treat "there is a card in `needs-review`" as the
 highest-priority signal on the board: it's often blocking more work than
 whatever is `available`. Prioritize reviewing over starting new work.
 
-## The orchestrator (you, the host agent)
+## The orchestrator (you)
 
-The orchestrator — normally the **host** agent, the one _not_ running inside a
-sandbox — is the coordinating role that keeps the other three in motion.
-Typically you rarely implement cards yourself; your job is to keep the board
-flowing:
+The orchestrator — the role not itself inside a per-card sandbox (currently the
+host) — is the coordinating role that keeps the other three in motion. Typically
+you rarely implement cards yourself; your job is to keep the board flowing:
 
 - **Pump the backlog** — dispatch Available cards to implementor agents and keep
   work moving as cards clear.
@@ -77,20 +76,21 @@ flowing:
 
 Nothing here is hardcoded — the orchestrator _is_ the control loop.
 
-### The board is host-only (an invariant)
+### The board is orchestrator-only (an invariant)
 
-The host is the **only** writer of `project/kanban/` — both `BOARD.md` and the
-`<id>.md` card notes. A sandbox guest never writes the board. It gets its card
-as prose in its directive, returns its code as a git branch, and returns its
-findings through the `report` channel; the host reads those and makes every
-board change. This is the structural cure for the card-note write conflict: with
-one writer, two writers cannot collide.
+The orchestrator is the **only** writer of `project/kanban/` — both `BOARD.md`
+and the `<id>.md` card notes. A sandbox guest never writes the board. It gets
+its card as prose in its directive, returns its code as a git branch, and
+returns its findings through the `report` channel; the orchestrator reads those
+and makes every board change. This is the structural cure for the card-note
+write conflict: with one writer, two writers cannot collide.
 
 So **never tell an agent to write a finding into a card note.** A reviewer's
-verdict and an implementor's summary both come back over `report`, and the host
-writes them down (a bounce's findings go into the card's `## Review notes` by
-the host, below). The past board corruption came from a directive that asked an
-agent to record its own findings in the note — a second writer by hand.
+verdict and an implementor's summary both come back over `report`, and the
+orchestrator writes them down (a bounce's findings go into the card's
+`## Review notes` by the orchestrator, below). The past board corruption came
+from a directive that asked an agent to record its own findings in the note — a
+second writer by hand.
 
 ## Peer review in a sandbox (independent reviewer)
 

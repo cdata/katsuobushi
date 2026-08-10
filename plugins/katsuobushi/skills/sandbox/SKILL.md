@@ -20,7 +20,7 @@ QEMU). An agent harness runs inside it with its blast radius bounded by the VM:
 default-deny network behind an HTTPS allowlist, no host access, unprivileged.
 Work returns as a pushed git branch.
 
-You are the **host orchestrator**. You launch a sandbox, push it prompts over a
+You are the **orchestrator**. You launch a sandbox, push it prompts over a
 private host↔guest channel (the _sandbox controller_), read its status reports,
 and collect its branch. The full human guide is at
 <https://github.com/cdata/katsuobushi/blob/main/lib/sandbox/README.md>.
@@ -304,12 +304,12 @@ Work returns as ordinary git: the agent commits on `sandbox/<name>` and pushes
 to a per-instance mirror. The channel carries control/status only — the branch
 is the artifact.
 
-A guest never writes the host's board. `project/kanban/` (`BOARD.md` and the
-card notes) is host-only state, and the host is its single writer. A dispatched
-agent gets its card as prose, returns code as this branch, and returns findings
-over the `report` channel — never by editing a card note. Never write a
-directive that tells an agent to record a finding into the board; the host
-writes it down.
+A guest never writes the board. `project/kanban/` (`BOARD.md` and the card
+notes) is orchestrator-only state, and the orchestrator is its single writer. A
+dispatched agent gets its card as prose, returns code as this branch, and
+returns findings over the `report` channel — never by editing a card note. Never
+write a directive that tells an agent to record a finding into the board; the
+orchestrator writes it down.
 
 ```sh
 sandbox fetch <name>            # git fetch <mirror> +sandbox/<name>:refs/remotes/sandbox-guest/<name>
