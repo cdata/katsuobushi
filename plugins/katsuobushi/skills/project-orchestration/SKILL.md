@@ -198,9 +198,12 @@ reviewer's mirror simply advances to the new tip. The reviewer runs
 
 When it reports:
 
-- **accept** → move the card `needs-review → ready` (you're executing the
-  reviewer's decision), file any non-blocking follow-ups as their own cards, and
-  hand the `ready → accepted` step to the human.
+- **accept** → land the branch (the sandbox skill's integration procedure), then
+  `project status set <id> ready`. File any non-blocking follow-ups as their own
+  cards and hand the `ready → accepted` step to the human. Keep the
+  `sandbox-guest/<impl-instance>` remote bookmark as the revert artifact: a
+  product owner who returns the `ready` card reverts against it. Delete the
+  bookmark once the card reaches `accepted`.
 - **needs-changes** → append the findings to the card's `## Review notes`, move
   it `→ in-progress`, and send them to the card's **paused implementor VM** (see
   "Keep the pair warm", below) rather than fixing them yourself or dispatching a
@@ -237,17 +240,17 @@ tool) to fill the same roles. Spawn a subagent to implement a card, and —
 keeping **implementor ≠ reviewer** — a _separate_ subagent to review it. You
 lose the sandbox's isolation and network bounding (a subagent runs with your own
 privileges in the same tree), but the orchestration shape is unchanged: claim
-the card, delegate the implementation, land the result, delegate an
-_independent_ review, then take it to `ready`. The reason to prefer a subagent
-over inline work is the same one that motivates the sandbox — keep the reviewer
-independent of the implementor.
+the card, delegate the implementation, delegate an _independent_ review, land
+the result, then take it to `ready`. The reason to prefer a subagent over inline
+work is the same one that motivates the sandbox — keep the reviewer independent
+of the implementor.
 
 **Concurrency here is strictly 1 — never fan subagents out in parallel.** Unlike
 sandbox VMs, which are isolated instances each with their own branch, subagents
 all act on the **same** working tree, so two implementing at once would clobber
 each other's edits. This is the opposite of the sandbox swarm's parallel fan-out
-(bounded by cores): serialize completely — one card implemented, landed, and
-reviewed before the next one starts. The host-core concurrency budget under
+(bounded by cores): serialize completely — one card implemented, reviewed, and
+landed before the next one starts. The host-core concurrency budget under
 "Swarming" applies only to sandbox VMs, not to this fallback.
 
 ## Delegating implementation with `sandbox dispatch`
@@ -312,18 +315,22 @@ When a dispatched agent reports, advance the card. This is **not** hardcoded
 into `dispatch` — you (the orchestrator) drive it, per the `sandbox` skill's
 collect- and-integrate flow:
 
-- **`done`** → `sandbox fetch card-<id-instance>`, land the branch (rebase
-  workflow from the `sandbox` skill), then
-  `project status set <id> needs-review`. **Pause the VM instead of removing
-  it** — the landing procedure's `sandbox stop --remove <name>` assumes the unit
-  of work is accepted, which is not true at `needs-review` (see "Keep the pair
-  warm", below). Now review it (a sandbox reviewer, above) before it reaches
-  `ready`. **Check that work actually landed:** `sandbox fetch` compares the
-  fetched branch tip to the seed it launched from and warns (human: a
+- **`done`** → `sandbox fetch card-<id-instance>`, check that work actually
+  landed on the branch, then `project status set <id> needs-review`. **No
+  landing** — landing is the step that moves the card to `ready`, not this one.
+  Pause the VM (see "Keep the pair warm") and give the reviewer the branch.
+
+  This ordering gives three properties: the owner's history holds only reviewed
+  work (nothing lands before `ready`); a bounce costs no landing and no revert;
+  and "has this landed" has an exact answer — the card status says so.
+
+  **Check that work actually landed:** `sandbox fetch` compares the fetched
+  branch tip to the seed it launched from and warns (human: a
   `WARNING: no committed work landed` line; `--json`: `"landed": false`) when
   they match — i.e. the agent ended its turn without committing. Treat that as a
   non-`done`: inspect with `sandbox attach`, reset the card to `todo`, and
   re-dispatch a fresh instance rather than advancing an empty branch to review.
+
 - **`blocked`** → append the agent's report to the card's `## Dispatch log`
   section, `project status set <id> todo`, resolve what it needs, and
   re-dispatch a **fresh** instance (so its clone sees current HEAD).
@@ -431,12 +438,13 @@ accumulate; `sandbox status` lists what is running vs. stopped.
 ## Swarming the backlog
 
 To burn down several Available cards at once, dispatch one per card as a batch
-(each gets its own `card-<id>` VM and branch), then **land serially** in the
-orchestrator as each reports `done`, so the working tip advances and the next
-rebases onto it. Scope dispatched cards to **disjoint files** where you can, so
-most landings stay fast-forwards. Keep review in the loop: each landed card
-still goes `needs-review → (sandbox review) → ready` before a human accepts. See
-the `sandbox` skill's "Parallel fan-out" for the mechanics.
+(each gets its own `card-<id>` VM and branch). Several cards can be in flight
+and reviewed concurrently, but **land serially**: when a reviewer accepts a
+card, land its branch so the working tip advances and the next landing rebases
+onto it. The serialisation point is **acceptance**, not the `done` report —
+multiple cards can reach `needs-review` before any of them land. Scope
+dispatched cards to **disjoint files** where you can, so most landings stay
+fast-forwards. See the `sandbox` skill's "Parallel fan-out" for the mechanics.
 
 ### Bound concurrency to the host's resources
 
