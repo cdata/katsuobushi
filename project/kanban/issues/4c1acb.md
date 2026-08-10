@@ -5,6 +5,8 @@ type: docs
 blocked_by: [9689a8, 5e545d]
 labels: [PDD003, sandbox]
 created: 2026-08-07T21:14:10Z
+disposition: accepted
+disposition_at: 2026-08-10T02:00:10Z
 ---
 
 ## What to build
