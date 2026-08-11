@@ -10,6 +10,57 @@ the changes anyone tracking untagged `main` should know about.
 
 ## Unreleased
 
+## 0.5.1
+
+**No configuration changes.** `lib.sandbox` takes the same arguments as in
+0.5.0. Everything below is behavioral.
+
+**If you copied the landing procedure, take the new version.** The recipe in the
+`sandbox` skill now restores the board after the squash merge and refuses to
+continue when something unexpected remains staged:
+
+```sh
+git merge --squash sandbox-guest/<name>
+( git checkout HEAD -- project/kanban/ >/dev/null 2>&1 || true
+  # …board cleanup and the unexpected-residue guard…
+  git commit -m "<type>(<scope>): <card title>" )
+```
+
+Two properties matter. The whole block is a **subshell**, because the guard's
+abort path calls `exit 1` and that ends an interactive shell when the block is
+pasted into a terminal. And `git commit` sits **inside** the parentheses, so the
+abort actually prevents the landing rather than merely announcing itself. Read
+the current recipe in the skill rather than reconstructing it from this excerpt.
+
+**A drive that used to hang now fails.** When a turn ends without a terminal
+report and the guest's nudge budget is exhausted, an armed drive now exits with
+an error instead of waiting indefinitely. If you had a wrapper, timeout, or
+watchdog compensating for the hang, it is no longer needed — and a drive that
+returns non-zero for this reason means the agent stopped without reporting, not
+that the work failed.
+
+**An agent can now be nudged while a background build runs.** Nudges previously
+waited for the work state to go idle, which is why a turn that ended unreported
+during a build was never nudged. They now fire on the grace timer regardless.
+The nudge only reaches a turn that has **already ended unreported**, and it is
+queued in the MCP stream, so it cannot interrupt or kill a running build.
+
+**`sandbox status` reads differently for a stalled turn.** 0.5.0 told you to
+watch the **WORK** column. That still holds, with one addition: a turn that
+ended without reporting now shows `ended unreported <duration> ago` rather than
+an `Active (Late)` duration that climbs forever. If you built any tooling that
+parses the liveness line, it has a new shape to handle.
+
+**Guest branches no longer carry `project/kanban/`.** The dispatch seed is now a
+single `dispatch seed` commit whose tree holds the board at `HEAD`, replacing
+the `WIP on …` / `index on …` stash pair. Anything that looked for those stash
+commits, or that relied on the board travelling into the guest, needs updating.
+
+**Dispatched agents are held to a stricter contract.** An agent must not end a
+turn with background work still running, and its `report done` must state that
+nothing was left running. If your directives ask agents for long-running
+verification, expect them to stop it and say so instead of leaving it going.
+
 ## 0.5.0
 
 **`progressStallSecs` is removed — delete it from your `lib.sandbox` call.**

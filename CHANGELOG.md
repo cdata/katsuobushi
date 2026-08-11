@@ -7,6 +7,92 @@ breaking and behavioral changes are detailed in [`MIGRATING.md`](MIGRATING.md).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-08-11
+
+Closes the ways a dispatch could report success it had not achieved. A drive no
+longer returns before the agent's terminal report, an armed drive no longer
+waits forever when a turn ends unreported, and `sandbox status` no longer shows
+a stalled turn as making progress. The board stops travelling inside guest
+branches, and the landing procedure gains a guard that restores it and refuses
+to continue quietly on an unexpected failure. See
+[`MIGRATING.md`](MIGRATING.md#051).
+
+### Fixed
+
+- **A dispatch drive returned before the agent's terminal report.** The guest
+  pushed `TurnCompleted{reported:true}` into `out.messages` ahead of the
+  `Report`, so an armed host drive left its loop without ever seeing the
+  terminal text — and therefore without journaling it to `reports.ndjson`. The
+  conclusion survived only in `work-state.json`, which no skill named. The
+  `TurnCompleted` push is now deferred until after the `Report`.
+- **An armed drive waited forever when the auto-nudge never fired.** Three
+  faults compounded. The `is_work_idle` guard on `GraceExpired` deferred nudges
+  until work went idle, and a turn whose carrying duration kept climbing never
+  looked idle — so `nudgeCount` stayed at `0` against a budget of `5`. The host
+  drive then looped on heartbeats with no bound. Observed in practice: a turn
+  ended unreported after eight minutes and the drive waited two hours with no
+  timeout and no notice. Nudges now fire unconditionally on the grace timer, and
+  an armed drive fails with a clear message once the guest's budget is provably
+  exhausted.
+- **`sandbox status` reported a stalled turn as active work.** The `LIVENESS`
+  and `WORK` columns counted elapsed time rather than activity, so a turn that
+  had already ended read as healthy progress; only `turn-state.json`'s frozen
+  `lastActivityAt` was honest. `render_liveness` now reports
+  `ended unreported <duration> ago` when `phase` is `in-flight` and `ended_at`
+  is set.
+- **A guest branch carried the board and merged it back silently.** `dispatch`
+  claims the card (a `BOARD.md` edit) and then seeds the guest from the working
+  tree via `git stash create`, so every branch carried a dispatch-time board
+  snapshot that merged back at landing without a conflict — putting a card in
+  the wrong lane inside the commit that shipped its work. The seed is now
+  filtered: board paths are restored to their `HEAD` state before the mirror
+  push, so the guest's board never diverges from the host's.
+- **The landing guard swallowed unexpected `git checkout` failures.** The
+  `|| true` that makes the guest-added-file case work also hid every other
+  failure, so a landing could appear to have guarded the board when it had not.
+  Residue left staged under the board path with a status other than `A` now
+  aborts the landing with an error on stderr.
+- **The landing guard's abort could close the operator's shell.** `exit 1` in a
+  block pasted into an interactive terminal ends that session. Both recipes are
+  now wrapped in a subshell, so the abort exits only the subshell. `git commit`
+  and `jj git import` sit inside it and remain gated by the guard.
+- **`sandbox status` truncated a terminal report to its first line.** The detail
+  view now renders the full text, so a multi-line verdict survives a lost
+  terminal.
+
+### Changed
+
+- **Nudges fire unconditionally on the grace timer.** Previously they waited for
+  the work state to go idle, which meant a turn that ended unreported while a
+  background build ran was never nudged at all. An agent can now be re-prompted
+  while a build is still running — but only once its turn has already ended
+  unreported, and the nudge is queued in the MCP stream and cannot stop the
+  build.
+- **The dispatch seed is a single `dispatch seed` commit.** It replaces the
+  `WIP on …` / `index on …` pair that `git stash create` produced, and its tree
+  carries the board at `HEAD` rather than the orchestrator's uncommitted edits.
+- **The guest contract forbids leaving background work running.** An agent must
+  finish or explicitly kill every job before it reports, must say which, and its
+  `report done` must state that nothing was left running. Paired with a note
+  that the guest `/nix/store` is a thin overlay on a large shared read-only
+  base, so whole-store verification is never appropriate there.
+- **`project-orchestration` gains guidance on not leading the reviewer.** Five
+  rules, a worked example pairing a leading directive with a neutral rewrite,
+  and a gotchas entry. The prior advice to list "what should **block**" is
+  reworded to ask questions rather than assert findings, because it invited the
+  verdict it was meant to test.
+- **The `sandbox` skill's journaling limit names both unjournaled exits.** It
+  documented only the killed-process case; a nudges-exhausted natural exit lands
+  in the same place, and the skill now says so and names where to read the
+  conclusion instead.
+
+### Removed
+
+- **`is_work_idle` and the `WorkStateIdle` / `WorkStateActive` events.** Dead
+  after nudges stopped depending on the idle transition. The work-state
+  coordinator, `GuestMessage::WorkStateTransition`, and `work-state.json` are
+  unaffected.
+
 ## [0.5.0] — 2026-08-10
 
 Rebuilds how work moves between the parties that write, review, and integrate
