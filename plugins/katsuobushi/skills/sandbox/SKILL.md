@@ -270,12 +270,22 @@ JSON object per line with `turnId`, `status`, `text`, and a host timestamp.
 Journaling is best-effort and additive — the `--json` stream is unchanged.
 
 **Limit:** the journal is written by the _live_ drive, so it captures what that
-drive saw. If you kill the driving process itself, anything the agent reports
-afterwards — including a report the guest's auto-nudges land later — is not
-journaled. In that case the guest's own `work-state.json` (in the instance's
-state dir) still records the last report text in its `lastReportText` field, and
+drive saw. Two exit paths share this gap:
+
+- **Killed process:** if you kill the driving process itself, anything the agent
+  reports afterwards — including a report the guest's auto-nudges land later —
+  is not journaled.
+- **Nudges exhausted:** when the drive exits naturally because the guest's
+  auto-nudges are exhausted, a terminal report arriving after that exit is not
+  journaled either.
+
+In either case, the guest's own `work-state.json` (in the instance's state dir)
+still records the last report text in its `lastReportText` field, and
 `sandbox status <name>` surfaces it on the `note:` line. Losing the **output**
-is fully covered; losing the **process** falls back to `work-state.json`.
+is fully covered; losing the **process** — whether by kill or nudge exhaustion —
+falls back to `work-state.json`. The `--until-report` flag mitigates the
+nudges-exhausted path: it keeps the drive alive until a terminal report arrives
+regardless of nudge count.
 
 **Recovering a launch that lost its directive.** A prompted launch
 (`sandbox start --agent --prompt …`, and every `sandbox dispatch`) writes its
