@@ -71,11 +71,19 @@ struct Watchdog {
     delivery_deadline: Duration,
     /// `deliveryRetries`: max resends before the delivery fails clearly.
     delivery_retries: u32,
+    /// `--until-report`: how long [`drive`] waits after re-arming (receiving
+    /// `TurnCompleted{reported:false}`) before giving up. The guest sends that
+    /// message only when its nudge budget is exhausted, so no further
+    /// `TurnCompleted` will arrive; without this deadline the drive loops
+    /// indefinitely on heartbeats. Derived from the protocol nudge defaults so
+    /// no new Nix knob is needed.
+    rearmed_timeout: Duration,
 }
 
 impl Watchdog {
     /// Resolve the deadlines from the Nix-rendered spec tunables.
     fn from_spec(spec: &Spec) -> Self {
+        use katsuobushi_sandbox_protocol::{MAX_NUDGES_DEFAULT, NUDGE_INTERVAL_MS_DEFAULT};
         Self {
             ready_gate: Duration::from_secs(spec.ready_gate_secs),
             heartbeat_deadline: Duration::from_secs(
@@ -84,6 +92,11 @@ impl Watchdog {
             ),
             delivery_deadline: Duration::from_secs(spec.delivery_deadline_secs),
             delivery_retries: spec.delivery_retries,
+            // Give the guest time to exhaust its full nudge budget (one extra
+            // interval as buffer), then fail rather than looping on heartbeats.
+            rearmed_timeout: Duration::from_millis(
+                (u64::from(MAX_NUDGES_DEFAULT) + 1) * NUDGE_INTERVAL_MS_DEFAULT,
+            ),
         }
     }
 }
@@ -440,6 +453,11 @@ fn connect_with_retry(
 enum LineFlow {
     Continue,
     Break,
+    /// `--until-report`: the turn ended without a report; the drive is re-armed
+    /// and `drive()` must start the `rearmed_timeout` countdown. The sink call
+    /// (`DriveEvent::ReArmed`) is the caller's responsibility so the countdown
+    /// starts in one place.
+    ReArmed,
 }
 
 /// Handle one decoded guest line in the phase-1 stream loop,
@@ -518,13 +536,11 @@ where
             reported,
         }) if id == turn_id => {
             if !reported {
-                // Stopped without a terminal report. `--until-report` keeps the
-                // stream armed for a real report (the guest's auto-nudges, or a
-                // late `report done` once a backgrounded build finishes) rather
-                // than breaking; the default surfaces the warning and breaks.
+                // Stopped without a terminal report. `--until-report` signals
+                // the caller to re-arm and start the rearmed_timeout countdown;
+                // the default surfaces the warning and breaks.
                 if until_report {
-                    sink(DriveEvent::ReArmed(turn_id))?;
-                    return Ok(LineFlow::Continue);
+                    return Ok(LineFlow::ReArmed);
                 }
                 sink(DriveEvent::Stopped(turn_id))?;
             }
@@ -610,6 +626,7 @@ where
         heartbeat_deadline,
         delivery_deadline,
         delivery_retries,
+        rearmed_timeout,
     } = watchdog;
 
     // Phase 0: the bounded ready-gate. Wait up to `ready_gate` for the
@@ -667,12 +684,17 @@ where
     let mut last_touch: Option<Instant> = None;
     let mut accepted = false;
     let mut resends: u32 = 0;
+    // Set when the guest sends TurnCompleted{reported:false} in --until-report
+    // mode. The drive re-arms, but the guest will send no further TurnCompleted
+    // (its nudge budget is exhausted), so heartbeats alone would loop forever.
+    // This deadline bounds the wait.
+    let mut rearmed_at: Option<Instant> = None;
 
     // A fast agent may have produced its first line *during* the ready-gate;
     // stashed it rather than dropping it. Feed it through the identical handler the
     // stream loop uses before awaiting anything more — it may itself be terminal.
     if let Some(line) = stashed.take() {
-        if let LineFlow::Break = handle_phase1_line(
+        match handle_phase1_line(
             &line,
             turn_id,
             until_report,
@@ -682,7 +704,12 @@ where
             &mut last_touch,
             &mut accepted,
         )? {
-            return Ok(());
+            LineFlow::Break => return Ok(()),
+            LineFlow::ReArmed => {
+                sink(DriveEvent::ReArmed(turn_id))?;
+                rearmed_at = Some(Instant::now());
+            }
+            LineFlow::Continue => {}
         }
     }
 
@@ -698,7 +725,7 @@ where
                         if line.is_empty() {
                             continue;
                         }
-                        if let LineFlow::Break = handle_phase1_line(
+                        match handle_phase1_line(
                             line,
                             turn_id,
                             until_report,
@@ -708,7 +735,12 @@ where
                             &mut last_touch,
                             &mut accepted,
                         )? {
-                            break;
+                            LineFlow::Break => break,
+                            LineFlow::ReArmed => {
+                                sink(DriveEvent::ReArmed(turn_id))?;
+                                rearmed_at = Some(Instant::now());
+                            }
+                            LineFlow::Continue => {}
                         }
                     }
                 }
@@ -717,6 +749,16 @@ where
                 bail!(
                     "transport dead — no heartbeat for {}s (the VM or guest server is gone)",
                     heartbeat_deadline.as_secs()
+                );
+            }
+            _ = sleep_until(rearmed_at.unwrap_or(last_hb) + rearmed_timeout),
+              if rearmed_at.is_some() =>
+            {
+                bail!(
+                    "turn {turn_id} ended unreported and the guest's nudge budget is exhausted; \
+                     no terminal report arrived within {}s after the last re-arm. \
+                     Inspect the instance with `sandbox attach` or `sandbox status`.",
+                    rearmed_timeout.as_secs()
                 );
             }
             _ = sleep_until(sent + delivery_deadline), if !accepted => {
@@ -1094,6 +1136,7 @@ mod tests {
             heartbeat_deadline: Duration::from_secs(3600),
             delivery_deadline: Duration::from_secs(3600),
             delivery_retries: 3,
+            rearmed_timeout: Duration::from_secs(3600),
         }
     }
 
@@ -1365,6 +1408,65 @@ mod tests {
     }
 
     #[test]
+    fn it_errors_after_the_rearmed_timeout_expires() {
+        // Regression: after TurnCompleted{reported:false} in --until-report mode,
+        // the drive previously looped forever on heartbeats (the guest had
+        // exhausted its nudge budget and would send no further TurnCompleted).
+        // Now the rearmed_timeout fires and the drive fails with a clear message.
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let events: RefCell<Vec<Ev>> = RefCell::new(Vec::new());
+        let result = runtime.block_on(async {
+            let (client, mut server) = tokio::io::duplex(4096);
+            let mut wd = relaxed_watchdog();
+            wd.rearmed_timeout = Duration::from_millis(60); // very short for the test
+            let driver = drive(
+                client,
+                1,
+                "inst-a",
+                "go".into(),
+                wd,
+                true, // --until-report
+                |event: DriveEvent| -> Result<()> {
+                    events.borrow_mut().push(match event {
+                        DriveEvent::Report(r) => Ev::Report(r.status),
+                        DriveEvent::Stopped(id) => Ev::Stopped(id),
+                        DriveEvent::ReArmed(id) => Ev::ReArmed(id),
+                    });
+                    Ok(())
+                },
+                || {},
+            );
+            let ctrl = async {
+                let _ = read_chunk(&mut server).await;
+                // Guest signals nudge budget exhausted — no terminal report.
+                server
+                    .write_all(br#"{"type":"turncompleted","turn_id":1,"reported":false}"#)
+                    .await
+                    .unwrap();
+                server.write_all(b"\n").await.unwrap();
+                server.flush().await.unwrap();
+                // Keep sending heartbeats — the rearmed_timeout must fire regardless.
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                server
+            };
+            let (result, _server) = tokio::join!(driver, ctrl);
+            result
+        });
+        // The drive must error, not loop forever.
+        let err = result.expect_err("rearmed_timeout must fire an error");
+        assert!(
+            format!("{err:#}").contains("nudge budget is exhausted"),
+            "error must name the root cause: {err:#}"
+        );
+        // The ReArmed event must have been emitted before the error.
+        assert_eq!(
+            events.into_inner(),
+            vec![Ev::ReArmed(1)],
+            "ReArmed was emitted; then the timeout fired"
+        );
+    }
+
+    #[test]
     fn it_treats_turn_completed_reported_as_clean_success() {
         // `TurnCompleted{reported:true}` breaks cleanly with no extra event.
         let (result, events, _, _) = drive_over_canned(
@@ -1428,6 +1530,7 @@ mod tests {
             heartbeat_deadline: Duration::from_millis(heartbeat),
             delivery_deadline: Duration::from_millis(delivery),
             delivery_retries: retries,
+            rearmed_timeout: Duration::from_secs(3600),
         }
     }
 

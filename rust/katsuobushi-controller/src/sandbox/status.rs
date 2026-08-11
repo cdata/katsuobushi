@@ -231,10 +231,17 @@ fn render_liveness(
     }
     parts.push(head);
 
-    // A still-in-flight turn shows its last-activity age; a stale value here is
-    // how the never-`Stop` hung-mid-tool case becomes visible.
+    // A still-in-flight turn shows context: if the turn has ended without a
+    // terminal report (it is in the nudge-grace window), surface that age so
+    // the operator sees a frozen timestamp, not climbing "last activity". If
+    // the turn has not yet ended, show the last-activity age — the indicator
+    // for a hung-mid-tool case.
     if ts.phase.is_in_flight() {
-        if let Some(age) = age_ago(now, Some(ts.last_activity_at.as_str())) {
+        if let Some(ended_at) = ts.ended_at.as_deref() {
+            if let Some(age) = age_ago(now, Some(ended_at)) {
+                parts.push(format!("ended unreported {age}"));
+            }
+        } else if let Some(age) = age_ago(now, Some(ts.last_activity_at.as_str())) {
             parts.push(format!("last activity {age}"));
         }
     }
@@ -1801,6 +1808,25 @@ mod tests {
         assert_eq!(
             line,
             "turn 3 in-flight · last activity 14m ago · no active stream"
+        );
+    }
+
+    #[test]
+    fn it_surfaces_ended_at_staleness_for_a_turn_in_the_nudge_grace_window() {
+        // When phase=in-flight but ended_at is set, the turn ended without a
+        // terminal report and is in the nudge-grace window. Status must show
+        // "ended unreported Xh ago" rather than "last activity Xh ago", so the
+        // operator sees the turn is stuck, not progressing.
+        let state = turn_state(
+            Phase::InFlight,
+            Some(3),
+            Some("2026-06-28T10:00:00Z"), // ended 2h ago
+            "2026-06-28T10:00:00Z",
+        );
+        let line = render_liveness(Some(&state), None, now(), true, 30).expect("a line");
+        assert_eq!(
+            line, "turn 3 in-flight · ended unreported 2h ago · no active stream",
+            "ended_at staleness must surface, not last_activity_at"
         );
     }
 
