@@ -239,10 +239,9 @@ let
   readyGateSecs = 60; # wait for SessionReady, then send anyway (G)
   stopGraceMs = 1500; # absorb a late terminal report after Stop
   # A turn that ends without a terminal report is re-prompted ("auto-nudged")
-  # once the work state transitions to idle (all heartbeats stop), up to
-  # maxNudges times, nudgeIntervalMs apart, before it resolves as idle.
-  # Nudges fire on the idle transition — not on a build timer — so every
-  # second of the budget is real silence, not build time.
+  # up to maxNudges times, nudgeIntervalMs apart, before it resolves as idle.
+  # Nudges fire unconditionally on the grace timer — the agent is re-prompted
+  # even if a background build is still running — so the budget is always spent.
   maxNudges = 5; # re-prompt an unreported idle agent this many times
   nudgeIntervalMs = 60000; # spacing between auto-nudges (one minute)
 

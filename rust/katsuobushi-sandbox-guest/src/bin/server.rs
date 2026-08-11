@@ -205,10 +205,6 @@ struct Session {
     last_report_text: Option<String>,
     /// The timestamp of the most recent voluntary agent report.
     last_report_at: Option<String>,
-    /// Whether the combined work state is currently idle (all heartbeats silent).
-    /// Driven by [`Event::WorkStateIdle`] / [`Event::WorkStateActive`] from the
-    /// work-state coordinator. Nudges fire only when this is `true`.
-    is_work_idle: bool,
 }
 
 /// An ordered event the state machine consumes. The grace window is modeled as
@@ -230,10 +226,6 @@ enum Event {
     Hook(HookEvent),
     /// The grace-window timer fired for `turn_id`.
     GraceExpired { turn_id: u64 },
-    /// All heartbeats transitioned to idle — the build has stopped.
-    WorkStateIdle,
-    /// At least one heartbeat resumed — the agent started new work.
-    WorkStateActive,
 }
 
 /// Whether the `turn-state.json` write is forced (a lifecycle transition) or
@@ -540,12 +532,6 @@ impl Session {
                         out.persist = Some(PersistMode::Force);
                     }
                 }
-            }
-            Event::WorkStateIdle => {
-                self.is_work_idle = true;
-            }
-            Event::WorkStateActive => {
-                self.is_work_idle = false;
             }
         }
         if out.persist.is_some() {
@@ -1198,8 +1184,6 @@ async fn run_work_state_coordinator(
         };
 
         // Emit to the attached drive — once per transition, not per tick.
-        // Also drive the session machine with idle/active events so nudges fire
-        // on the idle transition rather than on a fixed timer.
         if is_transition {
             let msg = GuestMessage::WorkStateTransition {
                 work_state: work_state_str.to_string(),
@@ -1209,15 +1193,6 @@ async fn run_work_state_coordinator(
             };
             if let Err(e) = send_to_host(&ctl.host, &msg).await {
                 eprintln!("katsuobushi-heartbeat: work-state to host failed: {e:#}");
-            }
-            let session_event = match new_state {
-                WorkState::Idle => Some(Event::WorkStateIdle),
-                WorkState::Active { .. } => Some(Event::WorkStateActive),
-                WorkState::Finished => None,
-            };
-            if let Some(ev) = session_event {
-                let out = drive_event(&ctl, ev).await;
-                execute_outcome(&ctl, out).await;
             }
         }
 
@@ -1858,9 +1833,6 @@ mod tests {
         assert_eq!(armed.schedule_grace, Some((9, GraceKind::Initial)));
         assert!(armed.inject_nudge.is_none());
 
-        // Work state transition (no-op for nudging; nudges fire on grace timer).
-        step(&mut s, Event::WorkStateIdle);
-
         // Grace #1 → nudge 1/2, re-arm as a Nudge grace, no verdict yet.
         let n1 = step(&mut s, Event::GraceExpired { turn_id: 9 });
         assert_eq!(n1.inject_nudge, Some((9, 1)));
@@ -1974,9 +1946,9 @@ mod tests {
 
     #[test]
     fn it_nudges_even_when_work_is_active() {
-        // Work is active (is_work_idle=false, the default): GraceExpired fires
-        // the nudge unconditionally — nudge count advances and the next grace
-        // timer is armed even with a background heartbeat beating.
+        // GraceExpired fires the nudge unconditionally — nudge count advances
+        // and the next grace timer is armed even with a background heartbeat
+        // beating.
         let mut s = nudging_session(5);
         step(&mut s, Event::Prompt { turn_id: 1 });
         step(&mut s, Event::Hook(HookEvent::TurnEnded));
@@ -1992,24 +1964,6 @@ mod tests {
             "next timer armed"
         );
         assert_eq!(s.turn.as_ref().unwrap().nudges, 1, "budget spent");
-    }
-
-    #[test]
-    fn it_does_not_fire_an_extra_nudge_on_work_state_idle() {
-        // WorkStateIdle no longer fires a pending nudge — the grace timer owns
-        // all nudge delivery. WorkStateIdle is a no-op for nudging.
-        let mut s = nudging_session(5);
-        step(&mut s, Event::Prompt { turn_id: 1 });
-        step(&mut s, Event::Hook(HookEvent::TurnEnded));
-        step(&mut s, Event::GraceExpired { turn_id: 1 }); // nudge 1
-
-        let out = step(&mut s, Event::WorkStateIdle);
-        assert!(out.inject_nudge.is_none(), "WorkStateIdle no longer nudges");
-        assert!(
-            out.schedule_grace.is_none(),
-            "no timer re-armed by WorkStateIdle"
-        );
-        assert_eq!(s.turn.as_ref().unwrap().nudges, 1, "count unchanged");
     }
 
     #[test]
@@ -2040,43 +1994,16 @@ mod tests {
     }
 
     #[test]
-    fn it_does_not_refill_the_budget_when_work_resumes() {
-        // Two nudges spent → work resumes (WorkStateActive) → grace fires again.
-        // Nudges fire unconditionally: the budget counter is NOT reset; the next
-        // grace produces nudge #3, not #1.
-        let mut s = nudging_session(5);
-        step(&mut s, Event::Prompt { turn_id: 1 });
-        step(&mut s, Event::Hook(HookEvent::TurnEnded));
-        step(&mut s, Event::GraceExpired { turn_id: 1 }); // nudge 1
-        step(&mut s, Event::GraceExpired { turn_id: 1 }); // nudge 2
-        assert_eq!(s.turn.as_ref().unwrap().nudges, 2, "two nudges spent");
-
-        // Agent starts new work while turn is still unresolved.
-        step(&mut s, Event::WorkStateActive);
-
-        // Grace fires while active — nudge 3 fires unconditionally (no deferral).
-        let out = step(&mut s, Event::GraceExpired { turn_id: 1 });
-        assert_eq!(
-            out.inject_nudge,
-            Some((1, 3)),
-            "nudge 3, budget not reset after resume"
-        );
-        assert_eq!(s.turn.as_ref().unwrap().nudges, 3);
-    }
-
-    #[test]
     fn an_unreported_turn_with_active_work_still_gets_nudged() {
-        // Regression: previously GraceExpired while !is_work_idle set
-        // nudge_pending but did NOT schedule_grace, so the grace loop exited.
-        // If the build never stopped, nudgeCount stayed 0 indefinitely.
-        // Now GraceExpired fires unconditionally: the grace loop keeps running
-        // and nudgeCount advances even while work is active.
+        // Regression: previously GraceExpired did not schedule_grace when a
+        // background build was active, so the grace loop exited and nudgeCount
+        // stayed 0 indefinitely. Now GraceExpired fires unconditionally: the
+        // loop keeps running and nudgeCount advances regardless of work state.
         let mut s = nudging_session(3);
         step(&mut s, Event::Prompt { turn_id: 1 });
         step(&mut s, Event::Hook(HookEvent::TurnEnded));
-        // is_work_idle is false (default) — build still running.
 
-        // Grace fires while active: nudge 1 fires and the timer is re-armed.
+        // Grace fires while a background build is still running: nudge 1 fires.
         let out = step(&mut s, Event::GraceExpired { turn_id: 1 });
         assert_eq!(
             out.inject_nudge,
