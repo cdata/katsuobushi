@@ -418,6 +418,12 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
    if [ -n "$_board" ]; then
      printf 'warning: guest branch carried board state — restoring project/kanban/ from HEAD\n' >&2
      git checkout HEAD -- project/kanban/ >/dev/null 2>&1 || true
+     _checkout_residue=$(git diff --cached --name-status -- project/kanban/ | grep -v '^A' || true)
+     if [ -n "$_checkout_residue" ]; then
+       printf 'error: landing guard: git checkout could not restore board files from HEAD — landing aborted\n' >&2
+       printf '%s\n' "$_checkout_residue" >&2
+       exit 1
+     fi
      while IFS= read -r _f; do
        git rm --cached -- "$_f" >/dev/null
        rm -f -- "$_f"
@@ -463,6 +469,12 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
    if [ -n "$_board" ]; then
      printf 'warning: guest branch carried board state — restoring project/kanban/ from HEAD\n' >&2
      git checkout HEAD -- project/kanban/ >/dev/null 2>&1 || true
+     _checkout_residue=$(git diff --cached --name-status -- project/kanban/ | grep -v '^A' || true)
+     if [ -n "$_checkout_residue" ]; then
+       printf 'error: landing guard: git checkout could not restore board files from HEAD — landing aborted\n' >&2
+       printf '%s\n' "$_checkout_residue" >&2
+       exit 1
+     fi
      while IFS= read -r _f; do
        git rm --cached -- "$_f" >/dev/null
        rm -f -- "$_f"
