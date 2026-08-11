@@ -413,23 +413,25 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
    `feature → feat`, `bug → fix`, `chore → chore`, `docs → docs`.
 
    ```sh
-   git merge --squash sandbox-guest/<name>
-   _board=$(git diff --cached --name-only -- project/kanban/)
-   if [ -n "$_board" ]; then
-     printf 'warning: guest branch carried board state — restoring project/kanban/ from HEAD\n' >&2
-     git checkout HEAD -- project/kanban/ >/dev/null 2>&1 || true
-     _checkout_residue=$(git diff --cached --name-status -- project/kanban/ | grep -v '^A' || true)
-     if [ -n "$_checkout_residue" ]; then
-       printf 'error: landing guard: git checkout could not restore board files from HEAD — landing aborted\n' >&2
-       printf '%s\n' "$_checkout_residue" >&2
-       exit 1
+   (
+     git merge --squash sandbox-guest/<name>
+     _board=$(git diff --cached --name-only -- project/kanban/)
+     if [ -n "$_board" ]; then
+       printf 'warning: guest branch carried board state — restoring project/kanban/ from HEAD\n' >&2
+       git checkout HEAD -- project/kanban/ >/dev/null 2>&1 || true
+       _checkout_residue=$(git diff --cached --name-status -- project/kanban/ | grep -v '^A' || true)
+       if [ -n "$_checkout_residue" ]; then
+         printf 'error: landing guard: git checkout could not restore board files from HEAD — landing aborted\n' >&2
+         printf '%s\n' "$_checkout_residue" >&2
+         exit 1
+       fi
+       while IFS= read -r _f; do
+         git rm --cached -- "$_f" >/dev/null
+         rm -f -- "$_f"
+       done < <(git diff --cached --name-only -- project/kanban/)
      fi
-     while IFS= read -r _f; do
-       git rm --cached -- "$_f" >/dev/null
-       rm -f -- "$_f"
-     done < <(git diff --cached --name-only -- project/kanban/)
-   fi
-   git commit -m "<type>(<scope>): <card title>"
+     git commit -m "<type>(<scope>): <card title>"
+   )
    ```
 
    `git merge --squash` accumulates every change the branch adds relative to the
@@ -464,24 +466,26 @@ neither or it's ambiguous, ask. The sync layer is always git (the mirror +
    the host between review rounds is preserved, not overwritten:
 
    ```sh
-   git merge --squash sandbox-guest/<name>
-   _board=$(git diff --cached --name-only -- project/kanban/)
-   if [ -n "$_board" ]; then
-     printf 'warning: guest branch carried board state — restoring project/kanban/ from HEAD\n' >&2
-     git checkout HEAD -- project/kanban/ >/dev/null 2>&1 || true
-     _checkout_residue=$(git diff --cached --name-status -- project/kanban/ | grep -v '^A' || true)
-     if [ -n "$_checkout_residue" ]; then
-       printf 'error: landing guard: git checkout could not restore board files from HEAD — landing aborted\n' >&2
-       printf '%s\n' "$_checkout_residue" >&2
-       exit 1
+   (
+     git merge --squash sandbox-guest/<name>
+     _board=$(git diff --cached --name-only -- project/kanban/)
+     if [ -n "$_board" ]; then
+       printf 'warning: guest branch carried board state — restoring project/kanban/ from HEAD\n' >&2
+       git checkout HEAD -- project/kanban/ >/dev/null 2>&1 || true
+       _checkout_residue=$(git diff --cached --name-status -- project/kanban/ | grep -v '^A' || true)
+       if [ -n "$_checkout_residue" ]; then
+         printf 'error: landing guard: git checkout could not restore board files from HEAD — landing aborted\n' >&2
+         printf '%s\n' "$_checkout_residue" >&2
+         exit 1
+       fi
+       while IFS= read -r _f; do
+         git rm --cached -- "$_f" >/dev/null
+         rm -f -- "$_f"
+       done < <(git diff --cached --name-only -- project/kanban/)
      fi
-     while IFS= read -r _f; do
-       git rm --cached -- "$_f" >/dev/null
-       rm -f -- "$_f"
-     done < <(git diff --cached --name-only -- project/kanban/)
-   fi
-   git commit -m "<type>(<scope>): <card title>"
-   jj git import    # let jj pick up the new commit
+     git commit -m "<type>(<scope>): <card title>"
+     jj git import    # let jj pick up the new commit
+   )
    ```
 
    If `git merge --squash` reports a conflict, follow the **Conflict
