@@ -5,6 +5,8 @@ type: bug
 blocked_by: []
 labels: [PDD004, sandbox, dispatch]
 created: 2026-08-11T00:55:34Z
+disposition: accepted
+disposition_at: 2026-08-11T04:13:00Z
 ---
 
 ## What to fix
@@ -156,4 +158,3 @@ Non-blocking findings, filed separately as a cleanup card:
   normally-working agent — as a question, since the tradeoff is real either way.
   Also asked whether B's derived timeout can fire on a turn that is still
   progressing when a project overrides the nudge or stall settings.
-

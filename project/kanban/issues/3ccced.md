@@ -5,6 +5,8 @@ type: bug
 blocked_by: []
 labels: [PDD004, sandbox, dispatch]
 created: 2026-08-10T21:23:58Z
+disposition: accepted
+disposition_at: 2026-08-11T04:13:00Z
 ---
 
 ## What to fix
@@ -120,4 +122,3 @@ Note for future orchestrators: the `LIVENESS` / `WORK` columns in
   rather than judging wording: a docs fix describing runtime behaviour is only
   correct if the behaviour matches. Also asked it to test the `--until-report`
   claim, since that flag is documented elsewhere as now a no-op on some paths.
-

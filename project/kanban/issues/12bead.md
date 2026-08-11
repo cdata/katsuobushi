@@ -5,6 +5,8 @@ type: bug
 blocked_by: []
 labels: [PDD004, landing, board]
 created: 2026-08-10T16:34:04Z
+disposition: accepted
+disposition_at: 2026-08-11T04:13:00Z
 ---
 
 ## What to fix
@@ -230,4 +232,3 @@ the card describes. The newly-added
   634 cited on `3336f8`, which landed immediately before this card was seeded.
   Asked the reviewer to measure the real workspace count and account for the
   difference.
-
