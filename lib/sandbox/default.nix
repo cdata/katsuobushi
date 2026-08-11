@@ -561,7 +561,7 @@ let
     killed — and say which. An agent that ends its turn with work still running
     consumes CPU on a shared host and breaks the concurrency budget for other
     VMs. If a check cannot finish within a turn, stop it and say so rather than
-    leaving it unattended. Your `report done` should state that nothing was left
+    leaving it unattended. Your `report done` must state that nothing was left
     running.
 
     **The guest `/nix/store` is a thin overlay on a large shared read-only
